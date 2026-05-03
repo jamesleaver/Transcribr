@@ -1,0 +1,44 @@
+WHISPER TRANSCRIBER - Installation Guide
+=========================================
+
+To install:
+
+  On a Mac        Open the "macos" folder, double-click "install.command"
+  On Windows      Open the "windows" folder, double-click "install.bat"
+
+The installer will set up everything automatically: Python, ffmpeg,
+Whisper, the application, and Desktop / Start Menu shortcuts.
+
+The first time you run the installer, your operating system may warn
+you that it's from an unidentified developer:
+
+  - On macOS:    Right-click "install.command" -> Open -> Open
+  - On Windows:  Click "More info" -> "Run anyway" if SmartScreen
+                 prompts; or right-click "install.bat" -> "Run as
+                 administrator" only if the standard run does not work.
+
+Total install time: 5-15 minutes depending on internet speed.
+
+For full details, troubleshooting, and uninstall instructions, see
+README.md.
+
+
+-----------------------------------------------------------------
+(c) James Leaver, 2026.
+
+An experimental tool for transcribing audio and video files on macOS
+and Windows. It uses OpenAI's Whisper to do the transcription, then a
+separate script groups the result into likely paragraphs ready for
+speaker assignment and writes a .txt file. Everything runs locally
+on your computer - no audio, video, or transcripts are uploaded to
+the internet.
+
+When a particular model is run for the first time, that model will
+be downloaded to your computer and stored locally. The 'medium.en'
+or 'large-v3-turbo' models are recommended.
+
+Use at your own risk.
+
+Questions: jleaver@sgchambers.com.au
+-----------------------------------------------------------------
+

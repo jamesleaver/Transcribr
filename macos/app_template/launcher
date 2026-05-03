@@ -1,0 +1,39 @@
+#!/bin/bash
+# Transcribr - app launcher
+# This file is the Mac app's executable entry point. It activates the
+# installed venv and starts the GUI script. Paths below are filled in
+# by the installer.
+
+set -uo pipefail
+
+VENV="@VENV@"
+SCRIPT="@SCRIPT@"
+
+# Make Homebrew binaries (especially ffmpeg) visible to the GUI process.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
+
+# If the venv vanished, the user probably needs to re-run the installer.
+if [ ! -f "$VENV/bin/activate" ]; then
+    /usr/bin/osascript -e "display alert \"Transcribr\" message \"The Python environment is missing.\\n\\nPlease re-run the installer.\\n\\nExpected location:\\n$VENV\" as critical"
+    exit 1
+fi
+
+if [ ! -f "$SCRIPT" ]; then
+    /usr/bin/osascript -e "display alert \"Transcribr\" message \"The application script is missing.\\n\\nPlease re-run the installer.\\n\\nExpected location:\\n$SCRIPT\" as critical"
+    exit 1
+fi
+
+# shellcheck disable=SC1091
+source "$VENV/bin/activate"
+
+# Launch detached so the .app process can exit cleanly. Errors get
+# captured to a log file the user can dig out if something goes wrong.
+LOG_DIR="$HOME/Library/Logs/Transcribr"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/launch.log"
+
+{
+    echo "==== $(date) ===="
+    "$VENV/bin/python" "$SCRIPT"
+    echo "GUI exited with status $?"
+} >> "$LOG" 2>&1
