@@ -7,8 +7,11 @@
 #   - Python 3.12 (x64) from python.org
 #   - ffmpeg (via winget, Gyan.FFmpeg)
 #   - A Python venv at %LOCALAPPDATA%\Transcribr\venv
-#   - openai-whisper inside that venv
+#   - openai-whisper inside that venv (reference engine)
+#   - faster-whisper inside that venv (CTranslate2; ~4x faster on CPU)
 #   - Desktop and Start Menu shortcuts to the app
+#
+# (mlx-whisper is not installed on Windows; it's Apple Silicon-only.)
 
 $ErrorActionPreference = 'Stop'
 
@@ -282,7 +285,7 @@ Ok "venv ready"
 
 # ---------- step 4: Whisper -------------------------------------------------
 
-Step 4 5 "openai-whisper (this is the slow step)"
+Step 4 5 "Whisper engines (this is the slow step)"
 
 Info "Upgrading pip..."
 & "$venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
@@ -298,7 +301,22 @@ if ($LASTEXITCODE -ne 0) { Fail "openai-whisper / python-docx install failed" }
 # Verify whisper imports
 & "$venv\Scripts\python.exe" -c "import whisper" 2>$null
 if ($LASTEXITCODE -ne 0) { Fail "whisper import test failed" }
-Ok "whisper installed"
+Ok "openai-whisper installed"
+
+# faster-whisper - CTranslate2-based engine. Best CPU-only speed; also
+# uses CUDA if a compatible GPU is present. Wheels exist for x64 Windows.
+Info "Installing faster-whisper..."
+& "$venv\Scripts\python.exe" -m pip install --upgrade faster-whisper
+if ($LASTEXITCODE -ne 0) {
+    Warn "faster-whisper install failed - the app will still run, but only the OpenAI engine will be available."
+} else {
+    & "$venv\Scripts\python.exe" -c "import faster_whisper" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Warn "faster-whisper import check failed; it will not be offered in the app."
+    } else {
+        Ok "faster-whisper installed"
+    }
+}
 
 # ---------- step 5: Application files, launcher, shortcuts ------------------
 

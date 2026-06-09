@@ -10,7 +10,10 @@
 #   - ffmpeg (via Homebrew)
 #   - python-tk@3.12 (Tk bindings for Python 3.12)
 #   - A Python virtualenv at ~/Library/Application Support/Transcribr/venv
-#   - openai-whisper inside that venv
+#   - Three Whisper engines inside that venv:
+#       * openai-whisper (reference; needed on all systems)
+#       * faster-whisper (CTranslate2-based; ~4x faster on CPU)
+#       * mlx-whisper    (Apple Silicon only; uses the Mac's GPU/ANE)
 #   - /Applications/Transcribr.app (a thin launcher)
 #
 # Total disk usage: ~500MB - 2GB depending on what is already installed
@@ -165,13 +168,12 @@ ok "venv ready"
 
 # ---------- Whisper --------------------------------------------------------
 
-step "Step 4/6: openai-whisper (this is the slow step)"
+step "Step 4/6: Whisper engines (this is the slow step)"
 
 info "Upgrading pip..."
 "$VENV/bin/pip" install --upgrade pip --quiet \
     || fail "pip upgrade failed"
 
-info "Installing openai-whisper (downloads PyTorch, ~1.5GB)..."
 # Pin openai-whisper >= 20250625; older releases use the removed
 # pkg_resources module, which is gone in setuptools 81+.
 #
@@ -184,9 +186,6 @@ info "Installing openai-whisper (downloads PyTorch, ~1.5GB)..."
 # well-formed older value, which both lets clang accept it AND nudges pip
 # toward downloading the available pre-built wheels rather than building
 # from source.
-#
-# We also pass --prefer-binary explicitly to make wheel preference
-# unambiguous regardless of pip version.
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
 # Intel Macs are stuck on torch 2.2.2 because PyTorch stopped publishing
@@ -200,6 +199,8 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 # On Apple Silicon (arm64), the latest torch ships fine and the whole
 # stack works with numpy 2.x. So we only apply the constraints on Intel.
 ARCH=$("$VENV/bin/python" -c "import platform; print(platform.machine())")
+
+info "Installing openai-whisper (downloads PyTorch, ~1.5GB)..."
 if [ "$ARCH" = "x86_64" ]; then
     info "Intel Mac detected; pinning torch/numpy/numba versions for compatibility"
     "$VENV/bin/pip" install --upgrade --prefer-binary \
@@ -215,7 +216,66 @@ fi
 # Verify whisper imports cleanly.
 "$VENV/bin/python" -c "import whisper; print('    whisper version:', whisper.__version__ if hasattr(whisper, '__version__') else 'OK')" \
     || fail "whisper import test failed"
-ok "whisper installed"
+ok "openai-whisper installed"
+
+# faster-whisper - CTranslate2-based engine, ~4x faster on CPU than the
+# reference. Cross-platform via ctranslate2 wheels.
+info "Installing faster-whisper..."
+"$VENV/bin/pip" install --upgrade --prefer-binary faster-whisper \
+    || warn "faster-whisper install failed - the app will run, but only \
+the OpenAI engine will be available."
+
+"$VENV/bin/python" -c "import faster_whisper" 2>/dev/null \
+    && ok "faster-whisper installed" \
+    || warn "faster-whisper import check failed; it will not be offered \
+in the app."
+
+# mlx-whisper - Apple's MLX framework. Apple Silicon only, requires
+# macOS 13.5+. The Python package depends on `mlx`, which is what
+# actually talks to the GPU/Neural Engine. We install both, then verify
+# both import. If either fails to import we uninstall the dist-info so
+# the app doesn't offer mlx in its engine dropdown (Transcribr probes
+# packages via find_spec, which would otherwise see broken metadata and
+# show mlx as available).
+if [ "$ARCH" = "arm64" ]; then
+    MACOS_VERSION=$(sw_vers -productVersion)
+    MACOS_MAJOR=$(echo "$MACOS_VERSION" | cut -d. -f1)
+    MACOS_MINOR=$(echo "$MACOS_VERSION" | cut -d. -f2)
+    MACOS_MINOR=${MACOS_MINOR:-0}
+    # mlx refuses to import on macOS < 13.5. Skip cleanly, AND scrub any
+    # existing broken install so the app's Engine dropdown stops
+    # offering it (find_spec sees the dist-info but the import would
+    # raise on this OS).
+    if [ "$MACOS_MAJOR" -lt 13 ] \
+       || { [ "$MACOS_MAJOR" -eq 13 ] && [ "$MACOS_MINOR" -lt 5 ]; }; then
+        warn "macOS version is $MACOS_VERSION; mlx requires 13.5+. \
+Skipping mlx install."
+        if "$VENV/bin/pip" show mlx >/dev/null 2>&1 \
+           || "$VENV/bin/pip" show mlx-whisper >/dev/null 2>&1; then
+            info "Removing previously-installed mlx / mlx-whisper so \
+the app stops offering it."
+            "$VENV/bin/pip" uninstall -y mlx-whisper mlx \
+                >/dev/null 2>&1 || true
+        fi
+    else
+        info "Installing mlx + mlx-whisper (Apple Silicon GPU/Neural \
+Engine)..."
+        if "$VENV/bin/pip" install --upgrade --prefer-binary mlx mlx-whisper; then
+            if "$VENV/bin/python" -c "import mlx_whisper" 2>/dev/null \
+               && "$VENV/bin/python" -c "import mlx" 2>/dev/null; then
+                ok "mlx-whisper installed"
+            else
+                warn "mlx or mlx-whisper imports failed after install."
+                info "Removing broken install so the app doesn't offer it."
+                "$VENV/bin/pip" uninstall -y mlx-whisper mlx >/dev/null 2>&1 || true
+            fi
+        else
+            warn "mlx-whisper install failed - the app will run without it."
+        fi
+    fi
+else
+    info "Intel Mac: skipping mlx-whisper (Apple Silicon only)."
+fi
 
 # ---------- copy GUI script ------------------------------------------------
 
