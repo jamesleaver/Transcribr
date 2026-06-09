@@ -15,7 +15,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -241,6 +241,36 @@ def _recent_add(path):
     items = [p for p in items if p != path]
     items.insert(0, path)
     _recent_save(items)
+
+
+def _settings_file():
+    return _config_dir() / "settings.json"
+
+
+def _settings_load():
+    """Return the saved UI settings dict, or {} on any read/parse error."""
+    try:
+        import json
+        path = _settings_file()
+        if not path.exists():
+            return {}
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _settings_save(settings):
+    """Persist the UI settings dict. Best-effort; logs on failure."""
+    try:
+        import json
+        with open(_settings_file(), "w", encoding="utf-8") as fh:
+            json.dump(dict(settings), fh, indent=2)
+    except Exception as e:
+        _log(f"Could not write settings.json: {e}")
 
 
 def _set_window_icon(root):
@@ -863,6 +893,36 @@ class _CancelledByUser(Exception):
     pass
 
 
+def _extract_word_conf(result):
+    """Flatten per-word (start, end, word, probability) tuples from a
+    Whisper-style result dict. Returns [] when no word-level data is present
+    (i.e. word timestamps weren't requested). Tolerant of missing keys so it
+    works across the openai-whisper, faster-whisper and mlx-whisper result
+    shapes (all of which expose segment['words'] as dicts after we
+    normalise faster-whisper's objects)."""
+    if not result:
+        return []
+    out = []
+    for seg in result.get("segments", []):
+        if not isinstance(seg, dict):
+            continue
+        for w in seg.get("words") or []:
+            try:
+                start = float(w.get("start"))
+                end = float(w.get("end"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            text = (w.get("word") or "") if isinstance(w, dict) else ""
+            prob = w.get("probability") if isinstance(w, dict) else None
+            try:
+                prob = float(prob) if prob is not None else None
+            except (TypeError, ValueError):
+                prob = None
+            if text.strip():
+                out.append((start, end, text, prob))
+    return out
+
+
 def transcribe_worker(params, q, cancel_event):
     """Background-thread entry point. Dispatches to the chosen engine's
     runner, then handles the common post-processing: paragraphify, review-
@@ -902,6 +962,8 @@ def transcribe_worker(params, q, cancel_event):
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if params.get("review_before_save"):
+        word_conf = (_extract_word_conf(result)
+                     if params.get("highlight_confidence") else None)
         q.put((
             "paragraphs_ready",
             {
@@ -913,6 +975,7 @@ def transcribe_worker(params, q, cancel_event):
                 "used_partial": used_partial,
                 "result": result if not used_partial else None,
                 "extra_formats": params.get("extra_formats") or [],
+                "word_conf": word_conf,
             },
         ))
         return
@@ -1124,6 +1187,7 @@ def _run_faster_whisper(params, q, cancel_event):
 
     audio_duration = params.get("audio_duration")
     captured = []
+    seg_dicts = []
     used_partial = False
 
     segments_iter, info = model.transcribe(params["input"], **kwargs)
@@ -1143,6 +1207,15 @@ def _run_faster_whisper(params, q, cancel_event):
         start = float(seg.start)
         end = float(seg.end)
         captured.append((start, end, text))
+        # Normalise faster-whisper's Word objects to the dict shape the rest
+        # of the code (extra-format writers, _extract_word_conf) expects.
+        seg_words = [
+            {"word": w.word, "start": w.start, "end": w.end,
+             "probability": getattr(w, "probability", None)}
+            for w in (getattr(seg, "words", None) or [])
+        ]
+        seg_dicts.append(
+            {"start": start, "end": end, "text": text, "words": seg_words})
         q.put(("log",
                f"[{format_timestamp(start)} --> {format_timestamp(end)}]  "
                f"{text}\n"))
@@ -1163,12 +1236,10 @@ def _run_faster_whisper(params, q, cancel_event):
     if not used_partial:
         q.put(("log", f"\n  transcribed in {time.time() - t0:.1f}s\n\n"))
 
-    # Build a whisper-compatible result for the extra-format writers.
+    # Build a whisper-compatible result for the extra-format writers and the
+    # word-confidence extractor.
     result = {
-        "segments": [
-            {"start": s, "end": e, "text": t}
-            for s, e, t in captured
-        ],
+        "segments": seg_dicts,
         "language": getattr(info, "language", None)
                     or params.get("language") or "",
     }
@@ -2857,11 +2928,17 @@ class ReviewPaneText(ttk.Frame):
     BODY_TAB_PX = 220
 
     def __init__(self, parent, paragraphs, *, on_save, on_cancel,
-                 show_timestamp=True, loaded=False, on_save_revision=None):
+                 show_timestamp=True, loaded=False, on_save_revision=None,
+                 word_conf=None):
         super().__init__(parent)
         self.paragraphs = list(paragraphs)
         self.speakers = [None] * len(self.paragraphs)
         self.speaker_names = dict(self.DEFAULT_NAMES)
+        # Flat, time-ordered list of (start, end, word, probability) tuples
+        # from the engine when word timestamps were captured; None if not
+        # available (e.g. loaded transcripts). Used to shade low-confidence
+        # words. See _words_for_paragraph / _shade_low_confidence.
+        self.word_conf = list(word_conf) if word_conf else None
         # How many speaker-name fields are currently shown. Grows on demand.
         self.visible_speakers = self.DEFAULT_VISIBLE
         self.show_timestamp = show_timestamp
@@ -2874,6 +2951,16 @@ class ReviewPaneText(ttk.Frame):
         # Edit mode unlocks typing inside that paragraph's body range.
         self.editing_idx = None
         self._edit_original = None  # snapshot of body text for cancel
+
+        # Undo/redo stacks of state snapshots (see _snapshot).
+        self._undo_stack = []
+        self._redo_stack = []
+        self._UNDO_LIMIT = 200
+        # Whether low-confidence shading is currently on. Only meaningful
+        # when word_conf is available.
+        self.show_confidence = bool(self.word_conf)
+        # Search cursor (a Text index) for repeated Find-next.
+        self._search_from = "1.0"
 
         self._build_ui()
         self._render_all()
@@ -2910,6 +2997,10 @@ class ReviewPaneText(ttk.Frame):
         self.names_frame.pack(fill="x", padx=10, pady=4)
         self.name_vars = {}
         self._build_names_editor()
+
+        # Editing toolbar: undo/redo + find & replace + (when available)
+        # the low-confidence shading toggle.
+        self._build_toolbar()
 
         # The big Text + scrollbar
         body_frame = ttk.LabelFrame(self, text="Transcript", padding=4)
@@ -2955,13 +3046,22 @@ class ReviewPaneText(ttk.Frame):
             font=("Courier", 9), foreground="#777",
         )
         self.text.tag_configure("body_text")
+        # Low-confidence word shading (two tiers). Configured always; only
+        # applied when word_conf is present and shading is enabled.
+        self.text.tag_configure("conf_low", background="#ffd2d2")    # <0.35
+        self.text.tag_configure("conf_med", background="#ffe9c7")    # <0.6
         self.text.tag_configure("selected", background=self.SELECTED_BG)
         self.text.tag_configure("editing", background=self.EDITING_BG)
+        # Find-next highlight.
+        self.text.tag_configure("search", background="#ffe066")
         for letter, color in self.SPEAKER_COLOURS.items():
             self.text.tag_configure(f"sbg_{letter}", background=color)
-        # Tag priority: editing > selected > speaker bg.
+        # Tag priority: search > editing > selected > confidence > speaker bg.
+        self.text.tag_raise("conf_med")
+        self.text.tag_raise("conf_low")
         self.text.tag_raise("selected")
         self.text.tag_raise("editing")
+        self.text.tag_raise("search")
 
         # Help line
         ttk.Label(
@@ -2969,7 +3069,8 @@ class ReviewPaneText(ttk.Frame):
             text=(
                 "Click a paragraph to select  ·  Up/Down navigate  ·  "
                 "1-9 set speaker  ·  0 clear  ·  M merge with previous  ·  "
-                "Double-click a word to split  ·  Enter to edit text"
+                "Double-click a word to split  ·  Enter to edit text  ·  "
+                "Ctrl+Z undo / Ctrl+Shift+Z redo  ·  Ctrl+F find"
             ),
             foreground="gray",
         ).pack(fill="x", padx=10, pady=(2, 4))
@@ -3004,6 +3105,69 @@ class ReviewPaneText(ttk.Frame):
         self.text.bind("<KeyRelease>", self._on_key_release)
         self.text.bind("<<Paste>>", self._on_text_paste_or_cut)
         self.text.bind("<<Cut>>", self._on_text_paste_or_cut)
+        # Undo/redo and find. Bind both Control (Win/Linux) and Command
+        # (macOS) so the natural shortcut works on every platform.
+        for seq in ("<Control-z>", "<Command-z>"):
+            self.text.bind(seq, self._undo)
+        for seq in ("<Control-y>", "<Command-y>",
+                    "<Control-Shift-Z>", "<Command-Shift-Z>",
+                    "<Control-Shift-z>", "<Command-Shift-z>"):
+            self.text.bind(seq, self._redo)
+        for seq in ("<Control-f>", "<Command-f>"):
+            self.text.bind(seq, self._focus_find)
+
+    def _build_toolbar(self):
+        """Undo/redo + find & replace controls, shown above the transcript."""
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=10, pady=(0, 2))
+
+        self.undo_btn = ttk.Button(bar, text="Undo", width=6,
+                                   command=self._undo, state="disabled")
+        self.undo_btn.pack(side="left")
+        self.redo_btn = ttk.Button(bar, text="Redo", width=6,
+                                   command=self._redo, state="disabled")
+        self.redo_btn.pack(side="left", padx=(4, 0))
+
+        ttk.Separator(bar, orient="vertical").pack(
+            side="left", fill="y", padx=8)
+
+        ttk.Label(bar, text="Find:").pack(side="left")
+        self.find_var = tk.StringVar()
+        self.find_var.trace_add("write", lambda *_: self._reset_search())
+        find_entry = ttk.Entry(bar, textvariable=self.find_var, width=16)
+        find_entry.pack(side="left", padx=(4, 6))
+        find_entry.bind("<Return>", self._find_next)
+        self._find_entry = find_entry
+
+        ttk.Label(bar, text="Replace:").pack(side="left")
+        self.replace_var = tk.StringVar()
+        replace_entry = ttk.Entry(bar, textvariable=self.replace_var, width=16)
+        replace_entry.pack(side="left", padx=(4, 6))
+        replace_entry.bind("<Return>", lambda _e: self._replace_all())
+
+        ttk.Button(bar, text="Find next",
+                   command=self._find_next).pack(side="left")
+        ttk.Button(bar, text="Replace all",
+                   command=self._replace_all).pack(side="left", padx=(4, 0))
+
+        self.find_case_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="Match case",
+                        variable=self.find_case_var,
+                        command=self._reset_search).pack(side="left", padx=(8, 0))
+
+        self.find_status_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.find_status_var,
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
+        # Low-confidence shading toggle, only meaningful when we have
+        # per-word confidence data.
+        if self.word_conf:
+            self.confidence_toggle_var = tk.BooleanVar(value=self.show_confidence)
+            ttk.Checkbutton(
+                bar, text="Shade low-confidence words",
+                variable=self.confidence_toggle_var,
+                command=self._toggle_confidence,
+            ).pack(side="right")
 
     def _build_names_editor(self):
         """(Re)populate the speaker-name editor with one labelled entry per
@@ -3056,6 +3220,205 @@ class ReviewPaneText(ttk.Frame):
             self.visible_speakers = n
             self._build_names_editor()
 
+    # ----- Undo / redo -----------------------------------------------------
+
+    def _snapshot(self):
+        """A cheap, restorable snapshot of all mutable document state.
+        Paragraph segments are immutable tuples, so copying the list-of-lists
+        one level deep is sufficient."""
+        return {
+            "paragraphs": [list(p) for p in self.paragraphs],
+            "speakers": list(self.speakers),
+            "speaker_names": dict(self.speaker_names),
+            "visible_speakers": self.visible_speakers,
+            "selected_idx": self.selected_idx,
+        }
+
+    def _push_undo(self):
+        """Record the current state for undo and clear the redo stack.
+        Call this immediately before any mutating operation."""
+        self._undo_stack.append(self._snapshot())
+        if len(self._undo_stack) > self._UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_buttons()
+
+    def _restore(self, snap):
+        self.paragraphs = [list(p) for p in snap["paragraphs"]]
+        self.speakers = list(snap["speakers"])
+        self.speaker_names = dict(snap["speaker_names"])
+        self.visible_speakers = snap["visible_speakers"]
+        self.selected_idx = snap["selected_idx"]
+        if self.selected_idx is not None and self.paragraphs:
+            self.selected_idx = max(0, min(self.selected_idx,
+                                           len(self.paragraphs) - 1))
+        elif not self.paragraphs:
+            self.selected_idx = None
+        # Rebuilds the editor with name_vars initialised from speaker_names.
+        self._build_names_editor()
+        self._render_all()
+        self._update_highlight(scroll_into_view=True)
+
+    def _undo(self, event=None):
+        # Don't undo mid-edit; require the user to commit/cancel first.
+        if self.editing_idx is not None or not self._undo_stack:
+            return "break"
+        self._redo_stack.append(self._snapshot())
+        self._restore(self._undo_stack.pop())
+        self._update_undo_buttons()
+        return "break"
+
+    def _redo(self, event=None):
+        if self.editing_idx is not None or not self._redo_stack:
+            return "break"
+        self._undo_stack.append(self._snapshot())
+        self._restore(self._redo_stack.pop())
+        self._update_undo_buttons()
+        return "break"
+
+    def _update_undo_buttons(self):
+        if not hasattr(self, "undo_btn"):
+            return
+        self.undo_btn.config(
+            state="normal" if self._undo_stack else "disabled")
+        self.redo_btn.config(
+            state="normal" if self._redo_stack else "disabled")
+
+    # ----- Find & replace --------------------------------------------------
+
+    def _focus_find(self, event=None):
+        try:
+            self._find_entry.focus_set()
+            self._find_entry.selection_range(0, "end")
+        except (tk.TclError, AttributeError):
+            pass
+        return "break"
+
+    def _reset_search(self, *_):
+        """Forget where Find-next was up to (the term or case option
+        changed) and clear any existing match highlight."""
+        self._search_from = "1.0"
+        try:
+            self.text.tag_remove("search", "1.0", "end")
+        except tk.TclError:
+            pass
+        self.find_status_var.set("")
+
+    def _find_next(self, event=None):
+        term = self.find_var.get()
+        if not term:
+            return "break"
+        nocase = 0 if self.find_case_var.get() else 1
+        self.text.tag_remove("search", "1.0", "end")
+        countv = tk.IntVar()
+        idx = self.text.search(term, self._search_from, stopindex="end",
+                               nocase=nocase, count=countv)
+        wrapped = False
+        if not idx:
+            idx = self.text.search(term, "1.0", stopindex="end",
+                                   nocase=nocase, count=countv)
+            wrapped = True
+        if not idx:
+            self.find_status_var.set("Not found")
+            return "break"
+        end = f"{idx}+{countv.get()}c"
+        self.text.tag_add("search", idx, end)
+        self.text.see(idx)
+        self._search_from = end
+        self.find_status_var.set("Wrapped" if wrapped else "")
+        return "break"
+
+    def _replace_all(self):
+        term = self.find_var.get()
+        if not term:
+            return
+        repl = self.replace_var.get()
+        flags = 0 if self.find_case_var.get() else re.IGNORECASE
+        pattern = re.compile(re.escape(term), flags)
+
+        # Count first so we can avoid a pointless snapshot/re-render.
+        total = sum(pattern.subn(lambda _m: repl, seg[2])[1]
+                    for para in self.paragraphs for seg in para)
+        if total == 0:
+            self.find_status_var.set("No matches")
+            return
+
+        self._push_undo()
+        for para in self.paragraphs:
+            for k, seg in enumerate(para):
+                new_text, n = pattern.subn(lambda _m: repl, seg[2])
+                if n:
+                    para[k] = (seg[0], seg[1], new_text)
+        self._reset_search()
+        self._render_all()
+        self._update_highlight(scroll_into_view=False)
+        self.find_status_var.set(f"Replaced {total}")
+
+    # ----- Confidence shading ----------------------------------------------
+
+    def _toggle_confidence(self):
+        self.show_confidence = bool(self.confidence_toggle_var.get())
+        self._render_all()
+        self._update_highlight(scroll_into_view=False)
+
+    def _bucket_words_by_paragraph(self):
+        """Partition the flat word_conf list into one list of (word, prob)
+        per paragraph, using each paragraph's end time as the boundary.
+        Both paragraphs and words are time-ordered, so a single forward
+        pass suffices. Robust to edits/splits/merges because paragraph
+        times stay monotonic."""
+        buckets = [[] for _ in self.paragraphs]
+        words = self.word_conf or []
+        nW = len(words)
+        wi = 0
+        n_para = len(self.paragraphs)
+        for i, para in enumerate(self.paragraphs):
+            if not para:
+                continue
+            p_end = para[-1][1]
+            is_last = (i == n_para - 1)
+            while wi < nW:
+                w_start = words[wi][0]
+                if not is_last and w_start >= p_end:
+                    break
+                buckets[i].append((words[wi][2], words[wi][3]))
+                wi += 1
+        return buckets
+
+    def _shade_paragraph(self, i, body, words_i):
+        """Tag low-confidence words within paragraph i's rendered body.
+
+        Walks the paragraph's words in order, locating each in the body
+        string from a moving cursor (so repeated words match the right
+        occurrence). On any alignment drift - e.g. the paragraph was edited
+        so its text no longer matches the captured words - we bail out and
+        leave the paragraph unshaded rather than mis-highlight."""
+        if not words_i:
+            return
+        base = f"txt_{i}_start"
+        cursor = 0
+        for wtext, prob in words_i:
+            token = (wtext or "").strip()
+            if not token:
+                continue
+            pos = body.find(token, cursor)
+            if pos < 0:
+                return  # alignment lost; skip the rest of this paragraph
+            cursor = pos + len(token)
+            if prob is None:
+                continue
+            if prob < 0.35:
+                tag = "conf_low"
+            elif prob < 0.6:
+                tag = "conf_med"
+            else:
+                continue
+            try:
+                self.text.tag_add(
+                    tag, f"{base} +{pos}c", f"{base} +{cursor}c")
+            except tk.TclError:
+                return
+
     # ----- Rendering -------------------------------------------------------
 
     def _render_all(self, *, anchor_idx=None):
@@ -3086,6 +3449,10 @@ class ReviewPaneText(ttk.Frame):
         for m in list(self.text.mark_names()):
             if m.startswith(("blk_", "txt_")):
                 self.text.mark_unset(m)
+
+        # Per-paragraph word lists for low-confidence shading, computed once.
+        para_words = (self._bucket_words_by_paragraph()
+                      if (self.show_confidence and self.word_conf) else None)
 
         last_speaker = None
         for i, para in enumerate(self.paragraphs):
@@ -3123,6 +3490,10 @@ class ReviewPaneText(ttk.Frame):
 
             body_text = " ".join(seg[2] for seg in para).strip()
             self.text.insert("end", body_text, ("row", "body_text"))
+
+            # Shade low-confidence words within the body (if enabled).
+            if para_words is not None:
+                self._shade_paragraph(i, body_text, para_words[i])
 
             # Trailing newline ends the row's last visual line. It carries
             # the row tag so the speaker bg (added below) fills the line
@@ -3397,6 +3768,7 @@ class ReviewPaneText(ttk.Frame):
             return
         if self.selected_idx is None:
             return
+        self._push_undo()
         anchor = self.selected_idx
         self.speakers[self.selected_idx] = letter
         # If the user assigned a speaker whose name field isn't visible yet
@@ -3419,6 +3791,7 @@ class ReviewPaneText(ttk.Frame):
         i = self.selected_idx
         if i is None or i == 0:
             return
+        self._push_undo()
         self.paragraphs[i - 1] = list(self.paragraphs[i - 1]) + list(self.paragraphs[i])
         del self.paragraphs[i]
         del self.speakers[i]
@@ -3495,6 +3868,9 @@ class ReviewPaneText(ttk.Frame):
             # Treat empty as cancel - preserve the original paragraph.
             self._cancel_edit()
             return
+        # Only record an undo step if the text actually changed.
+        if new_text != (self._edit_original or "").strip():
+            self._push_undo()
         para = self.paragraphs[idx]
         if para:
             start_t = para[0][0]
@@ -3569,6 +3945,7 @@ class ReviewPaneText(ttk.Frame):
         if not first or not second:
             return
 
+        self._push_undo()
         existing_speaker = self.speakers[idx]
         self.paragraphs[idx] = first
         self.paragraphs.insert(idx + 1, second)
@@ -3635,8 +4012,10 @@ class WhisperGUI:
     def __init__(self, root):
         self.root = root
         self.root.title(f"Transcribr {__version__}")
-        self.root.geometry("900x1020")
-        self.root.minsize(700, 800)
+        # The tabbed layout is far more compact than the old stacked one, so
+        # the window can be shorter; the progress log takes the slack.
+        self.root.geometry("900x780")
+        self.root.minsize(700, 620)
 
         self.queue: "queue.Queue" = queue.Queue()
         self.worker = None
@@ -3684,13 +4063,35 @@ class WhisperGUI:
         self.main_frame.pack(fill="both", expand=True)
         main = self.main_frame
 
-        self._build_file_section(main)
-        self._build_queue_section(main)
-        self._build_model_section(main)
-        self._build_prompt_section(main)
-        self._build_paragraph_section(main)
-        self._build_extra_outputs_section(main)
-        self._build_advanced_section(main)
+        # Settings are grouped into tabs to keep the window compact. The
+        # notebook holds the input/options; the Run controls, status line,
+        # progress log and bottom buttons live below it so they stay visible
+        # whichever tab is selected.
+        notebook = ttk.Notebook(main)
+        notebook.pack(fill="x", pady=(0, 8))
+
+        file_tab = ttk.Frame(notebook, padding=8)
+        model_tab = ttk.Frame(notebook, padding=8)
+        advanced_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(file_tab, text="File")
+        notebook.add(model_tab, text="Model")
+        notebook.add(advanced_tab, text="Advanced")
+
+        # File tab: input/output file + batch queue.
+        self._build_file_section(file_tab)
+        self._build_queue_section(file_tab)
+
+        # Model tab: engine/model/language, the description prompt, and
+        # paragraph-grouping / review options.
+        self._build_model_section(model_tab)
+        self._build_prompt_section(model_tab)
+        self._build_paragraph_section(model_tab)
+
+        # Advanced tab: extra output formats and decoding parameters.
+        self._build_extra_outputs_section(advanced_tab)
+        self._build_advanced_section(advanced_tab)
+
+        # Always-visible controls below the notebook.
         self._build_run_section(main)
         self._build_log_section(main)
         self._build_bottom_section(main)
@@ -3699,6 +4100,10 @@ class WhisperGUI:
         self.review_pane = None
         # Stashed paragraphs_ready info so the save callback knows what to write.
         self._pending_review_info = None
+
+        # Restore saved settings, then start persisting on close.
+        self._apply_settings(_settings_load())
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_file_section(self, parent):
         f = ttk.LabelFrame(parent, text="File", padding=8)
@@ -3992,6 +4397,17 @@ class WhisperGUI:
                         variable=self.word_ts_var).grid(
             row=3, column=3, columnspan=3, sticky="w", pady=(6, 0))
 
+        # Highlighting low-confidence words in the review pane needs the
+        # per-word probabilities, which only come with word timestamps - so
+        # ticking this implicitly enables them for the run.
+        self.confidence_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="Highlight low-confidence words in review "
+                 "(enables word timestamps; a little slower)",
+            variable=self.confidence_var,
+        ).grid(row=4, column=0, columnspan=6, sticky="w", pady=(6, 0))
+
     def _build_run_section(self, parent):
         f = ttk.Frame(parent)
         f.pack(fill="x", pady=(0, 8))
@@ -4026,6 +4442,106 @@ class WhisperGUI:
         self.output_text = scrolledtext.ScrolledText(
             f, height=12, wrap="word", state="disabled")
         self.output_text.pack(fill="both", expand=True)
+
+    # ----- Settings persistence ----------------------------------------------
+
+    def _collect_settings(self):
+        """Snapshot the current UI settings into a JSON-serialisable dict."""
+        try:
+            s = {
+                "engine": self.engine_var.get(),
+                "model": self.model_var.get(),
+                "language": self.language_var.get(),
+                "task": self.task_var.get(),
+                "output_format": self.output_format_var.get(),
+                "prompt": self.prompt_text.get("1.0", "end-1c"),
+                "gap": self.gap_var.get(),
+                "show_timestamp": self.show_timestamp_var.get(),
+                "review": self.review_var.get(),
+                "temperature": self.temperature_var.get(),
+                "beam_size": self.beam_size_var.get(),
+                "best_of": self.best_of_var.get(),
+                "compression_ratio_threshold": self.compression_var.get(),
+                "logprob_threshold": self.logprob_var.get(),
+                "no_speech_threshold": self.no_speech_var.get(),
+                "condition_on_previous_text": self.condition_var.get(),
+                "word_timestamps": self.word_ts_var.get(),
+                "extra_json": self.extra_json_var.get(),
+                "extra_srt": self.extra_srt_var.get(),
+                "extra_vtt": self.extra_vtt_var.get(),
+                "extra_tsv": self.extra_tsv_var.get(),
+            }
+            if hasattr(self, "confidence_var"):
+                s["highlight_confidence"] = self.confidence_var.get()
+            return s
+        except tk.TclError:
+            return {}
+
+    def _apply_settings(self, s):
+        """Apply a saved settings dict to the UI vars, defensively: unknown
+        or out-of-range values are ignored so a stale/corrupt file can't
+        wedge the app."""
+        if not s:
+            return
+
+        def set_choice(var, key, allowed):
+            v = s.get(key)
+            if isinstance(v, str) and v in allowed:
+                var.set(v)
+
+        def set_num(var, key):
+            v = s.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                try:
+                    var.set(v)
+                except tk.TclError:
+                    pass
+
+        def set_bool(var, key):
+            v = s.get(key)
+            if isinstance(v, bool):
+                var.set(v)
+
+        set_choice(self.engine_var, "engine",
+                   [name for _, name in AVAILABLE_ENGINES])
+        set_choice(self.model_var, "model", list(WHISPER_MODELS))
+        set_choice(self.language_var, "language",
+                   [n for n, _ in LANGUAGES])
+        set_choice(self.task_var, "task", ["transcribe", "translate"])
+        set_choice(self.output_format_var, "output_format", ["txt", "docx"])
+
+        prompt = s.get("prompt")
+        if isinstance(prompt, str) and prompt:
+            try:
+                self.prompt_text.delete("1.0", "end")
+                self.prompt_text.insert("1.0", prompt)
+            except tk.TclError:
+                pass
+
+        set_num(self.gap_var, "gap")
+        set_bool(self.show_timestamp_var, "show_timestamp")
+        set_bool(self.review_var, "review")
+        set_num(self.temperature_var, "temperature")
+        set_num(self.beam_size_var, "beam_size")
+        set_num(self.best_of_var, "best_of")
+        set_num(self.compression_var, "compression_ratio_threshold")
+        set_num(self.logprob_var, "logprob_threshold")
+        set_num(self.no_speech_var, "no_speech_threshold")
+        set_bool(self.condition_var, "condition_on_previous_text")
+        set_bool(self.word_ts_var, "word_timestamps")
+        set_bool(self.extra_json_var, "extra_json")
+        set_bool(self.extra_srt_var, "extra_srt")
+        set_bool(self.extra_vtt_var, "extra_vtt")
+        set_bool(self.extra_tsv_var, "extra_tsv")
+        if hasattr(self, "confidence_var"):
+            set_bool(self.confidence_var, "highlight_confidence")
+
+    def _save_settings(self):
+        _settings_save(self._collect_settings())
+
+    def _on_close(self):
+        self._save_settings()
+        self.root.destroy()
 
     def _build_bottom_section(self, parent):
         f = ttk.Frame(parent)
@@ -4214,7 +4730,10 @@ class WhisperGUI:
             logprob_threshold=self.logprob_var.get(),
             no_speech_threshold=self.no_speech_var.get(),
             condition_on_previous_text=self.condition_var.get(),
-            word_timestamps=self.word_ts_var.get(),
+            # Confidence highlighting requires word timestamps, so enable
+            # them whenever either option is ticked.
+            word_timestamps=self.word_ts_var.get() or self.confidence_var.get(),
+            highlight_confidence=self.confidence_var.get(),
             initial_prompt=description or None,
             title=description or None,
             gap=self.gap_var.get(),
@@ -4226,6 +4745,9 @@ class WhisperGUI:
         )
 
     def _on_run(self):
+        # Persist the current settings at the start of every run so they
+        # survive even if the app is later force-quit or crashes.
+        self._save_settings()
         # If the batch queue has files, run them all unattended. Otherwise
         # fall back to the single Input-file flow (which can pause for
         # interactive review).
@@ -4586,14 +5108,20 @@ class WhisperGUI:
         loaded = bool(info.get("loaded"))
         pane_cls = (ReviewPaneText if REVIEW_PANE_STYLE == "text"
                     else ReviewPane)
-        self.review_pane = pane_cls(
-            self.root,
-            info["paragraphs"],
+        pane_kwargs = dict(
             on_save=self._on_review_save,
             on_cancel=self._on_review_cancel,
             show_timestamp=info.get("show_timestamp", True),
             loaded=loaded,
             on_save_revision=self._on_review_save_revision if loaded else None,
+        )
+        # Only the single-Text pane knows how to shade word confidence.
+        if pane_cls is ReviewPaneText:
+            pane_kwargs["word_conf"] = info.get("word_conf")
+        self.review_pane = pane_cls(
+            self.root,
+            info["paragraphs"],
+            **pane_kwargs,
         )
         self.review_pane.pack(fill="both", expand=True)
 
