@@ -1,33 +1,38 @@
 #!/usr/bin/env python3
 """
-Transcribr - GUI for transcribing audio/video files with Whisper
-and grouping the result into paragraphs ready for speaker assignment.
+Transcribr - GUI for transcribing audio/video files with Whisper,
+grouping the result into paragraphs, and reviewing/labelling speakers.
 
-(c) James Leaver, 2026. This software is experimental. It relies on
-OpenAI's Whisper to transcribe audio and then a separate script to parse
-the text into likely paragraphs. It will output a .txt file. It does
-those things locally on your computer. When a particular model is run
-for the first time, that model will be downloaded to your computer and
-stored locally. The 'medium.en' or 'large-v3-turbo' models are
-recommended. Use at your own risk. Questions: jleaver@sgchambers.com.au.
+(c) James Leaver, 2026. This software is experimental. Everything runs
+locally on your computer: a Whisper engine (openai-whisper,
+faster-whisper, or mlx-whisper) transcribes the audio, the result is
+grouped into paragraphs, and a review pane lets you label speakers,
+edit text, and listen back to the source audio before saving as .docx,
+.pdf, or .txt. Several files can be queued and transcribed in one
+unattended batch. When a particular model is run for the first time it
+is downloaded and stored locally; 'medium.en' or 'large-v3-turbo' are
+recommended. Use at your own risk.
+Questions: jleaver@sgchambers.com.au.
 
 Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
     "(c) James Leaver, 2026.\n\n"
-    "This software is experimental. It relies on OpenAI's Whisper to "
-    "transcribe audio and then a separate script to parse the text into "
-    "likely paragraphs. It will output a .txt file. It does those things "
-    "locally on your computer.\n\n"
+    "Transcribr transcribes audio and video with Whisper, groups the "
+    "result into paragraphs, and gives you a review pane to label "
+    "speakers, edit text, and listen back to the source audio before "
+    "saving as Word (.docx), PDF, or plain text. Several files can be "
+    "queued and transcribed in one unattended batch. Everything runs "
+    "locally on your computer - nothing is uploaded.\n\n"
     "When a particular model is run for the first time, that model will "
     "be downloaded to your computer and stored locally. The 'medium.en' "
     "or 'large-v3-turbo' models are recommended.\n\n"
-    "Use at your own risk.\n\n"
+    "This software is experimental. Use at your own risk.\n\n"
     "Questions: jleaver@sgchambers.com.au"
 )
 
@@ -54,6 +59,107 @@ try:
     DND_AVAILABLE = True
 except ImportError:
     DND_AVAILABLE = False
+
+# Modern theming is provided by the optional 'sv-ttk' package (Sun Valley
+# theme) with 'darkdetect' to follow the system light/dark appearance.
+# Without them the app runs with the platform's stock ttk theme, and the
+# light colour palette below still applies to the plain-tk widgets.
+try:
+    import sv_ttk
+except ImportError:
+    sv_ttk = None
+try:
+    import darkdetect
+except ImportError:
+    darkdetect = None
+
+
+# =====================================================================
+# Colour palettes (light / dark)
+# =====================================================================
+#
+# ttk widgets are restyled wholesale by sv-ttk, but plain tk widgets (the
+# transcript Text, the prompt/log text boxes, the batch Listbox, speaker
+# badges, the drop zone) need explicit colours. Everything below reads
+# the active palette via _palette() so a theme switch can re-skin live.
+
+_PALETTES = {
+    "light": {
+        "text_bg": "#ffffff", "text_fg": "#111111", "insert": "#111111",
+        "speaker_fg": "#222222", "timestamp_fg": "#777777",
+        "selected_bg": "#d6d6d6", "editing_bg": "#ffcc80",
+        "search_bg": "#ffe066",
+        "conf_low": "#ffd2d2", "conf_med": "#ffe9c7",
+        "badge_fg": "#111111",
+        "speaker_colours": {
+            "1": "#fff4d6",   # warm yellow
+            "2": "#dfeeff",   # soft blue
+            "3": "#e3f4d8",   # soft green
+            "4": "#f9d9e7",   # soft pink
+            "5": "#e7ddf6",   # lavender
+            "6": "#ffe0c2",   # peach
+            "7": "#d3f0ee",   # teal
+            "8": "#f0e4c8",   # tan
+            "9": "#d9e8c0",   # olive
+        },
+        "drop_bg": "#f5f6f8", "drop_hover": "#e8f0fe",
+        "drop_border": "#9aa0a6", "drop_fg": "#5f6368",
+    },
+    "dark": {
+        "text_bg": "#1e1e20", "text_fg": "#e6e6e6", "insert": "#e6e6e6",
+        "speaker_fg": "#dddddd", "timestamp_fg": "#9a9a9a",
+        "selected_bg": "#46484c", "editing_bg": "#6b4e1e",
+        "search_bg": "#7a6a14",
+        "conf_low": "#5c2b2b", "conf_med": "#5c4a26",
+        "badge_fg": "#e6e6e6",
+        "speaker_colours": {
+            "1": "#4d4426",   # warm yellow, dimmed
+            "2": "#283d52",   # soft blue, dimmed
+            "3": "#2f4528",   # soft green, dimmed
+            "4": "#4d2c3c",   # soft pink, dimmed
+            "5": "#3b3050",   # lavender, dimmed
+            "6": "#52391f",   # peach, dimmed
+            "7": "#1f4441",   # teal, dimmed
+            "8": "#46402a",   # tan, dimmed
+            "9": "#3a4426",   # olive, dimmed
+        },
+        "drop_bg": "#2a2a2c", "drop_hover": "#1f3a5f",
+        "drop_border": "#5f6368", "drop_fg": "#9aa0a6",
+    },
+}
+
+# The currently-active palette key. Set by _apply_theme(); defaults to
+# light so module-level consumers work before the GUI configures a theme.
+_ACTIVE_THEME = "light"
+
+
+def _resolve_theme(setting):
+    """Map a theme setting ("auto"/"light"/"dark") to a palette key."""
+    if setting in ("light", "dark"):
+        return setting
+    if darkdetect is not None:
+        try:
+            if (darkdetect.theme() or "").lower() == "dark":
+                return "dark"
+        except Exception:
+            pass
+    return "light"
+
+
+def _palette():
+    return _PALETTES[_ACTIVE_THEME]
+
+
+def _apply_theme(setting):
+    """Activate the palette for `setting` and, when sv-ttk is installed,
+    restyle every ttk widget to match. Safe to call repeatedly."""
+    global _ACTIVE_THEME
+    _ACTIVE_THEME = _resolve_theme(setting)
+    if sv_ttk is not None:
+        try:
+            sv_ttk.set_theme(_ACTIVE_THEME)
+        except Exception as e:
+            _log(f"sv-ttk theme switch failed: {e}")
 
 
 # =====================================================================
@@ -3148,7 +3254,11 @@ class ReviewPaneText(ttk.Frame):
                            if audio_path and Path(audio_path).exists()
                            else None)
         self._ffplay = shutil.which("ffplay")
+        # ffmpeg enables sample-accurate seeking (see _playback_commands);
+        # without it playback falls back to ffplay's fast seek.
+        self._ffmpeg = shutil.which("ffmpeg")
         self._play_proc = None
+        self._decode_proc = None
         self._play_poll_id = None
         # Called (paragraphs, speakers, speaker_names) after mutations so
         # the host can persist a crash-recovery snapshot.
@@ -3199,17 +3309,19 @@ class ReviewPaneText(ttk.Frame):
     # ----- UI construction -------------------------------------------------
 
     def _build_ui(self):
-        # Header
+        # Header: title on the left, live labelling progress on the right.
         header = ttk.Frame(self)
         header.pack(fill="x", padx=10, pady=(10, 4))
         ttk.Label(
             header, text="Review and label speakers",
             font=("TkDefaultFont", 12, "bold"),
         ).pack(side="left")
+        self.header_count_var = tk.StringVar()
         ttk.Label(
-            header, text=f"  ({len(self.paragraphs)} paragraphs)",
+            header, textvariable=self.header_count_var,
             foreground="gray",
-        ).pack(side="left")
+        ).pack(side="right")
+        self._update_label_counter()
 
         # Speaker name editor. Built dynamically so the user can reveal
         # additional speakers on demand (up to MAX_SPEAKERS).
@@ -3228,8 +3340,6 @@ class ReviewPaneText(ttk.Frame):
         self.text = tk.Text(
             body_frame, wrap="word",
             font=("TkDefaultFont", 11),
-            background="white", foreground="black",
-            insertbackground="black",
             padx=10, pady=10,
             cursor="arrow",
             highlightthickness=0,
@@ -3259,23 +3369,12 @@ class ReviewPaneText(ttk.Frame):
         self.text.tag_configure(
             "speaker_text",
             font=("TkDefaultFont", 10, "bold"),
-            foreground="#222",
         )
-        self.text.tag_configure(
-            "timestamp",
-            font=("Courier", 9), foreground="#777",
-        )
+        self.text.tag_configure("timestamp", font=("Courier", 9))
         self.text.tag_configure("body_text")
-        # Low-confidence word shading (two tiers). Configured always; only
-        # applied when word_conf is present and shading is enabled.
-        self.text.tag_configure("conf_low", background="#ffd2d2")    # <0.35
-        self.text.tag_configure("conf_med", background="#ffe9c7")    # <0.6
-        self.text.tag_configure("selected", background=self.SELECTED_BG)
-        self.text.tag_configure("editing", background=self.EDITING_BG)
-        # Find-next highlight.
-        self.text.tag_configure("search", background="#ffe066")
-        for letter, color in self.SPEAKER_COLOURS.items():
-            self.text.tag_configure(f"sbg_{letter}", background=color)
+        # Colours for the widget itself and every tag come from the active
+        # light/dark palette; _configure_tags is re-run on theme switches.
+        self._configure_tags()
         # Tag priority: search > editing > selected > confidence > speaker bg.
         self.text.tag_raise("conf_med")
         self.text.tag_raise("conf_low")
@@ -3296,11 +3395,14 @@ class ReviewPaneText(ttk.Frame):
             foreground="gray",
         ).pack(fill="x", padx=10, pady=(2, 4))
 
-        # Action buttons
+        # Action buttons. "Accent.TButton" is sv-ttk's highlighted style
+        # for the primary action; without sv-ttk it falls back to the
+        # normal button look.
         actions = ttk.Frame(self)
         actions.pack(fill="x", padx=10, pady=(4, 10))
         if self.loaded:
             ttk.Button(actions, text="Save (overwrite original)",
+                       style="Accent.TButton",
                        command=self._on_save_clicked).pack(side="left")
             if self.on_save_revision_cb is not None:
                 ttk.Button(actions, text="Save as revision...",
@@ -3310,6 +3412,7 @@ class ReviewPaneText(ttk.Frame):
                        command=self._on_cancel_clicked).pack(side="right")
         else:
             ttk.Button(actions, text="Save with labels",
+                       style="Accent.TButton",
                        command=self._on_save_clicked).pack(side="left")
             ttk.Button(actions, text="Save without labels",
                        command=self._on_cancel_clicked).pack(side="right")
@@ -3397,10 +3500,44 @@ class ReviewPaneText(ttk.Frame):
                 command=self._toggle_confidence,
             ).pack(side="right")
 
+    def _configure_tags(self):
+        """Apply the active light/dark palette to the Text widget and every
+        colour-bearing tag. Safe to re-run on a live widget, which is how a
+        theme switch re-skins the transcript in place."""
+        pal = _palette()
+        self.text.config(
+            background=pal["text_bg"], foreground=pal["text_fg"],
+            insertbackground=pal["insert"],
+        )
+        self.text.tag_configure("speaker_text", foreground=pal["speaker_fg"])
+        self.text.tag_configure("timestamp", foreground=pal["timestamp_fg"])
+        # Low-confidence word shading (two tiers). Configured always; only
+        # applied when word_conf is present and shading is enabled.
+        self.text.tag_configure("conf_low", background=pal["conf_low"])
+        self.text.tag_configure("conf_med", background=pal["conf_med"])
+        self.text.tag_configure("selected", background=pal["selected_bg"])
+        self.text.tag_configure("editing", background=pal["editing_bg"])
+        # Find-next highlight.
+        self.text.tag_configure("search", background=pal["search_bg"])
+        for letter, colour in pal["speaker_colours"].items():
+            self.text.tag_configure(f"sbg_{letter}", background=colour)
+
+    def apply_palette(self):
+        """Re-skin the pane after a theme switch: transcript colours and
+        the speaker badges (which bake colours in at build time)."""
+        self._configure_tags()
+        self._build_names_editor()
+
+    def _update_label_counter(self):
+        labelled = sum(1 for s in self.speakers if s)
+        self.header_count_var.set(
+            f"{labelled} of {len(self.paragraphs)} paragraphs labelled")
+
     def _build_names_editor(self):
         """(Re)populate the speaker-name editor with one labelled entry per
         visible speaker, plus an 'Add speaker' button while there's room for
         more. Called on construction and whenever visible_speakers grows."""
+        pal = _palette()
         for child in self.names_frame.winfo_children():
             child.destroy()
         self.name_vars = {}
@@ -3413,7 +3550,7 @@ class ReviewPaneText(ttk.Frame):
             badge = tk.Label(
                 sub, text=letter, width=2,
                 font=("TkDefaultFont", 10, "bold"),
-                bg=self.SPEAKER_COLOURS[letter], fg="black",
+                bg=pal["speaker_colours"][letter], fg=pal["badge_fg"],
                 relief="solid", borderwidth=1,
             )
             badge.pack(side="left", padx=(0, 6))
@@ -3644,6 +3781,35 @@ class ReviewPaneText(ttk.Frame):
         # A touch of tail padding so the last word isn't clipped.
         return (start, max(0.5, end - start + 0.3))
 
+    def _playback_commands(self, start, dur):
+        """Build the player command line(s) for the span. Returns
+        (decode_cmd_or_None, play_cmd).
+
+        ffplay's own -ss does a *fast* seek: it jumps to the nearest seek
+        point at or before the target, which on formats with sparse seek
+        points (VBR mp3 in particular) can land seconds early - audio from
+        the preceding paragraphs plays first. When ffmpeg is available we
+        let it do the seeking instead: input-side -ss decodes from the
+        prior seek point and discards samples up to the exact timestamp,
+        then streams WAV into ffplay. Without ffmpeg, fall back to the
+        fast (possibly early) direct seek."""
+        if self._ffmpeg:
+            decode = [self._ffmpeg, "-hide_banner", "-loglevel", "error",
+                      "-ss", f"{start:.2f}", "-i", self.audio_path]
+            if dur is not None:
+                decode += ["-t", f"{dur:.2f}"]
+            decode += ["-f", "wav", "pipe:1"]
+            play = [self._ffplay, "-nodisp", "-autoexit",
+                    "-loglevel", "quiet", "-i", "pipe:0"]
+            return decode, play
+
+        play = [self._ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
+                "-ss", f"{start:.2f}"]
+        if dur is not None:
+            play += ["-t", f"{dur:.2f}"]
+        play.append(self.audio_path)
+        return None, play
+
     def _toggle_play(self):
         """Play the selected paragraph's audio span; press again to stop."""
         if self._play_proc is not None:
@@ -3655,33 +3821,54 @@ class ReviewPaneText(ttk.Frame):
         if span is None:
             return
         start, dur = span
-        cmd = [self._ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
-               "-ss", f"{start:.2f}"]
-        if dur is not None:
-            cmd += ["-t", f"{dur:.2f}"]
-        cmd.append(self.audio_path)
+        decode_cmd, play_cmd = self._playback_commands(start, dur)
         try:
-            self._play_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            if decode_cmd is not None:
+                self._decode_proc = subprocess.Popen(
+                    decode_cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+                self._play_proc = subprocess.Popen(
+                    play_cmd,
+                    stdin=self._decode_proc.stdout,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                # Drop our handle so ffmpeg sees the pipe close (and stops
+                # decoding) as soon as the player exits.
+                self._decode_proc.stdout.close()
+            else:
+                self._play_proc = subprocess.Popen(
+                    play_cmd,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
         except OSError as e:
-            _log(f"ffplay failed to start: {e}")
-            self._play_proc = None
+            _log(f"audio playback failed to start: {e}")
+            self._reap_playback_procs()
             return
         self.play_btn.config(text="■ Stop")
         self._poll_playback()
 
+    def _reap_playback_procs(self):
+        """Terminate (best-effort) and forget both playback processes."""
+        for attr in ("_play_proc", "_decode_proc"):
+            proc = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+
     def _poll_playback(self):
-        """Reset the Play button once ffplay exits on its own."""
+        """Reset the Play button once the player exits on its own."""
         proc = self._play_proc
         if proc is None:
             return
         if proc.poll() is None:
             self._play_poll_id = self.after(200, self._poll_playback)
             return
-        self._play_proc = None
         self._play_poll_id = None
+        self._reap_playback_procs()
         try:
             self.play_btn.config(text="▶ Play")
         except tk.TclError:
@@ -3694,13 +3881,7 @@ class ReviewPaneText(ttk.Frame):
             except (tk.TclError, ValueError):
                 pass
             self._play_poll_id = None
-        proc = self._play_proc
-        self._play_proc = None
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+        self._reap_playback_procs()
         try:
             self.play_btn.config(text="▶ Play")
         except (tk.TclError, AttributeError):
@@ -3729,6 +3910,33 @@ class ReviewPaneText(ttk.Frame):
                 buckets[i].append((words[wi][2], words[wi][3]))
                 wi += 1
         return buckets
+
+    def _time_at_body_offset(self, para, body, offset):
+        """Best-effort: the start time of the word at/after character
+        `offset` in `body` (the joined text of `para`), from the engine's
+        word timestamps. Returns None when word data is missing or no
+        longer aligns with the (possibly edited) text."""
+        if not self.word_conf or not para:
+            return None
+        p_start = para[0][0]
+        p_end = para[-1][1]
+        cursor = 0
+        for w_start, _w_end, w_text, _prob in self.word_conf:
+            # Only words inside this paragraph's time span are relevant.
+            if w_start < p_start - 0.001:
+                continue
+            if w_start > p_end + 0.001:
+                break
+            token = (w_text or "").strip()
+            if not token:
+                continue
+            pos = body.find(token, cursor)
+            if pos < 0:
+                return None  # alignment lost (paragraph was edited)
+            if pos >= offset:
+                return float(w_start)
+            cursor = pos + len(token)
+        return None
 
     def _shade_paragraph(self, i, body, words_i):
         """Tag low-confidence words within paragraph i's rendered body.
@@ -3870,6 +4078,7 @@ class ReviewPaneText(ttk.Frame):
             except tk.TclError:
                 pass
 
+        self._update_label_counter()
         self._update_highlight(scroll_into_view=False)
 
     def _scroll_anchor_to(self, index, target_y):
@@ -4311,12 +4520,25 @@ class ReviewPaneText(ttk.Frame):
             seg_start_t, seg_end_t, seg_text = para[split_seg]
             text_before = seg_text[:split_within].rstrip()
             text_after = seg_text[split_within:].lstrip()
+            # Estimate when the split point occurs so the two halves get
+            # real start/end times. Without this both halves would keep the
+            # whole segment's span, and playing the second half would start
+            # at the FIRST half's audio. Prefer the word timestamps when
+            # captured; otherwise interpolate by character position.
+            split_t = self._time_at_body_offset(para, joined, adjusted_offset)
+            if split_t is None and seg_text:
+                split_t = (seg_start_t
+                           + (seg_end_t - seg_start_t)
+                           * (split_within / len(seg_text)))
+            if split_t is None:
+                split_t = seg_start_t
+            split_t = max(seg_start_t, min(float(split_t), seg_end_t))
             first = list(para[:split_seg])
             if text_before:
-                first.append((seg_start_t, seg_end_t, text_before))
+                first.append((seg_start_t, split_t, text_before))
             second = []
             if text_after:
-                second.append((seg_start_t, seg_end_t, text_after))
+                second.append((split_t, seg_end_t, text_after))
             second.extend(para[split_seg + 1:])
 
         if not first or not second:
@@ -4423,6 +4645,18 @@ class WhisperGUI:
         # On macOS the menu attaches to the system menubar at the top of
         # the screen; on Windows/Linux it attaches to the window itself.
         menubar = tk.Menu(self.root)
+
+        # macOS application menu. Using the special "apple" name makes Tk
+        # put these items at the top of the app menu (in place of "About
+        # Python"); the menu's *title* comes from the process bundle name,
+        # which main() rewrites to "Transcribr" when pyobjc is available.
+        if sys.platform == "darwin":
+            app_menu = tk.Menu(menubar, tearoff=False, name="apple")
+            app_menu.add_command(label="About Transcribr",
+                                 command=self._show_about)
+            app_menu.add_separator()
+            menubar.add_cascade(menu=app_menu)
+
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(
             label="Open Transcript...",
@@ -4433,7 +4667,36 @@ class WhisperGUI:
         self._refresh_recent_menu()
         menubar.add_cascade(label="File", menu=file_menu)
 
+        # View -> Appearance. "Follow System" tracks the OS light/dark
+        # setting (via darkdetect); the explicit options override it.
+        view_menu = tk.Menu(menubar, tearoff=False)
+        appearance_menu = tk.Menu(view_menu, tearoff=False)
+        self.theme_var = tk.StringVar(value="auto")
+        for label, value in (("Follow System", "auto"),
+                             ("Light", "light"),
+                             ("Dark", "dark")):
+            appearance_menu.add_radiobutton(
+                label=label, value=value, variable=self.theme_var,
+                command=self._on_theme_changed)
+        view_menu.add_cascade(label="Appearance", menu=appearance_menu)
+        menubar.add_cascade(label="View", menu=view_menu)
+
+        # Standard macOS Window menu (Tk manages its contents: minimise,
+        # zoom, the window list).
+        if sys.platform == "darwin":
+            window_menu = tk.Menu(menubar, tearoff=False, name="window")
+            menubar.add_cascade(label="Window", menu=window_menu)
+
         help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="About Transcribr",
+                              command=self._show_about)
+        readme_path = _find_readme()
+        help_menu.add_command(
+            label="View README",
+            command=lambda: _open_path(readme_path),
+            state="normal" if readme_path else "disabled",
+        )
+        help_menu.add_separator()
         help_menu.add_command(
             label="Open Log File",
             command=lambda: _open_path(_log_file_path()),
@@ -4455,29 +4718,36 @@ class WhisperGUI:
         # notebook holds the input/options; the Run controls, status line,
         # progress log and bottom buttons live below it so they stay visible
         # whichever tab is selected.
-        notebook = ttk.Notebook(main)
-        notebook.pack(fill="x", pady=(0, 8))
+        self.notebook = ttk.Notebook(main)
+        self.notebook.pack(fill="x", pady=(0, 8))
 
-        file_tab = ttk.Frame(notebook, padding=8)
-        model_tab = ttk.Frame(notebook, padding=8)
-        advanced_tab = ttk.Frame(notebook, padding=8)
-        notebook.add(file_tab, text="File")
-        notebook.add(model_tab, text="Model")
-        notebook.add(advanced_tab, text="Advanced")
+        file_tab = ttk.Frame(self.notebook, padding=8)
+        model_tab = ttk.Frame(self.notebook, padding=8)
+        advanced_tab = ttk.Frame(self.notebook, padding=8)
+        recent_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(file_tab, text="File")
+        self.notebook.add(model_tab, text="Model")
+        self.notebook.add(advanced_tab, text="Advanced")
+        self.notebook.add(recent_tab, text="Recent")
 
-        # File tab: input/output file + batch queue.
+        # File tab: everything about *this* job's files - input/output,
+        # the file description (it informs both Whisper and the document
+        # title), and the batch queue.
         self._build_file_section(file_tab)
+        self._build_prompt_section(file_tab)
         self._build_queue_section(file_tab)
 
-        # Model tab: engine/model/language, the description prompt, and
-        # paragraph-grouping / review options.
+        # Model tab: which engine/model does the work and how it decodes.
         self._build_model_section(model_tab)
-        self._build_prompt_section(model_tab)
-        self._build_paragraph_section(model_tab)
+        self._build_advanced_section(model_tab)
 
-        # Advanced tab: extra output formats and decoding parameters.
+        # Advanced tab: post-processing - paragraph grouping / review
+        # options and extra technical output formats.
+        self._build_paragraph_section(advanced_tab)
         self._build_extra_outputs_section(advanced_tab)
-        self._build_advanced_section(advanced_tab)
+
+        # Recent tab: reopen recently transcribed/edited transcripts.
+        self._build_recent_section(recent_tab)
 
         # Always-visible controls below the notebook.
         self._build_run_section(main)
@@ -4493,31 +4763,46 @@ class WhisperGUI:
         self._apply_settings(_settings_load())
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Apply the (possibly just-restored) theme to everything built
+        # above - ttk widgets via sv-ttk plus our plain-tk widgets.
+        self._retheme()
+
     def _build_file_section(self, parent):
         f = ttk.LabelFrame(parent, text="File", padding=8)
         f.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(f, text="Input:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        # Drop zone: a large click/drop target drawn on a Canvas (dashed
+        # border + prompt text). Redraws on resize and theme switches.
+        self._drop_hover = False
+        self.drop_canvas = tk.Canvas(
+            f, height=64, highlightthickness=0, cursor="hand2")
+        self.drop_canvas.grid(row=0, column=0, columnspan=3,
+                              sticky="ew", pady=(0, 8))
+        self.drop_canvas.bind("<Button-1>", lambda _e: self._pick_input())
+        self.drop_canvas.bind("<Configure>",
+                              lambda _e: self._redraw_drop_zone())
+
+        ttk.Label(f, text="Input:").grid(row=1, column=0, sticky="w", padx=(0, 6))
         self.input_var = tk.StringVar()
         self.input_var.trace_add("write", self._on_input_changed)
         self.input_entry = ttk.Entry(f, textvariable=self.input_var)
-        self.input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        self.input_entry.grid(row=1, column=1, sticky="ew", padx=(0, 6))
         ttk.Button(f, text="Browse...", command=self._pick_input).grid(
-            row=0, column=2)
+            row=1, column=2)
 
         ttk.Label(f, text="Output:").grid(
-            row=1, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
+            row=2, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
         self.output_var = tk.StringVar()
         ttk.Entry(f, textvariable=self.output_var).grid(
-            row=1, column=1, sticky="ew", padx=(0, 6), pady=(6, 0))
+            row=2, column=1, sticky="ew", padx=(0, 6), pady=(6, 0))
         ttk.Button(f, text="Browse...", command=self._pick_output).grid(
-            row=1, column=2, pady=(6, 0))
+            row=2, column=2, pady=(6, 0))
 
         ttk.Label(f, text="Format:").grid(
-            row=2, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
+            row=3, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
         self.output_format_var = tk.StringVar(value="docx")
         fmt_frame = ttk.Frame(f)
-        fmt_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        fmt_frame.grid(row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Radiobutton(fmt_frame, text=".txt (plain text)",
                         variable=self.output_format_var, value="txt",
                         command=self._on_format_changed).pack(side="left")
@@ -4530,22 +4815,70 @@ class WhisperGUI:
 
         f.columnconfigure(1, weight=1)
 
-        # Register drop targets if tkinterdnd2 is available. Whole window plus
-        # the input Entry, so dropping anywhere works.
+        # Register drop targets if tkinterdnd2 is available. Whole window
+        # plus the drop zone and input Entry, so dropping anywhere works.
         if DND_AVAILABLE:
-            for widget in (self.root, self.input_entry, f):
+            for widget in (self.root, self.input_entry, f,
+                           self.drop_canvas):
                 try:
                     widget.drop_target_register(DND_FILES)
                     widget.dnd_bind("<<Drop>>", self._on_drop)
                 except (AttributeError, tk.TclError):
                     # Not all widget types support dnd registration.
                     pass
+            # Highlight the drop zone while a drag hovers over it.
+            try:
+                self.drop_canvas.dnd_bind("<<DropEnter>>",
+                                          self._on_drop_enter)
+                self.drop_canvas.dnd_bind("<<DropLeave>>",
+                                          self._on_drop_leave)
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _on_drop_enter(self, event):
+        """tkdnd treats the <<DropEnter>> handler's return value as the
+        accepted action - returning None refuses the drop outright, which
+        is why this must echo event.action back."""
+        self._set_drop_hover(True)
+        return getattr(event, "action", "copy")
+
+    def _on_drop_leave(self, event):
+        self._set_drop_hover(False)
+        return getattr(event, "action", None)
+
+    def _set_drop_hover(self, hovering):
+        self._drop_hover = bool(hovering)
+        self._redraw_drop_zone()
+
+    def _redraw_drop_zone(self):
+        """(Re)draw the dashed drop target; called on resize, theme switch,
+        and drag-hover changes."""
+        c = self.drop_canvas
+        pal = _palette()
+        c.delete("all")
+        width = c.winfo_width()
+        if width <= 1:  # not laid out yet; <Configure> will call us again
+            width = c.winfo_reqwidth()
+        height = int(c.cget("height"))
+        c.config(background=pal["drop_hover"] if self._drop_hover
+                 else pal["drop_bg"])
+        c.create_rectangle(
+            3, 3, width - 3, height - 3,
+            dash=(6, 4), width=2, outline=pal["drop_border"])
+        prompt = "Drop audio or video here   —   or click to browse"
+        if not DND_AVAILABLE:
+            prompt = "Click to choose an audio or video file"
+        c.create_text(width / 2, height / 2, text=prompt,
+                      fill=pal["drop_fg"], font=("TkDefaultFont", 12))
 
     def _on_drop(self, event):
         """Handle a file drop. event.data is a TkDnD-encoded path list.
 
         Dropping a single file fills the Input field (single-file flow).
         Dropping several files adds them all to the batch queue."""
+        # A finished drop doesn't always deliver <<DropLeave>>; clear the
+        # hover highlight here too.
+        self._set_drop_hover(False)
         # TkDnD wraps paths with spaces in {curly braces}; tk.splitlist handles
         # that uniformly across platforms.
         try:
@@ -4635,6 +4968,71 @@ class WhisperGUI:
 
     def _batch_clear(self):
         self.batch_listbox.delete(0, "end")
+
+    # ----- Recent tab ---------------------------------------------------------
+
+    def _build_recent_section(self, parent):
+        """A browsable list of recently transcribed/opened transcripts.
+        Same data as File -> Open Recent, in a roomier form: double-click
+        (or 'Open for review') re-opens a transcript for labelling."""
+        f = ttk.LabelFrame(parent, text="Recent transcripts", padding=8)
+        f.pack(fill="both", expand=True)
+
+        list_wrap = ttk.Frame(f)
+        list_wrap.pack(side="left", fill="both", expand=True)
+        self.recent_listbox = tk.Listbox(list_wrap, height=9,
+                                         activestyle="none")
+        self.recent_listbox.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(list_wrap, orient="vertical",
+                           command=self.recent_listbox.yview)
+        sb.pack(side="right", fill="y")
+        self.recent_listbox.config(yscrollcommand=sb.set)
+        self.recent_listbox.bind(
+            "<Double-Button-1>", lambda _e: self._recent_open_selected())
+
+        btns = ttk.Frame(f)
+        btns.pack(side="right", fill="y", padx=(8, 0))
+        ttk.Button(btns, text="Open for review",
+                   command=self._recent_open_selected).pack(fill="x")
+        ttk.Button(btns, text=_REVEAL_LABEL,
+                   command=self._recent_reveal_selected).pack(
+            fill="x", pady=(4, 0))
+        ttk.Button(btns, text="Clear list",
+                   command=self._clear_recent).pack(fill="x", pady=(4, 0))
+
+        # Parallel list of full paths backing the listbox rows.
+        self._recent_paths = []
+        self._refresh_recent_tab()
+
+    def _refresh_recent_tab(self):
+        """Rebuild the Recent tab's list from disk. No-op before the tab
+        exists (the recent-menu refresh runs once during early build)."""
+        if not hasattr(self, "recent_listbox"):
+            return
+        self._recent_paths = [
+            p for p in _recent_load() if Path(p).exists()
+        ]
+        self.recent_listbox.delete(0, "end")
+        for p in self._recent_paths:
+            path = Path(p)
+            self.recent_listbox.insert(
+                "end", f" {path.name}    —    {path.parent}")
+
+    def _recent_selected_path(self):
+        sel = self.recent_listbox.curselection()
+        if not sel or sel[0] >= len(self._recent_paths):
+            return None
+        return self._recent_paths[sel[0]]
+
+    def _recent_open_selected(self):
+        path = self._recent_selected_path()
+        if path:
+            self._open_recent(path)
+
+    def _recent_reveal_selected(self):
+        path = self._recent_selected_path()
+        if path and Path(path).exists():
+            _reveal_path(path)
 
     def _build_model_section(self, parent):
         f = ttk.LabelFrame(parent, text="Model", padding=8)
@@ -4738,7 +5136,7 @@ class WhisperGUI:
             row=1, column=1, sticky="w", padx=(20, 0), pady=(4, 0))
 
     def _build_advanced_section(self, parent):
-        f = ttk.LabelFrame(parent, text="Advanced", padding=8)
+        f = ttk.LabelFrame(parent, text="Decoding options", padding=8)
         f.pack(fill="x", pady=(0, 8))
 
         ttk.Label(f, text="Temperature:").grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -4802,7 +5200,10 @@ class WhisperGUI:
     def _build_run_section(self, parent):
         f = ttk.Frame(parent)
         f.pack(fill="x", pady=(0, 8))
+        # Accent style marks this as the primary action (sv-ttk); plain
+        # ttk falls back to the standard button look.
         self.run_btn = ttk.Button(f, text="Run Transcription",
+                                  style="Accent.TButton",
                                   command=self._on_run)
         self.run_btn.pack(side="left")
         self.stop_btn = ttk.Button(f, text="Stop", command=self._on_stop,
@@ -4817,22 +5218,61 @@ class WhisperGUI:
         ).pack(side="left", padx=(16, 0))
 
     def _build_log_section(self, parent):
-        # A status row above the log shows ETA / progress while a job is
-        # running. It's a single line that changes content; no scrolling.
-        status_frame = ttk.Frame(parent)
-        status_frame.pack(fill="x", pady=(0, 4))
+        # Progress card: current file + percentage, a progress bar, and a
+        # one-line status (elapsed / remaining / speed). The raw engine
+        # log lives below it, collapsed behind a "Show details" toggle.
+        card = ttk.LabelFrame(parent, text="Progress", padding=10)
+        card.pack(fill="x", pady=(0, 8))
+
+        top = ttk.Frame(card)
+        top.pack(fill="x")
+        self.progress_file_var = tk.StringVar(value="Ready")
+        ttk.Label(top, textvariable=self.progress_file_var,
+                  font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        self.progress_pct_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.progress_pct_var,
+                  foreground="gray").pack(side="right")
+
+        self.progress_bar = ttk.Progressbar(
+            card, mode="determinate", maximum=100.0)
+        self.progress_bar.pack(fill="x", pady=(8, 6))
+
+        bottom = ttk.Frame(card)
+        bottom.pack(fill="x")
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(
-            status_frame, textvariable=self.status_var,
-            foreground="#444",
-        )
+            bottom, textvariable=self.status_var, foreground="gray")
         self.status_label.pack(side="left")
+        self.details_btn = ttk.Button(
+            bottom, text="Show details ▸", width=14,
+            command=self._toggle_details)
+        self.details_btn.pack(side="right")
 
-        f = ttk.LabelFrame(parent, text="Progress", padding=8)
-        f.pack(fill="both", expand=True, pady=(0, 8))
+        # Details: the raw engine output, hidden by default. Packed (and
+        # forgotten) on demand by _set_details, just above the bottom
+        # button row, so showing/hiding visibly reflows the window.
+        self.details_visible = False
+        self.log_frame = ttk.LabelFrame(parent, text="Details", padding=8)
         self.output_text = scrolledtext.ScrolledText(
-            f, height=12, wrap="word", state="disabled")
+            self.log_frame, height=9, wrap="word", state="disabled")
         self.output_text.pack(fill="both", expand=True)
+
+    def _toggle_details(self):
+        self._set_details(not self.details_visible)
+        self._save_settings()
+
+    def _set_details(self, visible):
+        """Show/hide the raw-log frame. Unconditional (no early-return on
+        matching state) so a click always forces widget reality - packing,
+        button label - to agree with the requested state."""
+        self.details_visible = bool(visible)
+        if self.details_visible:
+            self.log_frame.pack(fill="both", expand=True, pady=(0, 8),
+                                before=self.bottom_frame)
+            self.details_btn.config(text="Hide details ▾")
+        else:
+            self.log_frame.pack_forget()
+            self.details_btn.config(text="Show details ▸")
 
     # ----- Settings persistence ----------------------------------------------
 
@@ -4864,6 +5304,8 @@ class WhisperGUI:
             }
             if hasattr(self, "confidence_var"):
                 s["highlight_confidence"] = self.confidence_var.get()
+            s["theme"] = self.theme_var.get()
+            s["show_details"] = self.details_visible
             return s
         except tk.TclError:
             return {}
@@ -4927,6 +5369,10 @@ class WhisperGUI:
         set_bool(self.extra_tsv_var, "extra_tsv")
         if hasattr(self, "confidence_var"):
             set_bool(self.confidence_var, "highlight_confidence")
+        set_choice(self.theme_var, "theme", ["auto", "light", "dark"])
+        show_details = s.get("show_details")
+        if isinstance(show_details, bool):
+            self._set_details(show_details)
 
     def _save_settings(self):
         _settings_save(self._collect_settings())
@@ -4935,9 +5381,51 @@ class WhisperGUI:
         self._save_settings()
         self.root.destroy()
 
+    # ----- Theming -----------------------------------------------------------
+
+    def _on_theme_changed(self):
+        self._retheme()
+        self._save_settings()
+
+    def _retheme(self):
+        """Activate the selected theme and re-colour the plain-tk widgets
+        that ttk theming doesn't reach."""
+        _apply_theme(self.theme_var.get())
+        # sv-ttk reacts to <<ThemeChanged>> with a tk_setPalette pass that
+        # repaints plain-tk widgets; under Tk 9 that's delivered at idle
+        # time, i.e. *after* the explicit colours below, clobbering them.
+        # Flush the idle queue first so our palette wins.
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        pal = _palette()
+        for widget in (self.prompt_text, self.output_text):
+            try:
+                widget.config(background=pal["text_bg"],
+                              foreground=pal["text_fg"],
+                              insertbackground=pal["insert"])
+            except tk.TclError:
+                pass
+        for listbox in (self.batch_listbox, self.recent_listbox):
+            try:
+                listbox.config(
+                    background=pal["text_bg"], foreground=pal["text_fg"],
+                    selectbackground=pal["selected_bg"],
+                    selectforeground=pal["text_fg"],
+                )
+            except tk.TclError:
+                pass
+        self._redraw_drop_zone()
+        if (self.review_pane is not None
+                and hasattr(self.review_pane, "apply_palette")):
+            self.review_pane.apply_palette()
+
     def _build_bottom_section(self, parent):
         f = ttk.Frame(parent)
         f.pack(fill="x")
+        # _set_details packs the log frame just above this row.
+        self.bottom_frame = f
         self.open_btn = ttk.Button(f, text="Open Output",
                                    command=self._open_output, state="disabled")
         self.open_btn.pack(side="left")
@@ -5129,7 +5617,11 @@ class WhisperGUI:
             word_timestamps=self.word_ts_var.get() or self.confidence_var.get(),
             highlight_confidence=self.confidence_var.get(),
             initial_prompt=description or None,
-            title=description or None,
+            # The description doubles as the document title; with no
+            # description, title the document after the source file. (The
+            # filename is NOT fed to Whisper as a prompt - recorder names
+            # like REC_0042 would only mislead it.)
+            title=description or Path(in_path).name,
             gap=self.gap_var.get(),
             extra_formats=extra_formats,
             output_format=self.output_format_var.get(),
@@ -5184,6 +5676,8 @@ class WhisperGUI:
         self.open_btn.config(state="disabled")
         self.reveal_btn.config(state="disabled")
         self._clear_log()
+        self.progress_file_var.set(Path(in_path).name)
+        self.status_var.set("Starting...")
 
         self.cancel_event.clear()
         self.worker = threading.Thread(
@@ -5269,7 +5763,10 @@ class WhisperGUI:
         n = len(b["items"])
         self._append_log(
             f"\n--- File {idx + 1} of {n}: {Path(in_path).name} ---\n")
-        self.status_var.set(f"Batch: file {idx + 1} of {n}")
+        self.progress_file_var.set(
+            f"{Path(in_path).name}  (file {idx + 1} of {n})")
+        self.status_var.set("Starting...")
+        self._set_progress(0)
         params = self._build_params(
             in_path, out_path, review_before_save=False)
         if params is None:
@@ -5331,6 +5828,7 @@ class WhisperGUI:
 
         head = "Batch stopped" if stopped else "Batch complete"
         self.status_var.set(head)
+        self.progress_file_var.set(head)
         lines = [f"\n=== {head} ===",
                  f"Transcribed: {len(succeeded)}",
                  f"Failed: {len(failed)}"]
@@ -5395,18 +5893,29 @@ class WhisperGUI:
         self.root.after(100, self._poll_queue)
 
     def _update_eta(self, info):
-        """Update the status line with audio progress + ETA."""
+        """Update the progress card with audio progress + ETA."""
         done = info["audio_done"]
         total = info["audio_total"]
         eta = info["eta_seconds"]
         speed = info["speed"]
         pct = (done / total * 100) if total else 0
+        self._set_progress(pct)
         self.status_var.set(
-            f"{_format_duration(done)} / {_format_duration(total)} "
-            f"({pct:.0f}%)   "
-            f"about {_format_duration(eta)} remaining   "
-            f"[{speed:.1f}x audio speed]"
+            f"{_format_duration(done)} of {_format_duration(total)}   ·   "
+            f"about {_format_duration(eta)} remaining   ·   "
+            f"{speed:.1f}x audio speed"
         )
+
+    def _set_progress(self, pct):
+        """Set the progress bar and percentage label. None blanks both
+        (idle); a number pins them (clamped to 0-100)."""
+        if pct is None:
+            self.progress_bar.config(value=0)
+            self.progress_pct_var.set("")
+            return
+        pct = max(0.0, min(100.0, float(pct)))
+        self.progress_bar.config(value=pct)
+        self.progress_pct_var.set(f"{pct:.0f}%")
 
     def _append_log(self, text):
         self.output_text.config(state="normal")
@@ -5419,6 +5928,7 @@ class WhisperGUI:
         self.output_text.delete("1.0", "end")
         self.output_text.config(state="disabled")
         self.status_var.set("")
+        self._set_progress(None)
 
     def _on_done(self, output_path):
         self.last_output = output_path
@@ -5427,6 +5937,7 @@ class WhisperGUI:
         self.open_btn.config(state="normal")
         self.reveal_btn.config(state="normal")
         self.status_var.set("Done")
+        self._set_progress(100)
         self._append_log("\n=== Done ===\n")
         if output_path and Path(output_path).exists():
             _recent_add(output_path)
@@ -5435,8 +5946,11 @@ class WhisperGUI:
     def _on_error(self, message):
         self.run_btn.config(state="normal", text="Run Transcription")
         self.stop_btn.config(state="disabled", text="Stop")
-        self.status_var.set("")
+        self.status_var.set("Failed")
+        self.progress_file_var.set("Error")
         self._append_log(f"\n!!! Error !!!\n{message}\n")
+        # The full traceback is in the details log; reveal it.
+        self._set_details(True)
         # Keep the messagebox short - full error stays in the log.
         first_line = message.splitlines()[0] if message else "Unknown error"
         messagebox.showerror("Error", first_line)
@@ -5542,7 +6056,9 @@ class WhisperGUI:
             self.review_pane._refresh_all_rows()
 
     def _refresh_recent_menu(self):
-        """Rebuild the File -> Open Recent submenu from disk."""
+        """Rebuild the File -> Open Recent submenu (and the Recent tab's
+        list, once it exists) from disk."""
+        self._refresh_recent_tab()
         self.recent_menu.delete(0, "end")
         items = _recent_load()
         items = [p for p in items if Path(p).exists()]
@@ -5883,6 +6399,22 @@ class WhisperGUI:
 # =====================================================================
 
 def main():
+    # On macOS the menu bar titles itself after the running process, which
+    # for a plain interpreter launch is "Python". Rewriting the bundle's
+    # name before Tk starts the application makes the menu bar (and the
+    # app menu) read "Transcribr". Needs pyobjc; silently skipped without.
+    if sys.platform == "darwin":
+        try:
+            from Foundation import NSBundle
+            bundle = NSBundle.mainBundle()
+            if bundle is not None:
+                info = (bundle.localizedInfoDictionary()
+                        or bundle.infoDictionary())
+                if info is not None:
+                    info["CFBundleName"] = "Transcribr"
+        except Exception:
+            pass
+
     # Try the DnD-aware root first if tkinterdnd2 is installed. The package
     # itself can import fine but fail at Tk() time on systems where the
     # bundled tkdnd binary isn't compatible (notably Homebrew Python 3.13 on

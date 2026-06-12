@@ -192,6 +192,31 @@ class TestExtractWordConf(unittest.TestCase):
 # Config-dir persistence (settings / recent / autosave)
 # =====================================================================
 
+class TestTheme(unittest.TestCase):
+    def test_resolve_explicit_settings(self):
+        self.assertEqual(T._resolve_theme("light"), "light")
+        self.assertEqual(T._resolve_theme("dark"), "dark")
+
+    def test_resolve_auto_returns_valid_palette_key(self):
+        self.assertIn(T._resolve_theme("auto"), T._PALETTES)
+
+    def test_palette_follows_active_theme(self):
+        old = T._ACTIVE_THEME
+        try:
+            T._ACTIVE_THEME = "dark"
+            self.assertEqual(T._palette(), T._PALETTES["dark"])
+            T._ACTIVE_THEME = "light"
+            self.assertEqual(T._palette(), T._PALETTES["light"])
+        finally:
+            T._ACTIVE_THEME = old
+
+    def test_palettes_have_matching_keys(self):
+        light, dark = T._PALETTES["light"], T._PALETTES["dark"]
+        self.assertEqual(set(light.keys()), set(dark.keys()))
+        self.assertEqual(set(light["speaker_colours"]),
+                         set(dark["speaker_colours"]))
+
+
 class TestSettingsPersistence(unittest.TestCase):
     def test_round_trip(self):
         T._settings_save({"model": "tiny", "gap": 2.5, "review": True})
@@ -384,6 +409,9 @@ class TestReviewPaneText(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()
         self.root.withdraw()
+        # Pin the palette so results don't depend on the host's system
+        # light/dark appearance.
+        T._apply_theme("light")
         self.autosaves = []
         self.pane = T.ReviewPaneText(
             self.root,
@@ -537,6 +565,75 @@ class TestReviewPaneText(unittest.TestCase):
         self.assertEqual(start, 70.0)
         self.assertIsNone(dur)  # play to end of file
 
+    def test_playback_commands_accurate_seek_via_ffmpeg(self):
+        self.pane.audio_path = "/tmp/audio.mp3"
+        self.pane._ffplay = "/usr/bin/ffplay"
+        self.pane._ffmpeg = "/usr/bin/ffmpeg"
+        decode, play = self.pane._playback_commands(12.5, 30.0)
+        # ffmpeg does the (accurate, input-side) seek...
+        self.assertIsNotNone(decode)
+        self.assertLess(decode.index("-ss"), decode.index("-i"))
+        self.assertIn("12.50", decode)
+        self.assertIn("30.00", decode)
+        # ...and ffplay just plays the piped WAV, no seeking of its own.
+        self.assertNotIn("-ss", play)
+        self.assertIn("pipe:0", play)
+        # Open-ended span: no -t anywhere.
+        decode, _play = self.pane._playback_commands(12.5, None)
+        self.assertNotIn("-t", decode)
+
+    def test_playback_commands_fallback_without_ffmpeg(self):
+        self.pane.audio_path = "/tmp/audio.mp3"
+        self.pane._ffplay = "/usr/bin/ffplay"
+        self.pane._ffmpeg = None
+        decode, play = self.pane._playback_commands(12.5, 30.0)
+        self.assertIsNone(decode)
+        self.assertIn("-ss", play)
+        self.assertIn("/tmp/audio.mp3", play)
+
+    def test_split_uses_word_timestamps_for_times(self):
+        # Splitting "the quick brown fox" before "brown": word_conf says
+        # "brown" starts at 1.5s, so the halves should meet there rather
+        # than both keeping the full 0-4s span.
+        body = "the quick brown fox"
+        self.pane._do_split(0, body.index("brown"), body)
+        first, second = self.pane.paragraphs[0], self.pane.paragraphs[1]
+        self.assertEqual(first[-1][1], 1.5)
+        self.assertEqual(second[0][0], 1.5)
+        self.pane._undo()
+
+    def test_split_interpolates_without_word_data(self):
+        # Paragraph 2 ("and keeps on going", 6-8s) has no word_conf
+        # entries, so the split time is interpolated by character offset.
+        body = "and keeps on going"
+        self.pane._do_split(2, body.index("on g"), body)
+        first, second = self.pane.paragraphs[2], self.pane.paragraphs[3]
+        split_t = first[-1][1]
+        self.assertEqual(second[0][0], split_t)
+        self.assertGreater(split_t, 6.0)
+        self.assertLess(split_t, 8.0)
+        self.pane._undo()
+
+    def test_label_counter_updates(self):
+        self.assertIn("0 of 3", self.pane.header_count_var.get())
+        self.pane.selected_idx = 0
+        self.pane._kb_set_speaker("1")
+        self.assertIn("1 of 3", self.pane.header_count_var.get())
+        self.pane._undo()
+        self.assertIn("0 of 3", self.pane.header_count_var.get())
+
+    def test_apply_palette_switches_to_dark_and_back(self):
+        try:
+            T._apply_theme("dark")
+            self.pane.apply_palette()
+            self.assertEqual(str(self.pane.text.cget("background")),
+                             T._PALETTES["dark"]["text_bg"])
+        finally:
+            T._apply_theme("light")
+            self.pane.apply_palette()
+        self.assertEqual(str(self.pane.text.cget("background")),
+                         T._PALETTES["light"]["text_bg"])
+
 
 # =====================================================================
 # Main GUI (needs Tk)
@@ -549,11 +646,17 @@ class TestWhisperGUI(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         self.gui = T.WhisperGUI(self.root)
+        # Pin the theme: the GUI defaults to "auto", which would follow
+        # the host machine's system appearance.
+        self.gui.theme_var.set("light")
+        self.gui._retheme()
         self.root.update_idletasks()
 
     def tearDown(self):
         self.root.destroy()
         T._autosave_clear()
+        T._recent_save([])
+        T._ACTIVE_THEME = "light"
 
     def test_settings_collect_apply_round_trip(self):
         self.gui.model_var.set("medium.en")
@@ -588,6 +691,21 @@ class TestWhisperGUI(unittest.TestCase):
         self.assertEqual(self.gui._batch_files(), [])
 
     @unittest.skipUnless(T.AVAILABLE_ENGINES, "no whisper engine installed")
+    def test_title_falls_back_to_filename(self):
+        self.gui.prompt_text.delete("1.0", "end")
+        p = self.gui._build_params("/tmp/REC_0042 interview.mp3",
+                                   "/tmp/x.docx", review_before_save=True)
+        self.assertEqual(p["title"], "REC_0042 interview.mp3")
+        # The filename must NOT be fed to Whisper as a prompt.
+        self.assertIsNone(p["initial_prompt"])
+        # An actual description still wins.
+        self.gui.prompt_text.insert("1.0", "R v Example interview")
+        p = self.gui._build_params("/tmp/REC_0042 interview.mp3",
+                                   "/tmp/x.docx", review_before_save=True)
+        self.assertEqual(p["title"], "R v Example interview")
+        self.assertEqual(p["initial_prompt"], "R v Example interview")
+
+    @unittest.skipUnless(T.AVAILABLE_ENGINES, "no whisper engine installed")
     def test_build_params_confidence_enables_word_timestamps(self):
         self.gui.confidence_var.set(True)
         self.gui.word_ts_var.set(False)
@@ -599,6 +717,72 @@ class TestWhisperGUI(unittest.TestCase):
         p = self.gui._build_params("/tmp/x.mp3", "/tmp/x.txt",
                                    review_before_save=True)
         self.assertFalse(p["word_timestamps"])
+
+    def test_progress_card_updates_from_eta(self):
+        self.gui._update_eta({
+            "audio_done": 30.0, "audio_total": 120.0,
+            "wall_elapsed": 10.0, "eta_seconds": 30.0, "speed": 3.0,
+        })
+        self.assertEqual(self.gui.progress_pct_var.get(), "25%")
+        self.assertAlmostEqual(float(self.gui.progress_bar["value"]), 25.0)
+        self.gui._set_progress(None)
+        self.assertEqual(self.gui.progress_pct_var.get(), "")
+
+    def test_details_toggle_packs_and_forgets_log(self):
+        self.assertFalse(self.gui.details_visible)
+        self.assertEqual(self.gui.log_frame.winfo_manager(), "")
+        self.gui._set_details(True)
+        self.assertTrue(self.gui.details_visible)
+        self.assertEqual(self.gui.log_frame.winfo_manager(), "pack")
+        self.gui._set_details(False)
+        self.assertEqual(self.gui.log_frame.winfo_manager(), "")
+
+    def test_drop_zone_exists_and_redraws(self):
+        self.assertIsInstance(self.gui.drop_canvas, tk.Canvas)
+        self.gui._redraw_drop_zone()
+        self.gui._set_drop_hover(True)
+        self.gui._set_drop_hover(False)
+
+    def test_drop_enter_accepts_the_drag(self):
+        # tkdnd refuses drops when <<DropEnter>> returns None, so the
+        # handler must echo the proposed action back.
+        class FakeEvent:
+            action = "copy"
+        self.assertEqual(self.gui._on_drop_enter(FakeEvent()), "copy")
+        self.assertTrue(self.gui._drop_hover)
+        self.gui._on_drop_leave(FakeEvent())
+        self.assertFalse(self.gui._drop_hover)
+
+    def test_four_tabs_in_expected_order(self):
+        labels = [self.gui.notebook.tab(t, "text")
+                  for t in self.gui.notebook.tabs()]
+        self.assertEqual(labels, ["File", "Model", "Advanced", "Recent"])
+
+    def test_recent_tab_lists_existing_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "job.transcript.docx"
+            p.write_text("x")
+            T._recent_add(p)
+            self.gui._refresh_recent_menu()
+            self.assertEqual(self.gui._recent_paths, [str(p.resolve())])
+            self.assertEqual(self.gui.recent_listbox.size(), 1)
+            self.assertIn("job.transcript.docx",
+                          self.gui.recent_listbox.get(0))
+        # File deleted: refresh drops it.
+        self.gui._refresh_recent_menu()
+        self.assertEqual(self.gui._recent_paths, [])
+
+    def test_theme_and_details_round_trip_in_settings(self):
+        self.gui.theme_var.set("dark")
+        self.gui._set_details(True)
+        snap = self.gui._collect_settings()
+        self.assertEqual(snap["theme"], "dark")
+        self.assertIs(snap["show_details"], True)
+        self.gui.theme_var.set("light")
+        self.gui._set_details(False)
+        self.gui._apply_settings(snap)
+        self.assertEqual(self.gui.theme_var.get(), "dark")
+        self.assertTrue(self.gui.details_visible)
 
     def test_review_autosave_written_and_cleared_on_exit(self):
         self.gui._pending_review_info = {

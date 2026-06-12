@@ -2,7 +2,15 @@
 
 (c) James Leaver, 2026.
 
-An experimental GUI for transcribing audio and video files on macOS and Windows. It uses OpenAI's Whisper to do the transcription, then a separate script groups the result into likely paragraphs ready for speaker assignment and writes a .txt file. Everything runs locally on your computer — no audio, video, or transcripts are uploaded to the internet.
+An experimental GUI for transcribing audio and video files on macOS and
+Windows. A Whisper engine (openai-whisper, faster-whisper, or
+mlx-whisper) does the transcription, the result is grouped into likely
+paragraphs, and a built-in review pane lets you label speakers, edit
+text, search and replace, and listen back to the source audio before
+saving as Word (`.docx`), PDF, or plain text. Several files can be
+queued and transcribed in one unattended batch. Everything runs locally
+on your computer — no audio, video, or transcripts are uploaded to the
+internet.
 
 When a particular model is run for the first time, that model will be
 downloaded to your computer and stored locally. The `medium.en` or
@@ -18,7 +26,10 @@ Questions: [jleaver@sgchambers.com.au](mailto:jleaver@sgchambers.com.au)
 Transcribr-Installer/
 ├── INSTALL.txt              ← Quick-start instructions
 ├── README.md                ← This file
-├── transcribr.py   ← The cross-platform GUI itself
+├── transcribr.py            ← The cross-platform GUI itself
+├── tests/                   ← Automated test suite
+│   ├── test_transcribr.py
+│   └── run_tests.command    ← Mac users: double-click to run the tests
 ├── macos/
 │   ├── install.command      ← Mac users: double-click this
 │   └── app_template/        ← Files used by the installer
@@ -57,7 +68,9 @@ The installer handles all of that.
    - Ask before installing Homebrew (only if missing)
    - Install Python 3.12, ffmpeg, and python-tk@3.12 via Homebrew
    - Create a venv at `~/Library/Application Support/Transcribr/`
-   - Install openai-whisper into that venv (downloads ~1.5 GB)
+   - Install openai-whisper plus faster-whisper, and on Apple Silicon
+     (macOS 13.5+) mlx-whisper, along with python-docx, reportlab and
+     the UI theme packages (downloads ~1.5 GB+)
    - Create `/Applications/Transcribr.app`
 5. Launch from Spotlight, Launchpad, or the Applications folder.
 
@@ -71,191 +84,187 @@ The installer handles all of that.
 4. Read what it tells you and confirm prompts. It will:
    - Use winget to install Python 3.12 and ffmpeg (Gyan.FFmpeg)
    - Create a venv at `%LOCALAPPDATA%\Transcribr\venv`
-   - Install openai-whisper into that venv (downloads ~2 GB)
+   - Install openai-whisper and faster-whisper plus python-docx,
+     reportlab and the UI theme packages (downloads ~2 GB)
    - Place a Desktop shortcut and a Start Menu entry
-5. Launch from your Desktop or Start Menu (search "whisper").
+5. Launch from your Desktop or Start Menu (search "Transcribr").
 
 ## Using the application
 
-When you launch the app you get a single window with all of the
-options laid out in groups. The defaults are sensible for most jobs;
-you can change settings as needed and click **Run Transcription**.
+The main window groups the settings into four tabs — **File**,
+**Model**, **Advanced**, and **Recent** — with the Run controls and a
+progress card always visible below. The defaults are sensible for most
+jobs; pick an input file and click **Run Transcription**.
 
-### File
+The app remembers your settings (engine, model, format, description,
+decoding options, theme) between launches, and **View -> Appearance**
+switches between light mode, dark mode, or following the system
+setting.
 
-**Input.** The audio or video file to transcribe. Click *Browse...*
-and pick it, or paste / type a path. Anything ffmpeg can read works:
-`.mp3`, `.wav`, `.m4a`, `.mp4`, `.mov`, `.aac`, `.flac`, `.ogg`,
-`.opus`, `.webm`, etc. You can also drag a file onto the window if
-your install supports it.
+### File tab
 
-**Output.** Where the paragraph-grouped output file goes. Auto-fills
-to `<input>.transcript.<ext>` next to the input file whenever you
-change the input or the format. Override it if you want it somewhere
-else.
+**Drop zone.** Drag one or more audio/video files onto the dashed
+panel (or anywhere on the window), or click it to browse. Dropping a
+single file sets it as the Input; dropping several adds them all to
+the batch queue.
 
-**Format.** Choose how the main output is delivered:
+**Input.** The audio or video file to transcribe. Anything ffmpeg can
+read works: `.mp3`, `.wav`, `.m4a`, `.mp4`, `.mov`, `.aac`, `.flac`,
+`.ogg`, `.opus`, `.webm`, etc.
 
-- **`.txt`** — plain text with one paragraph per line block, each
-  starting with a timestamp in square brackets. Easiest to edit in
-  any text editor; perfect when you want to paste excerpts somewhere
-  else.
-- **`.docx`** — Microsoft Word format in a monospaced font, with a
-  hanging indent so the timestamp sits in the left margin and the
-  body text wraps further right. This makes it easy to type a speaker
-  name before each timestamp and press Tab to align cleanly. Includes
-  a "Page X of Y" footer and an italic disclaimer at the end of the
-  document.
+**Output.** Where the transcript goes. Auto-fills to
+`<input>.transcript.<ext>` next to the input file whenever you change
+the input or the format. Override it if you want it somewhere else.
 
-### Model
+**Format.**
 
-This is the most important choice and the main quality / speed
-trade-off. The English-only models (`.en` suffix) are slightly more
-accurate on English than their multilingual counterparts of the same
-size and ignore the *Language* dropdown.
+- **`.txt`** — plain text, one paragraph per block, each starting with
+  a timestamp in square brackets. Easiest to edit anywhere.
+- **`.docx`** — A4 Word document in a monospaced font with a hanging
+  indent (timestamp in the left column, body wrapping cleanly), bold
+  speaker labels, a "Page X of Y" footer, and an italic disclaimer.
+- **`.pdf`** — an A4 PDF with the same layout as the Word output.
+  (PDFs can't be re-opened for labelling later; use `.docx` or `.txt`
+  if you'll want to revisit the speaker labels.)
+
+**Description of file.** Free text that primes Whisper with context
+*and* becomes the document title (left empty, the document is titled
+after the source file's name instead). This is one of the
+highest-leverage settings for accuracy on names and jargon. Whisper
+does not "know" the names of the people in your recording; tell it
+ahead of time:
+
+> *DVEC interview between Constable Macklebum and Joannah Bloggs at
+> Mount Druitt Police Station.*
+
+Worth including: names of speakers and people referred to, ambiguous
+place names, acronyms (DVEC, AVO, ICAC), and a short note on the
+format ("interview", "phone call", "court hearing"). Keep it under
+about 200 words; longer prompts get truncated.
+
+**Batch queue.** Add several files to transcribe them one after
+another in a single unattended run. Each transcript is saved next to
+its source file with no interactive review; failures are recorded and
+the run carries on, with a summary at the end. Open each result from
+the **Recent** tab afterwards to label speakers. Leave the queue empty
+to use the single Input file above (which *does* pause for review).
+
+### Model tab
+
+**Engine.** Which Whisper implementation does the work. Only engines
+actually installed appear:
+
+- **openai-whisper** — the reference implementation. Most thoroughly
+  tested.
+- **faster-whisper** — CTranslate2-based; substantially faster on CPU
+  with essentially identical output.
+- **mlx-whisper** — Apple-Silicon-only (macOS 13.5+), uses the Mac's
+  GPU via MLX. Fastest option on M-series machines. No mid-run Stop.
+
+**Model.** The main quality / speed trade-off. English-only models
+(`.en` suffix) are slightly more accurate on English and ignore the
+*Language* dropdown.
 
 | Model | Download | Speed (relative) | Notes |
 |---|---|---|---|
 | `tiny.en`, `tiny` | ~75 MB | very fast | Often inaccurate; useful for quick dry runs |
 | `base.en`, `base` | ~150 MB | fast | Acceptable for clear, simple speech |
 | `small.en`, `small` | ~500 MB | moderate | Good balance for casual jobs |
-| `medium.en`, `medium` | ~1.5 GB | slow | The default. Recommended for legal / interview / DVEC work |
+| `medium.en`, `medium` | ~1.5 GB | slow | Recommended for legal / interview / DVEC work |
 | `large-v1`, `large-v2`, `large-v3`, `large` | ~3 GB | very slow | Best raw accuracy; runtime can be painful on a CPU |
 | `turbo`, `large-v3-turbo` | ~1.6 GB | fast (despite the size) | Faster than `large-v3` with similar accuracy. No `.en` variant |
 
 Models download once on first use and are cached at
 `~/.cache/whisper/` (Mac) or `%USERPROFILE%\.cache\whisper\`
-(Windows). Subsequent runs use the cached version.
+(Windows).
 
-For DVEC-style recordings — Australian accents, distressed speech,
-proper nouns that matter — `medium.en` or `large-v3-turbo` are the
-two to pick from. Try both on a representative file once and use
-whichever you prefer.
+**Language / Task.** Set the language explicitly if you know it
+(auto-detect costs a little time and accuracy). *Translate* converts
+non-English audio to English output; *Transcribe* keeps the source
+language.
 
-### Language
+**Decoding options.** These usually do not need touching — the
+defaults are tuned by Whisper's authors. Briefly: **Temperature** 0 =
+deterministic; **Beam size / Best of** higher = better but slower;
+**Compression-ratio threshold** catches hallucination loops;
+**No-speech threshold** raises/lowers how readily silence is skipped;
+**Condition on previous text** improves consistency but can propagate
+an early mistake. **Highlight low-confidence words in review** records
+per-word confidence during transcription (slightly slower) so the
+review pane can shade words the engine was unsure about.
 
-Tells Whisper what language the audio is in. *Auto-detect* works but
-costs a small amount of time and accuracy. If you know the language,
-set it explicitly. The `.en` models always treat input as English
-regardless of this setting.
+### Advanced tab
 
-### Task
+**Paragraph grouping.** *Pause that triggers a new paragraph* (default
+1.5 s) controls how aggressively paragraphs break — lower for
+rapid-fire dialogue, higher for monologues. Breaks also occur at
+sentence-ending punctuation and short acknowledgments ("Yes", "Okay"),
+and a 60-second cap stops run-on paragraphs. *Show timestamps in
+output* prefixes each paragraph with `[MM:SS]`. *Review and label
+speakers before saving* opens the review pane when transcription
+finishes (untick to save straight to disk).
 
-- **Transcribe** (default): output is in the source language.
-- **Translate**: output is translated to English. Only useful for
-  non-English audio. Ignored by `.en` models.
+**Additional outputs.** Optional technical sidecar files: JSON (the
+full Whisper result), SRT / VTT subtitles, and TSV.
 
-### Initial prompt
+### Recent tab
 
-A free-text box that primes the model with context before
-transcription begins. This is one of the highest-leverage settings
-for accuracy on names and jargon.
+The last ten transcripts you produced or opened, with their locations.
+Double-click one (or use **Open for review**) to re-open it for
+speaker labelling and editing — also available as **File -> Open
+Recent** in the menu.
 
-Whisper does not "know" the names of the people in your recording.
-If you want it to spell *Joannah Bloggs* correctly rather than
-guessing *Jo-Anna Blaggs / Joanne Abloggs / Goanna Frogs*, tell it
-ahead of time:
+### Run / Stop and progress
 
-> *DVEC interview between Constable Macklebum and Joannah Bloggs at
-> Mount Druitt Police Station.*
+**Run Transcription** starts the job. The progress card shows the
+file name, a progress bar with percentage, time remaining, and speed.
+**Show details** expands the raw engine output underneath (it expands
+automatically if something goes wrong). Model loading can take 30+
+seconds on first launch — that's normal.
 
-Worth including:
-- Names of speakers and people referred to
-- Place names that might be ambiguous
-- Acronyms or jargon (DVEC, AVO, ICAC, etc.)
-- A short note on the format ("interview", "phone call", "court
-  hearing")
+**Stop** saves whatever has been transcribed so far as a partial
+transcript. It takes effect at the next chunk boundary (not supported
+mid-run by mlx-whisper).
 
-Keep it under about 200 words; longer prompts get truncated.
+### The review pane
 
-### Paragraph grouping
+After a transcription (or when opening an existing `.docx`/`.txt`
+transcript), the review pane shows the paragraphs in three columns —
+speaker, timestamp, text — with up to nine colour-coded speakers.
 
-**Pause that triggers a new paragraph** (default 1.5 seconds). The
-script breaks paragraphs whenever it sees a pause of at least this
-length, when a question mark ends one segment, or when one side
-gives a short acknowledgment ("Yes", "Yeah", "Okay").
+| Action | How |
+|---|---|
+| Select a paragraph | Click it, or Up/Down arrows |
+| Assign a speaker | Press `1`–`9` (auto-advances to the next paragraph) |
+| Clear a speaker | Press `0` |
+| Jump to the next unlabelled paragraph | Press `N` |
+| Play that paragraph's audio | Press `P`, or the ▶ Play button |
+| Merge with the previous paragraph | Press `M` |
+| Split a paragraph | Double-click the word to split before |
+| Edit the text | Enter (or F2), then Enter to commit / Esc to cancel |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Cmd on Mac), or the buttons |
+| Find / replace | Ctrl+F (Cmd+F), then *Find next* / *Replace all* |
 
-- **Lower** (e.g. 1.0): more breaks. Useful for rapid-fire dialogue
-  where speakers cut each other off.
-- **Higher** (e.g. 2.5): fewer breaks. Useful for monologue-heavy
-  audio where one person speaks at length.
+Speaker names typed into the name fields appear in the saved document
+in place of the numbers. The header shows how many paragraphs are
+labelled. If word-confidence highlighting was enabled for the run,
+uncertain words are shaded red/amber so you know where to listen.
 
-Tweak after looking at a result; you do not need to get it right
-first time. The text itself never changes — only paragraph breaks
-and timestamps move around.
+While you review, the work is auto-saved every few seconds; if the app
+crashes or is force-quit, the next launch offers to restore the
+session exactly where you left off. A safety copy of the un-labelled
+transcript is also written to disk before review begins.
 
-**Show timestamps in output** (default ON). When ticked, each
-paragraph in the output starts with a `[MM:SS]` timestamp. Untick to
-get plain prose with no timestamps; useful when you want to share
-the transcript without time markers.
+## Running the tests
 
-### Advanced
+```bash
+python3 -m unittest discover -s tests -v
+```
 
-These usually do not need touching. Defaults are tuned by Whisper's
-authors for typical use. The settings worth knowing:
-
-**Temperature** (default 0.0). 0 means deterministic decoding; the
-same audio produces the same transcript every time. Higher values
-let the model take more risks. Whisper internally bumps this up if
-it suspects the output is garbage, so leaving it at 0 is normally
-correct.
-
-**Beam size** and **Best of** (default 5 each). Higher = better
-quality, slower. The defaults are a good balance. Setting them
-higher for very important short clips can occasionally help.
-
-**Compression-ratio threshold** (default 2.4). Whisper rejects
-output that is suspiciously repetitive (a sign of a hallucination
-loop). Raise this if you legitimately have repeating content being
-flagged; lower it if hallucinations are slipping through.
-
-**Logprob threshold** (default -1.0). Rejects very low-confidence
-output. Default is fine.
-
-**No-speech threshold** (default 0.6). How aggressively Whisper
-treats silent passages as "no speech". Raise it (e.g. 0.7) if
-Whisper is hallucinating words during silent stretches; lower it if
-real speech is being skipped.
-
-**Condition on previous text** (default ON). Each segment uses the
-previous transcript as context, which improves consistency. Turn
-off if Whisper gets stuck in a repetition loop or copies an early
-mistake forward through the rest of the file.
-
-**Word-level timestamps** (default OFF). Records a timestamp per
-word rather than per segment. Slows transcription and is not used by
-the paragraph script, so leave off unless you want the JSON for
-something else.
-
-### Run / Stop
-
-**Run Transcription** kicks off the job. Progress streams into the
-*Progress* pane: model loading, then segment-by-segment transcripts
-as they complete. Do not be alarmed by long pauses early on — model
-loading can take 30+ seconds, especially on first launch.
-
-**Stop** appears beside Run while a job is in progress. Clicking it
-saves whatever has been transcribed up to that point as a partial
-transcript, with the same paragraph grouping. Stop takes effect at
-the next chunk boundary, usually within a few seconds. Whisper does
-not support a true pause; only stop-and-save.
-
-### After transcription
-
-When the run finishes, three buttons become available at the bottom:
-
-- **Open Output** opens the `.txt` file in your default text editor.
-- **Show in Folder** (called "Reveal in Finder" on Mac, "Show in
-  Explorer" on Windows) opens the containing folder with the file
-  selected.
-- **About** shows version, copyright, and contact info.
-
-Reading the result, you may notice the occasional paragraph that
-mixes two speakers or an answer that did not get its own break.
-That is expected — the paragraph script's job is to give you a
-useful starting point, not a perfect speaker-attributed transcript.
-A quick read-through with the audio open is the second pass; the
-script saves the bulk of the manual labour.
+or double-click `tests/run_tests.command` on a Mac (uses the app's
+venv, which has the optional dependencies). Tests that need an
+optional package or a display skip themselves; the suite never touches
+your real settings.
 
 ## Re-running the installer
 
@@ -274,6 +283,7 @@ Both installers are safe to re-run. They will:
 | Python virtualenv | `~/Library/Application Support/Transcribr/venv/` |
 | The GUI script | `~/Library/Application Support/Transcribr/transcribr.py` |
 | The application | `/Applications/Transcribr.app` |
+| Settings / recent / autosave | `~/Library/Application Support/Transcribr/*.json` |
 | Launch logs | `~/Library/Logs/Transcribr/launch.log` |
 | Whisper model cache | `~/.cache/whisper/` |
 
@@ -285,6 +295,7 @@ Both installers are safe to re-run. They will:
 | The GUI script | `%LOCALAPPDATA%\Transcribr\transcribr.py` |
 | Desktop shortcut | `%USERPROFILE%\Desktop\Transcribr.lnk` |
 | Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk` |
+| Settings / recent / autosave | `%APPDATA%\Transcribr\*.json` |
 | Launch logs | `%LOCALAPPDATA%\Transcribr\launch.log` |
 | Whisper model cache | `%USERPROFILE%\.cache\whisper\` |
 

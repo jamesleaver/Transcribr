@@ -1,5 +1,5 @@
-WHISPER TRANSCRIBER - Installation Guide
-=========================================
+TRANSCRIBR - Installation Guide
+================================
 
 To install:
 
@@ -27,11 +27,13 @@ README.md.
 (c) James Leaver, 2026.
 
 An experimental tool for transcribing audio and video files on macOS
-and Windows. It uses OpenAI's Whisper to do the transcription, then a
-separate script groups the result into likely paragraphs ready for
-speaker assignment and writes a .txt file. Everything runs locally
-on your computer - no audio, video, or transcripts are uploaded to
-the internet.
+and Windows. A Whisper engine does the transcription, the result is
+grouped into likely paragraphs, and a built-in review pane lets you
+label speakers, edit text, and listen back to the source audio before
+saving as Word (.docx), PDF, or plain text. Several files can be
+queued and transcribed in one unattended batch. Everything runs
+locally on your computer - no audio, video, or transcripts are
+uploaded to the internet.
 
 When a particular model is run for the first time, that model will
 be downloaded to your computer and stored locally. The 'medium.en'

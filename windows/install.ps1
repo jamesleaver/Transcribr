@@ -295,7 +295,7 @@ Info "Installing openai-whisper (downloads PyTorch, ~2GB)..."
 # Pin openai-whisper >= 20250625; older releases use the removed
 # pkg_resources module, which is gone in setuptools 81+.
 & "$venv\Scripts\python.exe" -m pip install --upgrade `
-    "openai-whisper>=20250625" python-docx reportlab
+    "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect
 if ($LASTEXITCODE -ne 0) { Fail "openai-whisper / python-docx / reportlab install failed" }
 
 # Verify whisper imports
