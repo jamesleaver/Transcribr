@@ -15,7 +15,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -35,6 +35,7 @@ import contextlib
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -181,6 +182,31 @@ def _next_revision_path(original):
         n += 1
 
 
+_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
+                     ".opus", ".mp4", ".mov", ".mkv", ".avi", ".webm")
+
+
+def _guess_audio_for_transcript(transcript_path):
+    """Best-effort: find the source audio/video file next to a saved
+    transcript, so playback works when re-opening it for review.
+
+    Transcripts are written as <media stem>.transcript.<ext> (possibly
+    with a .revN inserted), so we strip those suffixes and probe the
+    known media extensions. Returns a str path or None."""
+    p = Path(transcript_path)
+    stem = p.stem  # e.g. "interview.transcript" or "interview.transcript.rev2"
+    m = re.match(r"^(.*)\.rev\d+$", stem)
+    if m:
+        stem = m.group(1)
+    if stem.endswith(".transcript"):
+        stem = stem[: -len(".transcript")]
+    for ext in _AUDIO_EXTENSIONS:
+        candidate = p.with_name(stem + ext)
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 # ---- Recent transcripts persistence -------------------------------------
 
 _RECENT_MAX = 10
@@ -271,6 +297,48 @@ def _settings_save(settings):
             json.dump(dict(settings), fh, indent=2)
     except Exception as e:
         _log(f"Could not write settings.json: {e}")
+
+
+# ---- Review auto-save (crash recovery) -----------------------------------
+#
+# While the review pane is open, the labelled-but-unsaved state is
+# periodically written here. It is deleted on any clean exit from review;
+# if it survives to the next launch, the app offers to restore it.
+
+def _autosave_file():
+    return _config_dir() / "autosave.json"
+
+
+def _autosave_load():
+    """Return the saved review session dict, or None."""
+    try:
+        import json
+        path = _autosave_file()
+        if not path.exists():
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and data.get("paragraphs"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _autosave_save(data):
+    try:
+        import json
+        with open(_autosave_file(), "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except Exception as e:
+        _log(f"Could not write autosave.json: {e}")
+
+
+def _autosave_clear():
+    try:
+        _autosave_file().unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _set_window_icon(root):
@@ -483,11 +551,11 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
                               title=None, output_format="txt", speakers=None):
     """Single entry point for writing transcript output.
 
-    Centralises the txt-vs-docx switch so the worker (direct-write path)
-    and the GUI (review-screen path) can both call the same function.
+    Centralises the txt-vs-docx-vs-pdf switch so the worker (direct-write
+    path) and the GUI (review-screen path) can both call the same function.
 
-    Raises ImportError with a friendly message if .docx is requested but
-    python-docx isn't installed.
+    Raises ImportError with a friendly message if .docx or .pdf is
+    requested but the needed package isn't installed.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -502,6 +570,16 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
                 "Cannot write .docx: the 'python-docx' package is not "
                 "installed. Install it with:\n  pip install python-docx\n"
                 "Or pick the .txt format instead.")
+    elif output_format == "pdf":
+        try:
+            _write_pdf(paragraphs, out_path,
+                       show_timestamp=show_timestamp, title=title,
+                       speakers=speakers)
+        except ImportError:
+            raise ImportError(
+                "Cannot write .pdf: the 'reportlab' package is not "
+                "installed. Install it with:\n  pip install reportlab\n"
+                "Or pick the .txt or .docx format instead.")
     else:
         out_path.write_text(
             render(paragraphs, show_timestamp=show_timestamp,
@@ -976,6 +1054,7 @@ def transcribe_worker(params, q, cancel_event):
                 "result": result if not used_partial else None,
                 "extra_formats": params.get("extra_formats") or [],
                 "word_conf": word_conf,
+                "audio_path": params["input"],
             },
         ))
         return
@@ -1451,6 +1530,113 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
     _add_field(fp, " NUMPAGES ")
 
     doc.save(str(out_path))
+
+
+def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
+               speakers=None):
+    """Write paragraphs to an A4 PDF, visually matching the .docx output:
+    Courier body with a hanging timestamp indent, bold speaker labels that
+    stay with their paragraph, an italic disclaimer, and a right-aligned
+    'Page X of Y' footer."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.pdfgen import canvas as _pdfcanvas
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+    from xml.sax.saxutils import escape
+
+    page_w, _page_h = A4
+
+    class _NumberedCanvas(_pdfcanvas.Canvas):
+        """Two-pass canvas so the footer can say 'Page X of Y'."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_states = []
+
+        def showPage(self):
+            self._saved_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total = len(self._saved_states)
+            for state in self._saved_states:
+                self.__dict__.update(state)
+                self.setFont("Courier", 10)
+                self.drawRightString(
+                    page_w - 2.5 * cm, 1.5 * cm,
+                    f"Page {self._pageNumber} of {total}")
+                _pdfcanvas.Canvas.showPage(self)
+            _pdfcanvas.Canvas.save(self)
+
+    body_style = ParagraphStyle(
+        "Transcript",
+        fontName="Courier", fontSize=10, leading=12,
+        spaceAfter=6,
+    )
+    if show_timestamp:
+        # Hanging indent: timestamp in the left column, wrapped body
+        # lines aligned under the body column (mirrors the docx style).
+        body_style.leftIndent = 3.0 * cm
+        body_style.firstLineIndent = -3.0 * cm
+    label_style = ParagraphStyle(
+        "SpeakerLabel",
+        fontName="Courier-Bold", fontSize=10, leading=12,
+        spaceBefore=8, spaceAfter=0, keepWithNext=1,
+    )
+    title_style = ParagraphStyle(
+        "TranscriptTitle",
+        fontName="Courier-Bold", fontSize=12, leading=14,
+        spaceAfter=12,
+    )
+    disclaimer_style = ParagraphStyle(
+        "Disclaimer",
+        fontName="Courier-Oblique", fontSize=10, leading=12,
+        spaceBefore=12,
+    )
+
+    story = []
+    if title:
+        story.append(Paragraph(escape(title), title_style))
+
+    last_speaker = None
+    for i, para in enumerate(paragraphs):
+        start = para[0][0]
+        body = " ".join(seg[2] for seg in para).lstrip()
+        speaker = speakers[i] if speakers and i < len(speakers) else None
+        if speaker and speaker != last_speaker:
+            story.append(Paragraph(escape(speaker), label_style))
+        elif speaker is None and last_speaker is not None:
+            story.append(Paragraph(escape(UNATTRIBUTED_LABEL), label_style))
+        last_speaker = speaker
+
+        if show_timestamp:
+            # Non-breaking spaces keep the timestamp and the gap to the
+            # body out of reportlab's line-wrapping calculations.
+            text = (escape(format_timestamp(start))
+                    + "   " + escape(body))
+        else:
+            text = escape(body)
+        story.append(Paragraph(text, body_style))
+
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        escape(
+            "Transcribed using Transcribr - (c) James Leaver, 2026. "
+            "If this text has not been deleted by the person who prepared "
+            "this document, then the accuracy of this transcript may not "
+            "have been checked by a human."
+        ),
+        disclaimer_style,
+    ))
+
+    doc = SimpleDocTemplate(
+        str(out_path), pagesize=A4,
+        leftMargin=2.5 * cm, rightMargin=2.5 * cm,
+        topMargin=2.5 * cm, bottomMargin=2.5 * cm,
+        title=title or Path(out_path).stem,
+    )
+    doc.build(story, canvasmaker=_NumberedCanvas)
 
 
 def _write_extra_formats(result, txt_out_path, formats, q):
@@ -2929,11 +3115,24 @@ class ReviewPaneText(ttk.Frame):
 
     def __init__(self, parent, paragraphs, *, on_save, on_cancel,
                  show_timestamp=True, loaded=False, on_save_revision=None,
-                 word_conf=None):
+                 word_conf=None, audio_path=None, on_autosave=None):
         super().__init__(parent)
         self.paragraphs = list(paragraphs)
         self.speakers = [None] * len(self.paragraphs)
         self.speaker_names = dict(self.DEFAULT_NAMES)
+        # Source audio for paragraph playback. Playback needs both the file
+        # and ffplay (ships with ffmpeg, which Whisper already requires);
+        # when either is missing the play controls simply don't appear.
+        self.audio_path = (str(audio_path)
+                           if audio_path and Path(audio_path).exists()
+                           else None)
+        self._ffplay = shutil.which("ffplay")
+        self._play_proc = None
+        self._play_poll_id = None
+        # Called (paragraphs, speakers, speaker_names) after mutations so
+        # the host can persist a crash-recovery snapshot.
+        self.on_autosave_cb = on_autosave
+        self._autosave_after_id = None
         # Flat, time-ordered list of (start, end, word, probability) tuples
         # from the engine when word timestamps were captured; None if not
         # available (e.g. loaded transcripts). Used to shade low-confidence
@@ -3070,6 +3269,7 @@ class ReviewPaneText(ttk.Frame):
                 "Click a paragraph to select  ·  Up/Down navigate  ·  "
                 "1-9 set speaker  ·  0 clear  ·  M merge with previous  ·  "
                 "Double-click a word to split  ·  Enter to edit text  ·  "
+                "N next unlabelled  ·  P play audio  ·  "
                 "Ctrl+Z undo / Ctrl+Shift+Z redo  ·  Ctrl+F find"
             ),
             foreground="gray",
@@ -3127,6 +3327,13 @@ class ReviewPaneText(ttk.Frame):
         self.redo_btn = ttk.Button(bar, text="Redo", width=6,
                                    command=self._redo, state="disabled")
         self.redo_btn.pack(side="left", padx=(4, 0))
+
+        # Paragraph audio playback, when we have the source audio and
+        # ffplay on PATH.
+        if self.audio_path and self._ffplay:
+            self.play_btn = ttk.Button(bar, text="▶ Play", width=8,
+                                       command=self._toggle_play)
+            self.play_btn.pack(side="left", padx=(12, 0))
 
         ttk.Separator(bar, orient="vertical").pack(
             side="left", fill="y", padx=8)
@@ -3242,6 +3449,27 @@ class ReviewPaneText(ttk.Frame):
             self._undo_stack.pop(0)
         self._redo_stack.clear()
         self._update_undo_buttons()
+        # Every mutation passes through here, so it doubles as the
+        # autosave trigger.
+        self._schedule_autosave()
+
+    def _schedule_autosave(self):
+        """Debounced crash-recovery snapshot: fires 3s after the last
+        mutation rather than on every keystroke of a rename."""
+        if self.on_autosave_cb is None:
+            return
+        if self._autosave_after_id is not None:
+            try:
+                self.after_cancel(self._autosave_after_id)
+            except (tk.TclError, ValueError):
+                pass
+        self._autosave_after_id = self.after(3000, self._do_autosave)
+
+    def _do_autosave(self):
+        self._autosave_after_id = None
+        if self.on_autosave_cb is not None:
+            self.on_autosave_cb(self.paragraphs, self.speakers,
+                                dict(self.speaker_names))
 
     def _restore(self, snap):
         self.paragraphs = [list(p) for p in snap["paragraphs"]]
@@ -3266,6 +3494,7 @@ class ReviewPaneText(ttk.Frame):
         self._redo_stack.append(self._snapshot())
         self._restore(self._undo_stack.pop())
         self._update_undo_buttons()
+        self._schedule_autosave()
         return "break"
 
     def _redo(self, event=None):
@@ -3274,6 +3503,7 @@ class ReviewPaneText(ttk.Frame):
         self._undo_stack.append(self._snapshot())
         self._restore(self._redo_stack.pop())
         self._update_undo_buttons()
+        self._schedule_autosave()
         return "break"
 
     def _update_undo_buttons(self):
@@ -3360,6 +3590,74 @@ class ReviewPaneText(ttk.Frame):
         self.show_confidence = bool(self.confidence_toggle_var.get())
         self._render_all()
         self._update_highlight(scroll_into_view=False)
+
+    # ----- Audio playback ----------------------------------------------------
+
+    def _can_play(self):
+        return bool(self.audio_path and self._ffplay)
+
+    def _toggle_play(self):
+        """Play the selected paragraph's audio span; press again to stop."""
+        if self._play_proc is not None:
+            self._stop_playback()
+            return
+        if not self._can_play() or self.selected_idx is None:
+            return
+        para = self.paragraphs[self.selected_idx]
+        if not para:
+            return
+        start = max(0.0, float(para[0][0]))
+        end = float(para[-1][1])
+        # A touch of tail padding so the last word isn't clipped.
+        dur = max(0.5, end - start + 0.3)
+        try:
+            self._play_proc = subprocess.Popen(
+                [self._ffplay, "-nodisp", "-autoexit",
+                 "-loglevel", "quiet",
+                 "-ss", f"{start:.2f}", "-t", f"{dur:.2f}",
+                 self.audio_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except OSError as e:
+            _log(f"ffplay failed to start: {e}")
+            self._play_proc = None
+            return
+        self.play_btn.config(text="■ Stop")
+        self._poll_playback()
+
+    def _poll_playback(self):
+        """Reset the Play button once ffplay exits on its own."""
+        proc = self._play_proc
+        if proc is None:
+            return
+        if proc.poll() is None:
+            self._play_poll_id = self.after(200, self._poll_playback)
+            return
+        self._play_proc = None
+        self._play_poll_id = None
+        try:
+            self.play_btn.config(text="▶ Play")
+        except tk.TclError:
+            pass
+
+    def _stop_playback(self):
+        if self._play_poll_id is not None:
+            try:
+                self.after_cancel(self._play_poll_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._play_poll_id = None
+        proc = self._play_proc
+        self._play_proc = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        try:
+            self.play_btn.config(text="▶ Play")
+        except (tk.TclError, AttributeError):
+            pass
 
     def _bucket_words_by_paragraph(self):
         """Partition the flat word_conf list into one list of (word, prob)
@@ -3679,6 +3977,13 @@ class ReviewPaneText(ttk.Frame):
         if ks in ("m", "M"):
             self._kb_merge()
             return "break"
+        if ks in ("n", "N"):
+            self._jump_next_attention()
+            return "break"
+        if ks in ("p", "P"):
+            if self._can_play():
+                self._toggle_play()
+            return "break"
         if ks in ("Return", "F2"):
             self._kb_edit()
             return "break"
@@ -3831,6 +4136,31 @@ class ReviewPaneText(ttk.Frame):
             self.selected_idx += 1
             self._update_highlight(scroll_into_view=True)
 
+    def _jump_next_attention(self):
+        """Select the next paragraph that still needs attention: one with
+        no speaker assigned, or (when confidence shading is on) one
+        containing a low-confidence word. Wraps past the end."""
+        n = len(self.paragraphs)
+        if n == 0:
+            return
+        buckets = (self._bucket_words_by_paragraph()
+                   if (self.show_confidence and self.word_conf) else None)
+
+        def needs_attention(i):
+            if self.speakers[i] is None:
+                return True
+            if buckets is not None:
+                return any(p is not None and p < 0.6 for _, p in buckets[i])
+            return False
+
+        start = (self.selected_idx + 1) if self.selected_idx is not None else 0
+        for off in range(n):
+            i = (start + off) % n
+            if needs_attention(i):
+                self.selected_idx = i
+                self._update_highlight(scroll_into_view=True)
+                return
+
     # ----- Edit mode -------------------------------------------------------
 
     def _enter_edit_mode(self, idx):
@@ -3961,6 +4291,7 @@ class ReviewPaneText(ttk.Frame):
     def _on_name_changed(self, letter):
         self.speaker_names[letter] = self.name_vars[letter].get()
         self._render_all()
+        self._schedule_autosave()
 
     def _resolved_speakers(self):
         return [self.speaker_names.get(letter) if letter else None
@@ -3994,8 +4325,15 @@ class ReviewPaneText(ttk.Frame):
         self.on_cancel_cb()
 
     def destroy(self):
-        # No toplevel bindings to clean up - everything is on self.text,
-        # which Tk reaps automatically.
+        # Stop any playing audio and cancel pending after() callbacks; the
+        # widget bindings themselves are reaped with the widget.
+        self._stop_playback()
+        if self._autosave_after_id is not None:
+            try:
+                self.after_cancel(self._autosave_after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._autosave_after_id = None
         super().destroy()
 
     # ----- Compatibility with row-pane callers ----------------------------
@@ -4027,6 +4365,9 @@ class WhisperGUI:
 
         self._build_ui()
         self._poll_queue()
+        # After the window is up, offer to restore a crashed review session
+        # if one was autosaved. Deferred so the main window paints first.
+        self.root.after(300, self._maybe_offer_autosave_restore)
 
     # ----- UI construction ---------------------------------------------------
 
@@ -4135,6 +4476,9 @@ class WhisperGUI:
                         command=self._on_format_changed).pack(side="left")
         ttk.Radiobutton(fmt_frame, text=".docx (Word)",
                         variable=self.output_format_var, value="docx",
+                        command=self._on_format_changed).pack(side="left", padx=(16, 0))
+        ttk.Radiobutton(fmt_frame, text=".pdf (PDF)",
+                        variable=self.output_format_var, value="pdf",
                         command=self._on_format_changed).pack(side="left", padx=(16, 0))
 
         f.columnconfigure(1, weight=1)
@@ -4508,7 +4852,8 @@ class WhisperGUI:
         set_choice(self.language_var, "language",
                    [n for n, _ in LANGUAGES])
         set_choice(self.task_var, "task", ["transcribe", "translate"])
-        set_choice(self.output_format_var, "output_format", ["txt", "docx"])
+        set_choice(self.output_format_var, "output_format",
+                   ["txt", "docx", "pdf"])
 
         prompt = s.get("prompt")
         if isinstance(prompt, str) and prompt:
@@ -4651,7 +4996,7 @@ class WhisperGUI:
             p = Path(out)
             # Only swap if the existing extension is a known one - don't
             # clobber an unusual user-supplied extension.
-            if p.suffix.lower() in (".txt", ".docx"):
+            if p.suffix.lower() in (".txt", ".docx", ".pdf"):
                 self.output_var.set(str(p.with_suffix(new_ext)))
 
     def _pick_output(self):
@@ -4660,6 +5005,8 @@ class WhisperGUI:
         ext = "." + fmt
         if fmt == "docx":
             ftypes = [("Word document", "*.docx"), ("All files", "*.*")]
+        elif fmt == "pdf":
+            ftypes = [("PDF document", "*.pdf"), ("All files", "*.*")]
         else:
             ftypes = [("Text", "*.txt"), ("All files", "*.*")]
         path = filedialog.asksaveasfilename(
@@ -5115,9 +5462,12 @@ class WhisperGUI:
             loaded=loaded,
             on_save_revision=self._on_review_save_revision if loaded else None,
         )
-        # Only the single-Text pane knows how to shade word confidence.
+        # Only the single-Text pane knows about word confidence, audio
+        # playback and autosave.
         if pane_cls is ReviewPaneText:
             pane_kwargs["word_conf"] = info.get("word_conf")
+            pane_kwargs["audio_path"] = info.get("audio_path")
+            pane_kwargs["on_autosave"] = self._on_review_autosave
         self.review_pane = pane_cls(
             self.root,
             info["paragraphs"],
@@ -5131,11 +5481,13 @@ class WhisperGUI:
         preset_names = info.get("preset_speaker_names")
         if preset_speakers and preset_names:
             self.review_pane.speakers = list(preset_speakers)
-            # Reveal enough speaker-name fields for every distinct speaker in
-            # the loaded transcript (rebuilds the editor before we populate
-            # the entries below).
-            if hasattr(self.review_pane, "set_visible_speakers"):
-                self.review_pane.set_visible_speakers(len(preset_names))
+            # Reveal enough speaker-name fields to cover the highest slot
+            # in use (rebuilds the editor before we populate the entries
+            # below). Slot letters are "1".."9" so int() is safe.
+            slots = [int(L) for L in preset_names.keys()]
+            slots += [int(L) for L in preset_speakers if L]
+            if hasattr(self.review_pane, "set_visible_speakers") and slots:
+                self.review_pane.set_visible_speakers(max(slots))
             for letter, name in preset_names.items():
                 self.review_pane.speaker_names[letter] = name
                 if letter in self.review_pane.name_vars:
@@ -5182,6 +5534,77 @@ class WhisperGUI:
             self.review_pane.destroy()
             self.review_pane = None
         self.main_frame.pack(fill="both", expand=True)
+        # Any exit from review is a deliberate save/discard, so the
+        # crash-recovery snapshot is no longer needed.
+        _autosave_clear()
+
+    # ----- Review auto-save --------------------------------------------------
+
+    def _on_review_autosave(self, paragraphs, speakers, speaker_names):
+        """Persist the in-progress review state for crash recovery.
+        Called (debounced) by the review pane after every mutation."""
+        info = self._pending_review_info
+        if not info:
+            return
+        # Only keep speaker names that are actually in use or renamed,
+        # so restore reveals the right number of name fields.
+        defaults = ReviewPaneText.DEFAULT_NAMES
+        used = {letter for letter in speakers if letter}
+        names = {
+            letter: name
+            for letter, name in speaker_names.items()
+            if letter in used or name != defaults.get(letter)
+        }
+        _autosave_save({
+            "out_path": str(info.get("out_path", "")),
+            "show_timestamp": bool(info.get("show_timestamp", True)),
+            "title": info.get("title"),
+            "output_format": info.get("output_format", "txt"),
+            "loaded": bool(info.get("loaded")),
+            "audio_path": info.get("audio_path"),
+            "paragraphs": [[list(seg) for seg in para]
+                           for para in paragraphs],
+            "speakers": list(speakers),
+            "speaker_names": names,
+            "saved_at": time.time(),
+        })
+
+    def _maybe_offer_autosave_restore(self):
+        """On launch: if a crash left an autosave behind, offer to reopen
+        the review session it captured."""
+        data = _autosave_load()
+        if not data:
+            return
+        name = Path(data.get("out_path") or "").name or "transcript"
+        if not messagebox.askyesno(
+            "Restore unsaved review?",
+            "Transcribr found a review session that was never saved "
+            f"(probably from a crash or force-quit):\n\n{name}\n\n"
+            "Restore it now?",
+            default="yes",
+        ):
+            _autosave_clear()
+            return
+        paragraphs = [
+            [tuple(seg) for seg in para] for para in data["paragraphs"]
+        ]
+        info = {
+            "paragraphs": paragraphs,
+            "out_path": data.get("out_path", ""),
+            "show_timestamp": data.get("show_timestamp", True),
+            "title": data.get("title"),
+            "output_format": data.get("output_format", "txt"),
+            "used_partial": False,
+            "result": None,
+            "extra_formats": [],
+            "loaded": bool(data.get("loaded")),
+            "audio_path": data.get("audio_path"),
+            "preset_speakers": data.get("speakers") or [],
+            "preset_speaker_names": data.get("speaker_names") or {},
+        }
+        self._append_log(
+            f"Restored unsaved review session: {info['out_path']}\n")
+        self._enter_review_mode(info)
 
     def _load_transcript(self, *, preset_path=None):
         """Show a file picker (or use `preset_path` if given), parse the
@@ -5264,6 +5687,7 @@ class WhisperGUI:
             "preset_speakers": preset_speakers,
             "preset_speaker_names": preset_speaker_names,
             "loaded": True,
+            "audio_path": _guess_audio_for_transcript(path),
         }
         self.last_output = path  # so 'Open Output' / 'Show in Folder' work
         _recent_add(path)
@@ -5286,7 +5710,7 @@ class WhisperGUI:
                 speakers=speakers,
             )
         except ImportError as e:
-            messagebox.showerror("Cannot write .docx", str(e))
+            messagebox.showerror("Cannot write file", str(e))
             return
         except Exception as e:
             messagebox.showerror("Save failed",
@@ -5324,7 +5748,7 @@ class WhisperGUI:
                 speakers=speakers,
             )
         except ImportError as e:
-            messagebox.showerror("Cannot write .docx", str(e))
+            messagebox.showerror("Cannot write file", str(e))
             return
         except Exception as e:
             messagebox.showerror("Save failed",
@@ -5378,7 +5802,7 @@ class WhisperGUI:
                 speakers=None,
             )
         except ImportError as e:
-            messagebox.showerror("Cannot write .docx", str(e))
+            messagebox.showerror("Cannot write file", str(e))
             return
         except Exception as e:
             messagebox.showerror("Save failed",

@@ -204,13 +204,13 @@ info "Installing openai-whisper (downloads PyTorch, ~1.5GB)..."
 if [ "$ARCH" = "x86_64" ]; then
     info "Intel Mac detected; pinning torch/numpy/numba versions for compatibility"
     "$VENV/bin/pip" install --upgrade --prefer-binary \
-        "openai-whisper>=20250625" python-docx \
+        "openai-whisper>=20250625" python-docx reportlab \
         "torch==2.2.2" "numpy<2" "numba<0.60" \
-        || fail "openai-whisper / python-docx install failed"
+        || fail "openai-whisper / python-docx / reportlab install failed"
 else
     "$VENV/bin/pip" install --upgrade --prefer-binary \
-        "openai-whisper>=20250625" python-docx \
-        || fail "openai-whisper / python-docx install failed"
+        "openai-whisper>=20250625" python-docx reportlab \
+        || fail "openai-whisper / python-docx / reportlab install failed"
 fi
 
 # Verify whisper imports cleanly.
