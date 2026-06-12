@@ -284,6 +284,28 @@ class TestTxtRoundTrip(unittest.TestCase):
             parsed = T.read_paragraphs_from_file(out)
         self.assertEqual(parsed["speakers"], speakers)
 
+    def test_loaded_spans_stretch_to_next_paragraph(self):
+        # Files only record paragraph start times. Parsed paragraphs must
+        # come back with each end stretched to the next paragraph's start,
+        # so audio playback covers the full paragraph (the bug where only
+        # ~1.3s snippets played). Timestamps round to whole seconds in the
+        # file, so use whole-second starts.
+        paras = [
+            [(0.0, 2.0, "First paragraph of the morning.")],
+            [(45.0, 47.0, "Second paragraph after a long stretch.")],
+            [(90.0, 92.0, "Third and final paragraph.")],
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "t.transcript.txt"
+            T.write_paragraphs_to_file(paras, out, output_format="txt")
+            parsed = T.read_paragraphs_from_file(out)
+        spans = [(p[0][0], p[-1][1]) for p in parsed["paragraphs"]]
+        self.assertEqual(spans[0], (0.0, 45.0))
+        self.assertEqual(spans[1], (45.0, 90.0))
+        # Last paragraph keeps the placeholder span (real end unknowable);
+        # playback treats it as open-ended.
+        self.assertEqual(spans[2], (90.0, 91.0))
+
 
 @unittest.skipUnless(
     __import__("importlib.util", fromlist=["util"]).find_spec("docx"),
@@ -488,6 +510,32 @@ class TestReviewPaneText(unittest.TestCase):
         self.pane.audio_path = "/tmp/anything.mp3"
         self.pane._ffplay = "/usr/bin/true"
         self.assertTrue(self.pane._can_play())
+
+    def test_playback_span_uses_real_segment_ends(self):
+        # Fresh-transcription paragraphs carry real end times.
+        start, dur = self.pane._playback_span(0)  # (0.0, 4.0) paragraph
+        self.assertEqual(start, 0.0)
+        self.assertAlmostEqual(dur, 4.3)
+
+    def test_playback_span_degenerate_extends_to_next_paragraph(self):
+        # Loaded-transcript style: placeholder ~1s spans.
+        self.pane.paragraphs = [
+            [(10.0, 11.0, "first")],
+            [(40.0, 41.0, "second")],
+            [(70.0, 71.0, "last")],
+        ]
+        start, dur = self.pane._playback_span(0)
+        self.assertEqual(start, 10.0)
+        self.assertAlmostEqual(dur, 30.3)  # to next paragraph's start
+
+    def test_playback_span_last_degenerate_is_open_ended(self):
+        self.pane.paragraphs = [
+            [(10.0, 11.0, "first")],
+            [(70.0, 71.0, "last")],
+        ]
+        start, dur = self.pane._playback_span(1)
+        self.assertEqual(start, 70.0)
+        self.assertIsNone(dur)  # play to end of file
 
 
 # =====================================================================

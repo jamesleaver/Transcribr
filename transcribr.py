@@ -15,7 +15,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -640,12 +640,33 @@ def read_paragraphs_from_file(path):
         raise TranscriptParseError(f"File not found: {path}")
     suffix = path.suffix.lower()
     if suffix == ".txt":
-        return _parse_txt_transcript(path)
-    if suffix == ".docx":
-        return _parse_docx_transcript(path)
-    raise TranscriptParseError(
-        f"Unsupported file extension: {suffix}. Only .txt and .docx are supported."
-    )
+        parsed = _parse_txt_transcript(path)
+    elif suffix == ".docx":
+        parsed = _parse_docx_transcript(path)
+    else:
+        raise TranscriptParseError(
+            f"Unsupported file extension: {suffix}. Only .txt and .docx are supported."
+        )
+    _infer_paragraph_end_times(parsed["paragraphs"])
+    return parsed
+
+
+def _infer_paragraph_end_times(paragraphs):
+    """Saved transcripts only record each paragraph's start time, so the
+    parsers synthesise a placeholder 1-second span. Stretch each
+    paragraph's end out to the next paragraph's start so the span covers
+    the actual speech - audio playback depends on this. The last
+    paragraph's true end is unknowable from the file; it keeps the
+    placeholder span and playback treats it as open-ended."""
+    for i in range(len(paragraphs) - 1):
+        para = paragraphs[i]
+        nxt = paragraphs[i + 1]
+        if not para or not nxt:
+            continue
+        next_start = nxt[0][0]
+        start, end, text = para[-1]
+        if next_start > end:
+            para[-1] = (start, next_start, text)
 
 
 def _parse_txt_transcript(path):
@@ -3596,6 +3617,33 @@ class ReviewPaneText(ttk.Frame):
     def _can_play(self):
         return bool(self.audio_path and self._ffplay)
 
+    def _playback_span(self, idx):
+        """Return (start_seconds, duration_seconds_or_None) covering
+        paragraph `idx` for playback, or None if there's nothing to play.
+        A None duration means "play to the end of the file".
+
+        Fresh transcriptions carry every Whisper segment, so the last
+        segment's end time is the paragraph's real end. Loaded transcripts
+        only know start times (the parsers synthesise ~1s spans, stretched
+        to the next paragraph's start by _infer_paragraph_end_times), so
+        if a span still looks like a placeholder we fall back to the next
+        paragraph's start - or play open-ended for the last paragraph."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return None
+        para = self.paragraphs[idx]
+        if not para:
+            return None
+        start = max(0.0, float(para[0][0]))
+        end = float(para[-1][1])
+        if end - start <= 1.0:
+            if idx + 1 < len(self.paragraphs) and self.paragraphs[idx + 1]:
+                next_start = float(self.paragraphs[idx + 1][0][0])
+                if next_start > start:
+                    return (start, max(0.5, next_start - start + 0.3))
+            return (start, None)
+        # A touch of tail padding so the last word isn't clipped.
+        return (start, max(0.5, end - start + 0.3))
+
     def _toggle_play(self):
         """Play the selected paragraph's audio span; press again to stop."""
         if self._play_proc is not None:
@@ -3603,19 +3651,18 @@ class ReviewPaneText(ttk.Frame):
             return
         if not self._can_play() or self.selected_idx is None:
             return
-        para = self.paragraphs[self.selected_idx]
-        if not para:
+        span = self._playback_span(self.selected_idx)
+        if span is None:
             return
-        start = max(0.0, float(para[0][0]))
-        end = float(para[-1][1])
-        # A touch of tail padding so the last word isn't clipped.
-        dur = max(0.5, end - start + 0.3)
+        start, dur = span
+        cmd = [self._ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
+               "-ss", f"{start:.2f}"]
+        if dur is not None:
+            cmd += ["-t", f"{dur:.2f}"]
+        cmd.append(self.audio_path)
         try:
             self._play_proc = subprocess.Popen(
-                [self._ffplay, "-nodisp", "-autoexit",
-                 "-loglevel", "quiet",
-                 "-ss", f"{start:.2f}", "-t", f"{dur:.2f}",
-                 self.audio_path],
+                cmd,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except OSError as e:
