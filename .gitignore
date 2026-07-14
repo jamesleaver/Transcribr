@@ -20,6 +20,7 @@ env/
 
 # Claude Code internals
 .claude/worktrees/
+.claude/settings.local.json
 
 # Logs & temp
 *.log
