@@ -6395,10 +6395,418 @@ class WhisperGUI:
 
 
 # =====================================================================
+# Web UI backend - settings contract
+# =====================================================================
+#
+# The web front-end shares settings.json with the Tk UI: same keys,
+# same value conventions (engine and language are stored as display
+# names, exactly as the Tk comboboxes hold them). validate_settings()
+# mirrors _apply_settings(): unknown keys and junk values are dropped
+# and missing ones fall back to the defaults, so a stale or corrupt
+# file can't wedge the app.
+
+_SETTINGS_BOOL_KEYS = (
+    "show_timestamp", "review", "condition_on_previous_text",
+    "word_timestamps", "extra_json", "extra_srt", "extra_vtt",
+    "extra_tsv", "highlight_confidence", "show_details",
+)
+
+_SETTINGS_NUMBER_KEYS = (
+    "gap", "temperature", "beam_size", "best_of",
+    "compression_ratio_threshold", "logprob_threshold",
+    "no_speech_threshold",
+)
+
+
+def _settings_choices():
+    """Allowed values for every enumerated setting, computed live so
+    the engine list reflects what is actually installed."""
+    return {
+        "engine": [name for _, name in AVAILABLE_ENGINES],
+        "model": list(WHISPER_MODELS),
+        "language": [n for n, _ in LANGUAGES],
+        "task": ["transcribe", "translate"],
+        "output_format": ["txt", "docx", "pdf"],
+        "theme": ["auto", "light", "dark"],
+    }
+
+
+def default_settings():
+    """The out-of-the-box settings - the same values the Tk widgets
+    start with."""
+    engines = [name for _, name in AVAILABLE_ENGINES]
+    return {
+        "engine": engines[0] if engines else "",
+        "model": "large-v3-turbo",
+        "language": "English",
+        "task": "transcribe",
+        "output_format": "docx",
+        "prompt": "",
+        "gap": 1.5,
+        "show_timestamp": True,
+        "review": True,
+        "temperature": 0.0,
+        "beam_size": 5,
+        "best_of": 5,
+        "compression_ratio_threshold": 2.4,
+        "logprob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+        "condition_on_previous_text": True,
+        "word_timestamps": False,
+        "extra_json": False,
+        "extra_srt": False,
+        "extra_vtt": False,
+        "extra_tsv": False,
+        "highlight_confidence": False,
+        "theme": "auto",
+        "show_details": False,
+    }
+
+
+def validate_settings(raw, base=None):
+    """Merge `raw` (a loaded settings.json, or a PUT body) over `base`
+    (the defaults when None), accepting only known keys with plausible
+    values. Passing the currently stored settings as `base` makes a
+    partial update non-destructive."""
+    import math
+
+    merged = default_settings()
+    if base:
+        merged.update(base)
+    if not isinstance(raw, dict):
+        return merged
+    for key, allowed in _settings_choices().items():
+        v = raw.get(key)
+        if isinstance(v, str) and v in allowed:
+            merged[key] = v
+    v = raw.get("prompt")
+    if isinstance(v, str):
+        merged["prompt"] = v
+    for key in _SETTINGS_NUMBER_KEYS:
+        v = raw.get(key)
+        if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v)):
+            merged[key] = v
+    for key in _SETTINGS_BOOL_KEYS:
+        v = raw.get(key)
+        if isinstance(v, bool):
+            merged[key] = v
+    return merged
+
+
+def current_settings():
+    """Defaults overlaid with whatever settings.json currently holds."""
+    return validate_settings(_settings_load())
+
+
+# =====================================================================
+# Web UI backend - event broker (SSE fan-out)
+# =====================================================================
+
+class EventBroker:
+    """Fans server-side events out to any number of SSE subscribers.
+
+    Events carry monotonically increasing ids and are kept in a bounded
+    ring so a reconnecting client (Last-Event-ID) can replay what it
+    missed; when the gap is wider than the ring the subscriber is told
+    to resync via GET /api/state instead."""
+
+    _RING_SIZE = 500
+
+    def __init__(self):
+        from collections import deque
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._subscribers = set()
+        self._ring = deque(maxlen=self._RING_SIZE)
+
+    def publish(self, event, data):
+        import json
+        with self._lock:
+            self._seq += 1
+            item = (self._seq, event, json.dumps(data))
+            self._ring.append(item)
+            targets = list(self._subscribers)
+        for q in targets:
+            q.put(item)
+
+    def subscribe(self, last_event_id=None):
+        """Register a subscriber. Returns (queue, backlog): backlog is
+        the list of missed events, or None when the gap can't be
+        bridged and the client must do a full resync."""
+        q = queue.Queue()
+        with self._lock:
+            self._subscribers.add(q)
+            if last_event_id is None:
+                return q, []
+            ring = list(self._ring)
+        if not ring or last_event_id < ring[0][0] - 1:
+            return q, None
+        return q, [item for item in ring if item[0] > last_event_id]
+
+    def unsubscribe(self, q):
+        with self._lock:
+            self._subscribers.discard(q)
+
+
+def _sse_format(item):
+    seq, event, payload = item
+    return f"id: {seq}\nevent: {event}\ndata: {payload}\n\n"
+
+
+# =====================================================================
+# Web UI backend - HTTP server (bottle on a threading WSGI server)
+# =====================================================================
+#
+# The web UI is served entirely from a loopback-only HTTP server: the
+# static front-end build (webdist/), a JSON API, and a Server-Sent
+# Events stream. Every /api/ and /audio/ request must present the
+# per-session token - header X-Transcribr-Token, or ?token= for the
+# two GETs that cannot set headers (EventSource and <audio>). bottle
+# is imported lazily so `import transcribr` works without it.
+
+def _webdist_dir():
+    return Path(__file__).resolve().parent / "webdist"
+
+
+class WebBackend:
+    """Everything the web route handlers need, plus server plumbing."""
+
+    def __init__(self, token):
+        self.token = token
+        self.broker = EventBroker()
+        self.server = None        # set by serve()
+        self.has_window = False   # True once a pywebview window owns us
+
+    # -- routes ---------------------------------------------------------
+
+    def build_app(self):
+        import json
+        import bottle
+
+        app = bottle.Bottle()
+        backend = self
+
+        @app.hook("before_request")
+        def _guard():
+            path = bottle.request.path
+            if path.startswith("/api/") or path.startswith("/audio/"):
+                supplied = (bottle.request.get_header("X-Transcribr-Token")
+                            or bottle.request.query.get("token"))
+                if supplied != backend.token:
+                    raise bottle.HTTPResponse(
+                        body=json.dumps({"error": {
+                            "code": "unauthorized",
+                            "message": "Missing or bad token."}}),
+                        status=401,
+                        headers={"Content-Type": "application/json"})
+
+        # -- static shell ------------------------------------------------
+
+        @app.get("/")
+        def index():
+            root = _webdist_dir()
+            if not (root / "index.html").exists():
+                bottle.response.content_type = "text/html"
+                return ("<h1>Transcribr</h1><p>The web interface has not "
+                        "been built yet. From the repository, run:</p>"
+                        "<pre>cd web && npm install && npm run build</pre>")
+            return bottle.static_file("index.html", root=str(root))
+
+        @app.get("/assets/<filepath:path>")
+        def assets(filepath):
+            return bottle.static_file(
+                filepath, root=str(_webdist_dir() / "assets"))
+
+        # -- meta / state ------------------------------------------------
+
+        @app.get("/api/meta")
+        def api_meta():
+            return {
+                "version": __version__,
+                "about_text": ABOUT_TEXT,
+                "platform": sys.platform,
+                "reveal_label": _REVEAL_LABEL,
+                "ui_mode": "webview" if backend.has_window else "browser",
+                "engines": [{"key": k, "name": n}
+                            for k, n in AVAILABLE_ENGINES],
+                "models": list(WHISPER_MODELS),
+                "languages": [[n, c] for n, c in LANGUAGES],
+                "palettes": _PALETTES,
+                "ffmpeg": bool(shutil.which("ffmpeg")),
+                "readme_available": _find_readme() is not None,
+            }
+
+        @app.get("/api/state")
+        def api_state():
+            recents = []
+            for p in _recent_load():
+                try:
+                    exists = Path(p).exists()
+                except OSError:
+                    exists = False
+                if exists:
+                    recents.append({"path": p, "name": Path(p).name,
+                                    "exists": True})
+            return {
+                "run": None,
+                "review": None,
+                "autosave_pending": bool(_autosave_load()),
+                "recents": recents,
+            }
+
+        # -- settings ----------------------------------------------------
+
+        @app.get("/api/settings")
+        def api_settings_get():
+            return current_settings()
+
+        @app.put("/api/settings")
+        def api_settings_put():
+            try:
+                incoming = bottle.request.json
+            except Exception:
+                incoming = None
+            if not isinstance(incoming, dict):
+                raise bottle.HTTPResponse(
+                    body=json.dumps({"error": {
+                        "code": "bad_request",
+                        "message": "Body must be a JSON object."}}),
+                    status=400,
+                    headers={"Content-Type": "application/json"})
+            merged = validate_settings(incoming, base=current_settings())
+            _settings_save(merged)
+            return merged
+
+        # -- events ------------------------------------------------------
+
+        @app.get("/api/events")
+        def api_events():
+            bottle.response.content_type = "text/event-stream"
+            bottle.response.set_header("Cache-Control", "no-cache")
+            raw_last = bottle.request.get_header("Last-Event-ID")
+            try:
+                last_id = int(raw_last) if raw_last else None
+            except ValueError:
+                last_id = None
+            q, backlog = backend.broker.subscribe(last_id)
+
+            def stream():
+                try:
+                    # Padding defeats intermediary buffering; retry tells
+                    # EventSource how quickly to return after a drop.
+                    yield ":" + (" " * 2048) + "\n"
+                    yield "retry: 2000\n\n"
+                    if backlog is None:
+                        yield "event: resync\ndata: {}\n\n"
+                    else:
+                        for item in backlog:
+                            yield _sse_format(item)
+                    while True:
+                        try:
+                            item = q.get(timeout=15.0)
+                        except queue.Empty:
+                            yield ": ping\n\n"
+                            continue
+                        yield _sse_format(item)
+                finally:
+                    backend.broker.unsubscribe(q)
+
+            return stream()
+
+        # -- lifecycle ---------------------------------------------------
+
+        @app.post("/api/shutdown")
+        def api_shutdown():
+            if backend.server is not None:
+                threading.Thread(target=backend.server.shutdown,
+                                 daemon=True).start()
+            return {"ok": True}
+
+        return app
+
+    # -- plumbing ---------------------------------------------------------
+
+    def serve(self, host="127.0.0.1", port=0):
+        """Bind the server (port 0 = OS-assigned) and return it; the
+        caller decides which thread runs serve_forever()."""
+        from socketserver import ThreadingMixIn
+        from wsgiref.simple_server import (WSGIServer, WSGIRequestHandler,
+                                           make_server)
+
+        class _Server(ThreadingMixIn, WSGIServer):
+            daemon_threads = True
+
+        class _Handler(WSGIRequestHandler):
+            def log_message(self, format, *args):
+                pass    # no stdout/stderr chatter (pythonw on Windows)
+
+        self.server = make_server(host, port, self.build_app(),
+                                  server_class=_Server,
+                                  handler_class=_Handler)
+        return self.server
+
+
+# =====================================================================
 # Entry point
 # =====================================================================
 
-def main():
+def _parse_args(argv):
+    import argparse
+    p = argparse.ArgumentParser(
+        prog="transcribr",
+        description="Transcribr - local Whisper transcription GUI.")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--web", dest="ui", action="store_const", const="web",
+                   help="use the web-based interface (native window)")
+    g.add_argument("--tk", dest="ui", action="store_const", const="tk",
+                   help="use the classic Tk interface")
+    p.add_argument("--serve", action="store_true",
+                   help="run the web backend only and print its URL "
+                        "(development, or using the app from a browser)")
+    p.add_argument("--port", type=int, default=None,
+                   help="port for --serve (default 8737)")
+    p.add_argument("--dev-token", default=None,
+                   help="fixed API token for --serve (default 'dev')")
+    p.set_defaults(ui=None)
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if args.serve:
+        return main_serve(args)
+    ui = args.ui or os.environ.get("TRANSCRIBR_UI", "tk").strip().lower()
+    if ui == "web":
+        return main_web(args)
+    return main_tk()
+
+
+def main_serve(args):
+    """Web backend without a window: for development and as the
+    escape hatch when the native window can't start."""
+    token = args.dev_token or "dev"
+    backend = WebBackend(token)
+    server = backend.serve(port=args.port if args.port is not None else 8737)
+    url = f"http://127.0.0.1:{server.server_port}/?token={token}"
+    _log(f"--serve listening on {server.server_port}")
+    print(f"Transcribr {__version__} web backend running:\n  {url}")
+    print("Open the URL in a browser. Press Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def main_web(args):
+    sys.exit("The native web window arrives in a later phase. "
+             "Meanwhile run with --serve and open the printed URL, "
+             "or use the classic interface (no flag needed).")
+
+
+def main_tk():
     # On macOS the menu bar titles itself after the running process, which
     # for a plain interpreter launch is "Python". Rewriting the bundle's
     # name before Tk starts the application makes the menu bar (and the

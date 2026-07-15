@@ -18,6 +18,10 @@ build/
 venv/
 env/
 
+# Web front-end (dev-time)
+web/node_modules/
+web/dist/
+
 # Claude Code internals
 .claude/worktrees/
 .claude/settings.local.json
