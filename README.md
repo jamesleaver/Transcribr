@@ -12,14 +12,13 @@ queued and transcribed in one unattended batch. Everything runs locally
 on your computer — no audio, video, or transcripts are uploaded to the
 internet.
 
-Version 0.7.0 introduces a redesigned interface rendered by your
-system's built-in web view (WKWebView on macOS, WebView2 on Windows).
-It talks to the transcription engine over a local-only connection on
-your own machine — bound to 127.0.0.1 with a random port and a
-per-session token; nothing is ever sent anywhere. Launch it with
-`--web`; the classic interface remains the default for this release
-while the new one is being proven, and `--serve` prints a local URL
-you can open in any browser as a fallback.
+Version 0.7.0 replaces the original Tk interface with a redesigned one
+rendered by your system's built-in web view (WKWebView on macOS,
+WebView2 on Windows). It talks to the transcription engine over a
+local-only connection on your own machine — bound to 127.0.0.1 with a
+random port and a per-session token; nothing is ever sent anywhere.
+Opening the app normally launches it; `--serve` prints a local URL you
+can open in any browser instead, as a fallback.
 
 When a particular model is run for the first time, that model will be
 downloaded to your computer and stored locally. The `medium.en` or
@@ -103,17 +102,18 @@ The installer handles all of that.
 
 ## Using the application
 
-The main window groups the settings into four tabs — **File**,
-**Model**, **Advanced**, and **Recent** — with the Run controls and a
-progress card always visible below. The defaults are sensible for most
-jobs; pick an input file and click **Run Transcription**.
+The window has three views, switched in the left sidebar:
+**Transcribe** (choose files and options, run jobs), **Review** (label
+speakers and edit a finished transcript), and **Library** (recent
+transcripts). The defaults are sensible for most jobs; pick an input
+file and click **Run Transcription**.
 
 The app remembers your settings (engine, model, format, description,
-decoding options, theme) between launches, and **View -> Appearance**
-switches between light mode, dark mode, or following the system
-setting.
+decoding options, theme) between launches. The moon button at the
+bottom of the sidebar cycles between following the system appearance,
+light, and dark.
 
-### File tab
+### Choosing files and output
 
 **Drop zone.** Drag one or more audio/video files onto the dashed
 panel (or anywhere on the window), or click it to browse. Dropping a
@@ -158,10 +158,10 @@ about 200 words; longer prompts get truncated.
 another in a single unattended run. Each transcript is saved next to
 its source file with no interactive review; failures are recorded and
 the run carries on, with a summary at the end. Open each result from
-the **Recent** tab afterwards to label speakers. Leave the queue empty
-to use the single Input file above (which *does* pause for review).
+the **Library** afterwards to label speakers. Stage a single file to
+use the normal flow instead (which *does* pause for review).
 
-### Model tab
+### Engine and model
 
 **Engine.** Which Whisper implementation does the work. Only engines
 actually installed appear:
@@ -205,7 +205,7 @@ an early mistake. **Highlight low-confidence words in review** records
 per-word confidence during transcription (slightly slower) so the
 review pane can shade words the engine was unsure about.
 
-### Advanced tab
+### Paragraphs and extra outputs
 
 **Paragraph grouping.** *Pause that triggers a new paragraph* (default
 1.5 s) controls how aggressively paragraphs break — lower for
@@ -219,12 +219,12 @@ finishes (untick to save straight to disk).
 **Additional outputs.** Optional technical sidecar files: JSON (the
 full Whisper result), SRT / VTT subtitles, and TSV.
 
-### Recent tab
+### Library
 
 The last ten transcripts you produced or opened, with their locations.
-Double-click one (or use **Open for review**) to re-open it for
-speaker labelling and editing — also available as **File -> Open
-Recent** in the menu.
+Click one (or its **Review** button) to re-open it for speaker
+labelling and editing; **Open transcript…** browses for any other
+`.docx`/`.txt` transcript.
 
 ### Run / Stop and progress
 
@@ -238,11 +238,12 @@ seconds on first launch — that's normal.
 transcript. It takes effect at the next chunk boundary (not supported
 mid-run by mlx-whisper).
 
-### The review pane
+### The review workspace
 
 After a transcription (or when opening an existing `.docx`/`.txt`
-transcript), the review pane shows the paragraphs in three columns —
-speaker, timestamp, text — with up to nine colour-coded speakers.
+transcript), the Review view shows the paragraphs in three columns —
+speaker, timestamp, text — with up to nine colour-coded speakers named
+in the panel on the right.
 
 | Action | How |
 |---|---|

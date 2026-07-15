@@ -319,12 +319,6 @@ if (-not (Test-Path "$venv\Scripts\activate.bat")) {
     if ($LASTEXITCODE -ne 0) { Fail "venv creation failed" }
 }
 
-# Sanity check: tkinter must be importable. On standard Windows Python from
-# python.org / winget, tkinter ships built-in.
-& "$venv\Scripts\python.exe" -c "import tkinter; tkinter.Tk().destroy()" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Warn "tkinter test failed. The GUI may not start."
-}
 Ok "venv ready"
 
 # ---------- step 4: Whisper -------------------------------------------------
@@ -339,7 +333,7 @@ Info "Installing openai-whisper (downloads PyTorch, ~2GB)..."
 # Pin openai-whisper >= 20250625; older releases use the removed
 # pkg_resources module, which is gone in setuptools 81+.
 & "$venv\Scripts\python.exe" -m pip install --upgrade `
-    "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect `
+    "openai-whisper>=20250625" python-docx reportlab `
     pywebview bottle
 if ($LASTEXITCODE -ne 0) { Fail "openai-whisper / python-docx / reportlab install failed" }
 

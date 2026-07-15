@@ -8,7 +8,6 @@
 #   - Homebrew (if missing)
 #   - Python 3.12 (via Homebrew)
 #   - ffmpeg (via Homebrew)
-#   - python-tk@3.12 (Tk bindings for Python 3.12)
 #   - A Python virtualenv at ~/Library/Application Support/Transcribr/venv
 #   - Three Whisper engines inside that venv:
 #       * openai-whisper (reference; needed on all systems)
@@ -117,7 +116,7 @@ eval "$("$BREW_BIN" shellenv)"
 
 # ---------- Homebrew packages ---------------------------------------------
 
-step "Step 2/6: Python 3.12, ffmpeg, python-tk@3.12"
+step "Step 2/6: Python 3.12 and ffmpeg"
 
 install_brew_pkg() {
     local pkg="$1"
@@ -132,7 +131,7 @@ install_brew_pkg() {
 
 install_brew_pkg python@3.12
 install_brew_pkg ffmpeg
-install_brew_pkg python-tk@3.12
+
 
 # Resolve the actual python3.12 binary we just installed.
 PYTHON312="$(brew --prefix python@3.12)/bin/python3.12"
@@ -158,11 +157,6 @@ if [ ! -f "$VENV/bin/activate" ]; then
     info "Creating venv at: $VENV"
     "$PYTHON312" -m venv "$VENV" || fail "venv creation failed"
 fi
-
-# Sanity: tkinter must work in this venv (catches a misinstalled python-tk).
-"$VENV/bin/python" -c "import tkinter; tkinter.Tk().destroy()" 2>/dev/null \
-    || warn "tkinter test failed - the GUI may not start. Try:
-        brew reinstall python-tk@3.12"
 
 ok "venv ready"
 
@@ -204,13 +198,13 @@ info "Installing openai-whisper (downloads PyTorch, ~1.5GB)..."
 if [ "$ARCH" = "x86_64" ]; then
     info "Intel Mac detected; pinning torch/numpy/numba versions for compatibility"
     "$VENV/bin/pip" install --upgrade --prefer-binary \
-        "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect \
+        "openai-whisper>=20250625" python-docx reportlab \
         pyobjc-framework-Cocoa pywebview bottle \
         "torch==2.2.2" "numpy<2" "numba<0.60" \
         || fail "openai-whisper / python-docx / reportlab install failed"
 else
     "$VENV/bin/pip" install --upgrade --prefer-binary \
-        "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect \
+        "openai-whisper>=20250625" python-docx reportlab \
         pyobjc-framework-Cocoa pywebview bottle \
         || fail "openai-whisper / python-docx / reportlab install failed"
 fi
