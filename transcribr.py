@@ -7921,6 +7921,7 @@ class WebBackend:
         self.controller.on_paragraphs_ready = self._open_review_fresh
         self.review = None        # the open ReviewSession, if any
         self.audio = None         # AudioPrep for the open session
+        self.window = None        # pywebview window (web mode only)
         self.server = None        # set by serve()
         self.has_window = False   # True once a pywebview window owns us
         self._pump_stop = threading.Event()
@@ -8395,8 +8396,13 @@ class WebBackend:
 
     def pick_files(self, *, kind, multiple=False, initial=None, fmt=None):
         """Show a native file dialog and return real filesystem paths.
-        Until the pywebview window exists (Phase 5) this falls back to a
-        one-shot tkinter dialog in a subprocess - development only."""
+        With a pywebview window this is the OS dialog (callable from
+        any thread; blocks until dismissed); in --serve browser mode it
+        falls back to a one-shot tkinter dialog in a subprocess -
+        development only."""
+        if self.window is not None:
+            return self._pick_files_native(kind=kind, multiple=multiple,
+                                           initial=initial, fmt=fmt)
         script = _PICK_SCRIPT
         args = [sys.executable, "-c", script, kind,
                 "1" if multiple else "0", initial or "", fmt or ""]
@@ -8417,6 +8423,38 @@ class WebBackend:
             paths = []
         if not paths:
             return {"cancelled": True}
+        if multiple:
+            return {"paths": paths}
+        return {"path": paths[0]}
+
+    def _pick_files_native(self, *, kind, multiple, initial, fmt):
+        import webview
+        try:
+            dialog_open = webview.FileDialog.OPEN
+            dialog_save = webview.FileDialog.SAVE
+        except AttributeError:      # older pywebview constants
+            dialog_open = webview.OPEN_DIALOG
+            dialog_save = webview.SAVE_DIALOG
+
+        if kind == "save-output":
+            ext = fmt or "docx"
+            result = self.window.create_file_dialog(
+                dialog_save,
+                save_filename=initial or f"transcript.{ext}")
+        else:
+            if kind == "transcript":
+                types = ("Transcripts (*.docx;*.txt)", "All files (*.*)")
+            else:
+                types = ("Audio and video (*.mp3;*.wav;*.m4a;*.aac;"
+                         "*.flac;*.ogg;*.opus;*.mp4;*.mov;*.mkv;*.avi;"
+                         "*.webm)", "All files (*.*)")
+            result = self.window.create_file_dialog(
+                dialog_open, allow_multiple=multiple, file_types=types)
+
+        if not result:
+            return {"cancelled": True}
+        paths = ([result] if isinstance(result, str) else
+                 [str(p) for p in result])
         if multiple:
             return {"paths": paths}
         return {"path": paths[0]}
@@ -8576,10 +8614,108 @@ def main_serve(args):
         server.server_close()
 
 
+def _attach_drop_handler(backend, window):
+    """Bridge OS drag-and-drop to the front end. pywebview reveals the
+    dropped files' real filesystem paths on the PYTHON side only
+    (pywebviewFullPath); we forward them as a files_dropped SSE event
+    and the page applies the 1-file/many-files rule. prevent_default on
+    dragover is required or the drop never fires."""
+    try:
+        from webview.dom import DOMEventHandler
+
+        def on_drop(e):
+            files = (e.get("dataTransfer") or {}).get("files") or []
+            paths = [f.get("pywebviewFullPath") for f in files
+                     if isinstance(f, dict)]
+            paths = [p for p in paths if p]
+            if paths:
+                backend.broker.publish("files_dropped", {"paths": paths})
+
+        window.dom.document.events.dragover += DOMEventHandler(
+            lambda e: None, prevent_default=True)
+        window.dom.document.events.drop += DOMEventHandler(
+            on_drop, prevent_default=True)
+    except Exception:
+        _log("drop-handler attach failed:\n" + traceback.format_exc())
+
+
 def main_web(args):
-    sys.exit("The native web window arrives in a later phase. "
-             "Meanwhile run with --serve and open the printed URL, "
-             "or use the classic interface (no flag needed).")
+    """The desktop app: the web backend on daemon threads plus a
+    native window (WKWebView / WebView2) pointed at it. webview.start()
+    must own the main thread - notably on macOS."""
+    _require_web_stack()
+    try:
+        import webview  # noqa: F401
+    except ImportError:
+        sys.exit(
+            "The native window needs the 'pywebview' package, which is "
+            f"not installed for this Python ({sys.executable}).\n"
+            "Install it with:\n"
+            "  python3 -m pip install pywebview\n"
+            "or run without a window:  python3 transcribr.py --serve")
+    import webview
+
+    # Menu-bar/taskbar identity (ports of the Tk main()'s NSBundle
+    # rename; AppUserModelID keeps the Windows taskbar icon grouped).
+    if sys.platform == "darwin":
+        try:
+            from Foundation import NSBundle
+            bundle = NSBundle.mainBundle()
+            if bundle is not None:
+                info = (bundle.localizedInfoDictionary()
+                        or bundle.infoDictionary())
+                if info is not None:
+                    info["CFBundleName"] = "Transcribr"
+        except Exception:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "local.transcribr")
+        except Exception:
+            pass
+
+    if args.dev_token:
+        token = args.dev_token
+    else:
+        import secrets
+        token = secrets.token_urlsafe(32)
+
+    backend = WebBackend(token)
+    backend.has_window = True
+    backend.start_pump()
+    server = backend.serve(port=args.port if args.port is not None else 0)
+    threading.Thread(target=server.serve_forever, daemon=True,
+                     name="transcribr-http").start()
+    url = f"http://127.0.0.1:{server.server_port}/?token={token}"
+    _log(f"Transcribr {__version__} web window starting - "
+         f"port {server.server_port}")
+
+    window = webview.create_window(
+        f"Transcribr {__version__}", url,
+        width=1200, height=800, min_size=(900, 620))
+    backend.window = window
+
+    def on_loaded():
+        _attach_drop_handler(backend, window)
+
+    def on_closed():
+        # A pending (debounced) autosave must not be lost with the
+        # window; flush it, then stop the server.
+        try:
+            if backend.review is not None and not backend.review.closed:
+                backend.review.model.flush_autosave()
+        except Exception:
+            _log("autosave flush on close failed:\n"
+                 + traceback.format_exc())
+        finally:
+            threading.Thread(target=server.shutdown,
+                             daemon=True).start()
+
+    window.events.loaded += on_loaded
+    window.events.closed += on_closed
+    webview.start()
 
 
 def main_tk():
