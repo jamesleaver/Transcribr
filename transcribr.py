@@ -6782,9 +6782,47 @@ def main(argv=None):
     return main_tk()
 
 
+def _require_web_stack():
+    """Exit with instructions rather than a traceback when the web
+    interface is requested under a Python that lacks bottle (the
+    installers add it to Transcribr's own environment; a bare system
+    python usually won't have it)."""
+    try:
+        import bottle  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if sys.platform == "darwin":
+        venv_python = (Path.home() / "Library" / "Application Support"
+                       / "Transcribr" / "venv" / "bin" / "python")
+    elif sys.platform == "win32":
+        venv_python = (Path(os.environ.get("LOCALAPPDATA", ""))
+                       / "Transcribr" / "venv" / "Scripts" / "python.exe")
+    else:
+        venv_python = None
+    lines = [
+        "The web interface needs the 'bottle' package, which is not",
+        f"installed for this Python ({sys.executable}).",
+        "",
+    ]
+    if venv_python is not None and venv_python.exists():
+        lines += [
+            "Easiest fix - run Transcribr through its installed "
+            "environment:",
+            f'  "{venv_python}" {Path(__file__).name} --serve',
+            "",
+        ]
+    lines += [
+        "Or install bottle for this Python:",
+        "  python3 -m pip install bottle",
+    ]
+    sys.exit("\n".join(lines))
+
+
 def main_serve(args):
     """Web backend without a window: for development and as the
     escape hatch when the native window can't start."""
+    _require_web_stack()
     token = args.dev_token or "dev"
     backend = WebBackend(token)
     server = backend.serve(port=args.port if args.port is not None else 8737)
