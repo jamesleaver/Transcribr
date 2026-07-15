@@ -1,7 +1,15 @@
 import { onEvent } from "../sse";
-import type { BatchDone, Progress, RunState } from "../api/types";
+import type {
+  BatchDone,
+  ModelDone,
+  ModelJob,
+  ModelsPayload,
+  Progress,
+  RunState,
+} from "../api/types";
 import { useApp } from "./store";
 import { useRun } from "./runStore";
+import { useModels } from "./modelsStore";
 import { useReview, type ReviewPayload } from "./reviewStore";
 
 // Central registration of SSE event handlers -> store updates.
@@ -14,6 +22,14 @@ onEvent("progress", (d) => useRun.getState().applyProgress(d as Progress));
 onEvent("run_state", (d) => useRun.getState().applyRunState(d as RunState));
 
 onEvent("batch_done", (d) => useRun.getState().onBatchDone(d as BatchDone));
+
+onEvent("models", (d) => useModels.getState().applyPayload(d as ModelsPayload));
+
+onEvent("model_progress", (d) =>
+  useModels.getState().applyProgress(d as ModelJob | Record<string, never>),
+);
+
+onEvent("model_done", (d) => useModels.getState().onDone(d as ModelDone));
 
 onEvent("files_dropped", (d) => {
   void useRun.getState().addPaths((d as { paths: string[] }).paths);

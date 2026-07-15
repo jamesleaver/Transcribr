@@ -1145,27 +1145,32 @@ class _ProgressWriter:
 
 
 class _DownloadMonitor:
-    """Surfaces first-run model downloads that would otherwise look like a
-    frozen 'Loading model...'.
+    """Surfaces model downloads that would otherwise look like a frozen
+    'Loading model...'.
 
     Every engine's downloader (openai-whisper's own fetch, and the
     huggingface_hub fetch behind faster-whisper and mlx-whisper) reports
     progress through a tqdm byte-scale bar. This context manager patches
-    tqdm so those bars are forwarded to the worker queue as ('download',
-    ...) messages - the controller turns them into a moving progress bar
-    with a clear 'Downloading model...' status. Non-download bars (e.g.
-    tiny config files) are ignored via a minimum-size filter.
+    tqdm so those bars are forwarded to `on_progress(info)` - a dict of
+    {model, downloaded, total, speed}. The transcription worker routes
+    that onto its queue as ('download', ...) messages; the standalone
+    model manager republishes it as a `model_progress` SSE event. A
+    one-line announcement (and completion note) goes to `on_log(text)`
+    when supplied. Non-download bars (e.g. tiny config files) are ignored
+    via a minimum-size filter.
 
-    It also honours cancel_event: pressing Stop during a download raises
+    It also honours cancel_event: cancelling during a download raises
     _CancelledByUser, aborting the fetch instead of forcing the user to
     wait for gigabytes."""
 
     _MIN_TOTAL = 1024 * 1024  # ignore sub-1 MB bars (configs, tokenizers)
 
-    def __init__(self, q, cancel_event, model_name):
-        self.q = q
+    def __init__(self, cancel_event, model_name, *,
+                 on_progress, on_log=None):
         self.cancel_event = cancel_event
         self.model_name = model_name
+        self.on_progress = on_progress
+        self.on_log = on_log or (lambda _text: None)
         self._bars = {}            # id(bar) -> (downloaded, total)
         self._tqdm = None
         self._orig_update = None
@@ -1200,12 +1205,12 @@ class _DownloadMonitor:
         self._last_speed_t = now
         self._last_done = downloaded
         self._last_emit = now
-        self.q.put(("download", {
+        self.on_progress({
             "model": self.model_name,
             "downloaded": downloaded,
             "total": total,
             "speed": speed,
-        }))
+        })
 
     def __enter__(self):
         try:
@@ -1230,10 +1235,9 @@ class _DownloadMonitor:
                     size = f" (~{approx / 1000:.1f} GB)" if approx and \
                         approx >= 1000 else (f" (~{approx} MB)" if approx
                                              else "")
-                    monitor.q.put(("log",
-                                   f"Downloading model "
-                                   f"'{monitor.model_name}'{size} - first "
-                                   "use only, then it's cached locally...\n"))
+                    monitor.on_log(
+                        f"Downloading model '{monitor.model_name}'{size} - "
+                        "first use only, then it's cached locally...\n")
                 monitor._emit()
             return result
 
@@ -1254,8 +1258,7 @@ class _DownloadMonitor:
             self._tqdm.tqdm.close = self._orig_close
         if self._announced and exc_type is None:
             _, total = self._snapshot()
-            self.q.put(("log", f"  download complete "
-                               f"({_humanize_bytes(total)})\n"))
+            self.on_log(f"  download complete ({_humanize_bytes(total)})\n")
         return False
 
 
@@ -1395,7 +1398,10 @@ def _run_openai_whisper(params, q, cancel_event):
     q.put(("status", {"stage": "loading",
                       "text": f"Loading model '{params['model']}'..."}))
     t0 = time.time()
-    with _DownloadMonitor(q, cancel_event, params["model"]):
+    with _DownloadMonitor(
+            cancel_event, params["model"],
+            on_progress=lambda d: q.put(("download", d)),
+            on_log=lambda t: q.put(("log", t))):
         model = whisper.load_model(params["model"])
     q.put(("log", f"  loaded in {time.time() - t0:.1f}s\n\n"))
 
@@ -1485,7 +1491,10 @@ def _run_faster_whisper(params, q, cancel_event):
     # compute_type="auto" picks float16 on cuda, int8 on cpu - both fast,
     # both essentially indistinguishable from float32 for our use.
     # The download monitor surfaces the huggingface_hub fetch on first use.
-    with _DownloadMonitor(q, cancel_event, params["model"]):
+    with _DownloadMonitor(
+            cancel_event, params["model"],
+            on_progress=lambda d: q.put(("download", d)),
+            on_log=lambda t: q.put(("log", t))):
         model = WhisperModel(
             params["model"], device="auto", compute_type="auto")
     q.put(("log", f"  loaded in {time.time() - t0:.1f}s\n\n"))
@@ -1643,7 +1652,10 @@ def _run_mlx_whisper(params, q, cancel_event):
     # download monitor wraps the whole call. Only stdout is redirected -
     # the huggingface_hub download bar lives on stderr and is reported via
     # the monitor instead of spamming the log with carriage returns.
-    with _DownloadMonitor(q, cancel_event, params["model"]):
+    with _DownloadMonitor(
+            cancel_event, params["model"],
+            on_progress=lambda d: q.put(("download", d)),
+            on_log=lambda t: q.put(("log", t))):
         with contextlib.redirect_stdout(writer):
             result = mlx_whisper.transcribe(params["input"], **kwargs)
     q.put(("log", f"\n  transcribed in {time.time() - t0:.1f}s\n\n"))
@@ -2720,6 +2732,9 @@ class RunController:
         # Phase 3 sets this to route paragraphs_ready into a review
         # session; until then runs force review_before_save=False.
         self.on_paragraphs_ready = None
+        # Set by WebBackend to the model manager's is_busy(), so a run
+        # can't start while a model download holds the weights cache.
+        self.model_busy_check = None
 
     # ----- Snapshots ----------------------------------------------------
 
@@ -2765,6 +2780,10 @@ class RunController:
         if self.phase in ("running", "stopping"):
             raise ApiFail(409, "busy", "A transcription is already "
                                        "running.")
+        if self.model_busy_check is not None and self.model_busy_check():
+            raise ApiFail(409, "model_busy",
+                          "A model is downloading. Wait for it to finish "
+                          "before starting a transcription.")
 
     def _spawn(self, params):
         self.cancel_event.clear()
@@ -3067,6 +3086,413 @@ class RunController:
             "failed": failed,
         })
         self._publish_run_state()
+
+
+# =====================================================================
+# Web UI backend - model manager (list / download / uninstall)
+# =====================================================================
+#
+# Whisper model weights are large (75 MB - 3 GB) and each engine caches
+# its own copy in a different place: openai-whisper keeps a single .pt per
+# model under ~/.cache/whisper, while faster-whisper and mlx-whisper both
+# pull Hugging Face repos into ~/.cache/huggingface/hub. So the same model
+# name can occupy disk two or three times over. The model manager reports
+# what is cached (with sizes), downloads models on demand - including
+# brand-new ones released after this build, for the HF-backed engines -
+# and lets the user reclaim space by uninstalling.
+
+
+def _whisper_cache_dir():
+    """Where openai-whisper stores its .pt files. Mirrors whisper's own
+    default so we look in exactly the directory it downloads to
+    ($XDG_CACHE_HOME/whisper, else ~/.cache/whisper)."""
+    root = os.getenv("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return Path(root) / "whisper"
+
+
+def _hf_cache_dir():
+    """The huggingface_hub download cache (faster-whisper, mlx-whisper).
+    Prefer the library's resolved constant so HF_HOME / HF_HUB_CACHE
+    overrides are honoured; fall back to the documented default."""
+    try:
+        from huggingface_hub import constants as _hf_const
+        return Path(_hf_const.HF_HUB_CACHE)
+    except Exception:
+        base = os.getenv("HF_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface")
+        return Path(base) / "hub"
+
+
+# openai-whisper aliases share one .pt file (large -> large-v3,
+# turbo -> large-v3-turbo). The authoritative filename is the basename of
+# whisper._MODELS[model]; this static map is the fallback when whisper
+# can't be imported (e.g. in tests).
+_WHISPER_PT_FALLBACK = {
+    "tiny.en": "tiny.en.pt", "tiny": "tiny.pt",
+    "base.en": "base.en.pt", "base": "base.pt",
+    "small.en": "small.en.pt", "small": "small.pt",
+    "medium.en": "medium.en.pt", "medium": "medium.pt",
+    "large-v1": "large-v1.pt", "large-v2": "large-v2.pt",
+    "large-v3": "large-v3.pt", "large": "large-v3.pt",
+    "turbo": "large-v3-turbo.pt", "large-v3-turbo": "large-v3-turbo.pt",
+}
+
+
+def _whisper_pt_filename(model):
+    """The cache filename openai-whisper uses for `model` (basename of its
+    download URL), or None if the name is unknown."""
+    try:
+        import whisper
+        url = whisper._MODELS.get(model)
+        if url:
+            return os.path.basename(url)
+    except Exception:
+        pass
+    return _WHISPER_PT_FALLBACK.get(model)
+
+
+def _faster_repo_for(model):
+    """The Hugging Face repo faster-whisper caches `model` under.
+    Authoritative from faster_whisper.utils._MODELS; falls back to the
+    Systran naming used for the standard models."""
+    try:
+        from faster_whisper import utils as _fw_utils
+        repo = getattr(_fw_utils, "_MODELS", {}).get(model)
+        if repo:
+            return repo
+    except Exception:
+        pass
+    return f"Systran/faster-whisper-{model}"
+
+
+def _repo_belongs_to_engine(engine, repo_id):
+    """Heuristic: does a cached HF repo look like a Whisper model for this
+    engine? Used to surface user-downloaded 'new' models that aren't in
+    the built-in list."""
+    r = repo_id.lower()
+    if engine == "faster":
+        return "faster-whisper" in r or "faster-distil-whisper" in r
+    if engine == "mlx":
+        return "whisper" in r and "mlx" in r
+    return False
+
+
+def _hf_repo_sizes():
+    """Map {repo_id: (size_on_disk_bytes, [revision_hashes])} for every
+    repo in the huggingface_hub cache. Empty when the library or the cache
+    directory is absent. Uses the official scanner, which accounts for
+    shared blobs so sizes aren't double-counted."""
+    out = {}
+    try:
+        from huggingface_hub import scan_cache_dir
+        info = scan_cache_dir()
+    except Exception:
+        return out
+    for repo in info.repos:
+        hashes = [r.commit_hash for r in repo.revisions]
+        out[repo.repo_id] = (int(repo.size_on_disk), hashes)
+    return out
+
+
+def _download_status_text(model, downloaded, total, speed):
+    parts = [f"Downloading '{model}'",
+             f"{_humanize_bytes(downloaded)} of {_humanize_bytes(total)}"]
+    if speed > 0:
+        parts.append(f"{_humanize_bytes(speed)}/s")
+    return "   ·   ".join(parts)
+
+
+class ModelStore:
+    """Read-only view of which Whisper models are cached on disk, per
+    installed engine, with sizes. `engines` defaults to the detected
+    engines but is injectable for tests."""
+
+    def __init__(self, engines=None):
+        self.engines = (list(engines) if engines is not None
+                        else list(AVAILABLE_ENGINES))
+
+    def payload(self):
+        hf_sizes = None
+        engines_out = []
+        for key, name in self.engines:
+            if key == "whisper":
+                engines_out.append(self._openai_engine(key, name))
+            elif key in ("faster", "mlx"):
+                if hf_sizes is None:
+                    hf_sizes = _hf_repo_sizes()
+                engines_out.append(self._hf_engine(key, name, hf_sizes))
+        return {
+            "whisper_cache": str(_whisper_cache_dir()),
+            "hf_cache": str(_hf_cache_dir()),
+            "engines": engines_out,
+            "total": sum(e["total"] for e in engines_out),
+        }
+
+    def _openai_engine(self, key, name):
+        models = []
+        for m in WHISPER_MODELS:
+            fn = _whisper_pt_filename(m)
+            size, installed = 0, False
+            if fn:
+                p = _whisper_cache_dir() / fn
+                try:
+                    if p.exists():
+                        size = p.stat().st_size
+                        installed = size > 0
+                except OSError:
+                    pass
+            models.append({"model": m, "installed": installed, "size": size,
+                           "storage_key": fn or m, "custom": False})
+        # Aliased models share a file; count each file once.
+        total, counted = 0, set()
+        for e in models:
+            if e["installed"] and e["storage_key"] not in counted:
+                counted.add(e["storage_key"])
+                total += e["size"]
+        return {"key": key, "name": name, "supports_custom": False,
+                "models": models, "total": total}
+
+    def _hf_engine(self, key, name, hf_sizes):
+        repo_of = _faster_repo_for if key == "faster" else _mlx_repo_for
+        models, known_repos = [], set()
+        total, counted = 0, set()
+        for m in WHISPER_MODELS:
+            repo = repo_of(m)
+            known_repos.add(repo)
+            entry = hf_sizes.get(repo)
+            size = entry[0] if entry else 0
+            installed = bool(entry)
+            models.append({"model": m, "installed": installed, "size": size,
+                           "storage_key": repo, "custom": False})
+            if installed and repo not in counted:
+                counted.add(repo)
+                total += size
+        # Models the user fetched that aren't in the built-in list
+        # (e.g. a newly released repo). Surfaced so they can be removed.
+        custom = []
+        for repo, (size, _hashes) in hf_sizes.items():
+            if repo in known_repos or not _repo_belongs_to_engine(key, repo):
+                continue
+            custom.append({"model": repo, "installed": True, "size": size,
+                           "storage_key": repo, "custom": True})
+            if repo not in counted:
+                counted.add(repo)
+                total += size
+        models.extend(sorted(custom, key=lambda e: e["model"]))
+        return {"key": key, "name": name, "supports_custom": True,
+                "models": models, "total": total}
+
+
+def _prefetch_model(engine, model):
+    """Download a model's weights without loading them. Runs on the model
+    worker thread inside a _DownloadMonitor so progress is reported."""
+    if engine == "whisper":
+        import whisper
+        url = whisper._MODELS.get(model)
+        if not url:
+            raise RuntimeError(
+                f"'{model}' is not a known openai-whisper model.")
+        root = str(_whisper_cache_dir())
+        os.makedirs(root, exist_ok=True)
+        whisper._download(url, root, in_memory=False)
+    elif engine == "faster":
+        from faster_whisper import download_model
+        download_model(model)          # accepts a size name or a HF repo id
+    elif engine == "mlx":
+        from huggingface_hub import snapshot_download
+        snapshot_download(model if "/" in model else _mlx_repo_for(model))
+    else:
+        raise RuntimeError(f"Engine '{engine}' cannot download models.")
+
+
+def _uninstall_model(engine, model):
+    """Delete the cached weights for (engine, model). Returns bytes freed.
+    Raises ApiFail when the model isn't present or a delete fails."""
+    if engine == "whisper":
+        fn = _whisper_pt_filename(model)
+        p = (_whisper_cache_dir() / fn) if fn else None
+        if p is None or not p.exists():
+            raise ApiFail(404, "not_installed",
+                          f"'{model}' is not downloaded for this engine.")
+        try:
+            size = p.stat().st_size
+            p.unlink()
+        except OSError as e:
+            raise ApiFail(500, "delete_failed", f"Could not delete: {e}")
+        return size
+    if engine in ("faster", "mlx"):
+        if "/" in model:
+            repo = model
+        else:
+            repo = (_faster_repo_for(model) if engine == "faster"
+                    else _mlx_repo_for(model))
+        return _hf_delete_repo(repo)
+    raise ApiFail(400, "bad_engine", f"Engine '{engine}' is not installed.")
+
+
+def _hf_delete_repo(repo_id):
+    entry = _hf_repo_sizes().get(repo_id)
+    if not entry:
+        raise ApiFail(404, "not_installed",
+                      f"'{repo_id}' is not in the download cache.")
+    size, hashes = entry
+    try:
+        from huggingface_hub import scan_cache_dir
+        scan_cache_dir().delete_revisions(*hashes).execute()
+    except ApiFail:
+        raise
+    except Exception as e:
+        raise ApiFail(500, "delete_failed", f"Could not delete: {e}")
+    return size
+
+
+class ModelController:
+    """Downloads and uninstalls model weights on a background thread, one
+    job at a time, publishing `model_progress` / `model_done` / `models`
+    SSE events. Coupled loosely to the RunController so model work and
+    transcription never overlap - loading or deleting weights mid-run
+    would be unsafe. `worker_fn`/`store_fn` are injectable for tests."""
+
+    def __init__(self, broker, run_controller=None, *,
+                 prefetch_fn=None, uninstall_fn=None, store_fn=None):
+        self.broker = broker
+        self.run_controller = run_controller
+        self.lock = threading.RLock()
+        self.cancel_event = threading.Event()
+        self.worker = None
+        self.job = None            # {engine, model, phase, ...} or None
+        self._prefetch = prefetch_fn or _prefetch_model
+        self._uninstall = uninstall_fn or _uninstall_model
+        self._store = store_fn or (lambda: ModelStore().payload())
+
+    def _run_active(self):
+        rc = self.run_controller
+        return rc is not None and rc.phase in ("running", "stopping")
+
+    def is_busy(self):
+        with self.lock:
+            return self.job is not None
+
+    def list_payload(self):
+        payload = self._store()
+        with self.lock:
+            payload["job"] = dict(self.job) if self.job else None
+        payload["busy"] = self.is_busy() or self._run_active()
+        return payload
+
+    def _engine_installed(self, engine):
+        return engine in {k for k, _ in AVAILABLE_ENGINES}
+
+    def start_download(self, engine, model):
+        engine = (engine or "").strip()
+        model = (model or "").strip()
+        with self.lock:
+            if self._run_active():
+                raise ApiFail(409, "busy",
+                              "A transcription is running. Wait for it to "
+                              "finish before downloading a model.")
+            if self.job is not None:
+                raise ApiFail(409, "model_busy",
+                              "Another model is already downloading.")
+            if not self._engine_installed(engine):
+                raise ApiFail(400, "bad_engine",
+                              f"Engine '{engine}' is not installed.")
+            if not model:
+                raise ApiFail(400, "bad_model", "No model name was given.")
+            if engine == "whisper":
+                # openai-whisper can only fetch its fixed catalogue.
+                try:
+                    import whisper
+                    known = model in whisper._MODELS
+                except Exception:
+                    known = model in _WHISPER_PT_FALLBACK
+                if not known:
+                    raise ApiFail(
+                        400, "unknown_model",
+                        f"'{model}' is not a known openai-whisper model. "
+                        "New models can only be added for the faster-whisper "
+                        "and mlx-whisper engines.")
+            self.cancel_event.clear()
+            self.job = {"engine": engine, "model": model, "phase": "starting",
+                        "pct": 0.0, "downloaded": 0, "total": 0, "speed": 0.0,
+                        "status_text": f"Preparing to download '{model}'…"}
+            self._publish_progress()
+            self.worker = threading.Thread(
+                target=self._download_worker, args=(engine, model),
+                daemon=True, name="transcribr-model-dl")
+            self.worker.start()
+
+    def _download_worker(self, engine, model):
+        def on_progress(d):
+            with self.lock:
+                if self.job is None:
+                    return
+                total = d.get("total") or 0
+                downloaded = d.get("downloaded") or 0
+                speed = d.get("speed") or 0.0
+                self.job.update({
+                    "phase": "downloading",
+                    "pct": max(0.0, min(100.0,
+                                        (downloaded / total * 100)
+                                        if total else 0.0)),
+                    "downloaded": downloaded, "total": total, "speed": speed,
+                    "status_text": _download_status_text(
+                        model, downloaded, total, speed),
+                })
+            self._publish_progress()
+
+        try:
+            with _DownloadMonitor(self.cancel_event, model,
+                                  on_progress=on_progress):
+                self._prefetch(engine, model)
+        except _CancelledByUser:
+            self._finish(model, cancelled=True)
+            return
+        except Exception as e:
+            self._finish(model, error=f"{type(e).__name__}: {e}")
+            return
+        self._finish(model)
+
+    def _finish(self, model, *, error=None, cancelled=False):
+        with self.lock:
+            self.job = None
+        if error:
+            self.broker.publish("model_done",
+                                {"ok": False, "model": model, "error": error})
+        elif cancelled:
+            self.broker.publish(
+                "model_done",
+                {"ok": False, "model": model, "cancelled": True})
+        else:
+            self.broker.publish("model_done", {"ok": True, "model": model})
+        self.broker.publish("models", self.list_payload())
+
+    def cancel(self):
+        with self.lock:
+            if self.job is None:
+                return False
+            self.cancel_event.set()
+            return True
+
+    def uninstall(self, engine, model):
+        with self.lock:
+            if self._run_active():
+                raise ApiFail(409, "busy",
+                              "A transcription is running. Wait for it to "
+                              "finish before removing a model.")
+            if self.job is not None:
+                raise ApiFail(409, "model_busy",
+                              "A model is downloading. Wait for it to "
+                              "finish before removing a model.")
+        freed = self._uninstall((engine or "").strip(), (model or "").strip())
+        self.broker.publish("models", self.list_payload())
+        return freed
+
+    def _publish_progress(self):
+        with self.lock:
+            job = dict(self.job) if self.job else {}
+        self.broker.publish("model_progress", job)
 
 
 # =====================================================================
@@ -3587,6 +4013,8 @@ class WebBackend:
         self.broker = EventBroker()
         self.controller = RunController(self.broker)
         self.controller.on_paragraphs_ready = self._open_review_fresh
+        self.models = ModelController(self.broker, self.controller)
+        self.controller.model_busy_check = self.models.is_busy
         self.review = None        # the open ReviewSession, if any
         self.audio = None         # AudioPrep for the open session
         self.window = None        # pywebview window (web mode only)
@@ -3880,6 +4308,36 @@ class WebBackend:
         def api_run_stop():
             stopping = backend.controller.stop()
             return {"ok": True, "stopping": stopping}
+
+        # -- model manager ------------------------------------------------
+
+        @app.get("/api/models")
+        def api_models():
+            return backend.models.list_payload()
+
+        @app.post("/api/models/download")
+        def api_models_download():
+            body = bottle.request.json or {}
+            try:
+                backend.models.start_download(
+                    str(body.get("engine", "")), str(body.get("model", "")))
+                return {"ok": True}
+            except ApiFail as e:
+                _fail(e)
+
+        @app.post("/api/models/download/cancel")
+        def api_models_download_cancel():
+            return {"ok": True, "cancelling": backend.models.cancel()}
+
+        @app.post("/api/models/uninstall")
+        def api_models_uninstall():
+            body = bottle.request.json or {}
+            try:
+                freed = backend.models.uninstall(
+                    str(body.get("engine", "")), str(body.get("model", "")))
+                return {"ok": True, "freed": freed}
+            except ApiFail as e:
+                _fail(e)
 
         # -- files & dialogs ----------------------------------------------
 

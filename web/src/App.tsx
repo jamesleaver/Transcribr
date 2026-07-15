@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import DialogHost from "./components/DialogHost";
 import Sidebar from "./components/Sidebar";
 import LibraryView from "./views/LibraryView";
+import ModelsView from "./views/ModelsView";
 import ReviewView from "./views/ReviewView";
 import TranscribeView from "./views/TranscribeView";
 import { api } from "./api/client";
@@ -84,6 +85,7 @@ export default function App() {
         {view === "transcribe" && <TranscribeView />}
         {view === "review" && <ReviewView />}
         {view === "library" && <LibraryView />}
+        {view === "models" && <ModelsView />}
       </main>
       <DialogHost />
     </div>

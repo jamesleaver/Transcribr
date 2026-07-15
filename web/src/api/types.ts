@@ -122,6 +122,58 @@ export interface InspectedFile {
   derived_output: string;
 }
 
+// ---- Model manager --------------------------------------------------
+
+export interface ModelInfo {
+  model: string;
+  installed: boolean;
+  /** On-disk size in bytes (0 when not installed). */
+  size: number;
+  /** Storage identity (filename or HF repo); aliases share one. */
+  storage_key: string;
+  /** True for a cached model that isn't in the built-in list. */
+  custom: boolean;
+}
+
+export interface EngineModels {
+  key: string;
+  name: string;
+  /** HF-backed engines can fetch brand-new models by name/repo. */
+  supports_custom: boolean;
+  models: ModelInfo[];
+  /** Bytes this engine's cached models occupy (aliases counted once). */
+  total: number;
+}
+
+export interface ModelJob {
+  engine: string;
+  model: string;
+  phase: "starting" | "downloading";
+  pct: number;
+  downloaded: number;
+  total: number;
+  speed: number;
+  status_text: string;
+}
+
+export interface ModelsPayload {
+  whisper_cache: string;
+  hf_cache: string;
+  engines: EngineModels[];
+  total: number;
+  /** The in-flight download, if any (also delivered via model_progress). */
+  job: ModelJob | null;
+  /** True while a download or a transcription is running. */
+  busy: boolean;
+}
+
+export interface ModelDone {
+  ok: boolean;
+  model: string;
+  error?: string;
+  cancelled?: boolean;
+}
+
 export interface StateSnapshot {
   run: RunState | null;
   review: unknown | null;

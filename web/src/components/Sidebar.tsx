@@ -25,6 +25,7 @@ const ICONS = {
   transcribe: "M12 4a3 3 0 0 1 3 3v5a3 3 0 1 1-6 0V7a3 3 0 0 1 3-3zm-6 8a6 6 0 0 0 12 0M12 18v3",
   review: "M4 6h16M4 10h16M4 14h10M4 18h7",
   library: "M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5zm11-2v5h5",
+  models: "M4 7c0-1.1 3.6-2 8-2s8 .9 8 2-3.6 2-8 2-8-.9-8-2zm0 0v10c0 1.1 3.6 2 8 2s8-.9 8-2V7M4 12c0 1.1 3.6 2 8 2s8-.9 8-2",
 };
 
 function NavButton({ view, label, icon, disabled }: {
@@ -70,6 +71,7 @@ export default function Sidebar() {
         <NavButton view="review" label="Review" icon={<Icon d={ICONS.review} />}
           disabled={!hasReview} />
         <NavButton view="library" label="Library" icon={<Icon d={ICONS.library} />} />
+        <NavButton view="models" label="Models" icon={<Icon d={ICONS.models} />} />
       </nav>
 
       <div className="mt-auto flex flex-col items-center gap-2">

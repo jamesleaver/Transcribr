@@ -129,11 +129,12 @@ The installer handles all of that.
 
 ## Using the application
 
-The window has three views, switched in the left sidebar:
+The window has four views, switched in the left sidebar:
 **Transcribe** (choose files and options, run jobs), **Review** (label
-speakers and edit a finished transcript), and **Library** (recent
-transcripts). The defaults are sensible for most jobs; pick an input
-file and click **Run Transcription**.
+speakers and edit a finished transcript), **Library** (recent
+transcripts), and **Models** (see what's downloaded and free up space).
+The defaults are sensible for most jobs; pick an input file and click
+**Run Transcription**.
 
 The app remembers your settings (engine, model, format, description,
 decoding options, theme) between launches. The moon button at the
@@ -252,6 +253,29 @@ The last ten transcripts you produced or opened, with their locations.
 Click one (or its **Review** button) to re-open it for speaker
 labelling and editing; **Open transcript…** browses for any other
 `.docx`/`.txt` transcript.
+
+### Models
+
+Model weights are large (75 MB for `tiny` up to ~3 GB for `large-v3`)
+and each engine keeps its **own** copy in its own cache, so the same
+model can occupy disk two or three times over. The **Models** view
+lists every model grouped by engine, shows the size of each downloaded
+one and a running total on disk, and lets you:
+
+- **Download** a model ahead of time, so the first real run doesn't
+  stall on a multi-gigabyte fetch. A progress bar with size and speed
+  shows how it's going, and **Cancel** aborts it.
+- **Uninstall** a model you no longer need to reclaim the space (it
+  re-downloads automatically the next time you use it).
+- **Download a newer model** that isn't in the built-in list — for the
+  faster-whisper and mlx-whisper engines, type a model name or a full
+  Hugging Face repo (e.g. `mlx-community/whisper-large-v3-turbo`) into
+  the engine's download box. (openai-whisper only offers its fixed
+  catalogue.)
+
+Downloading and uninstalling are paused while a transcription is
+running, and a transcription won't start while a model is downloading.
+The cache locations are shown at the bottom of the view.
 
 ### Run / Stop and progress
 

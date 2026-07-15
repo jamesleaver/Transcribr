@@ -671,22 +671,22 @@ class TestDownloadFeedback(unittest.TestCase):
             import tqdm
         except ImportError:
             self.skipTest("tqdm not installed")
-        q = queue.Queue()
+        progress, logs = [], []
         cancel = threading.Event()
         orig_update = tqdm.tqdm.update
-        with T._DownloadMonitor(q, cancel, "large-v3"):
+        with T._DownloadMonitor(cancel, "large-v3",
+                                on_progress=progress.append,
+                                on_log=logs.append):
             bar = tqdm.tqdm(total=100 * 1024 * 1024, unit="iB",
                             file=io.StringIO())
             bar.n = 50 * 1024 * 1024
             bar.update(0)   # patched update records + emits
             bar.close()
-        msgs = self._drain_queue(q)
-        downloads = [d for (k, d) in msgs if k == "download"]
-        self.assertTrue(downloads, "expected a download progress message")
-        self.assertEqual(downloads[-1]["model"], "large-v3")
-        self.assertEqual(downloads[-1]["total"], 100 * 1024 * 1024)
-        self.assertTrue(any("Downloading model 'large-v3'" in d
-                            for (k, d) in msgs if k == "log"))
+        self.assertTrue(progress, "expected a download progress callback")
+        self.assertEqual(progress[-1]["model"], "large-v3")
+        self.assertEqual(progress[-1]["total"], 100 * 1024 * 1024)
+        self.assertTrue(any("Downloading model 'large-v3'" in t
+                            for t in logs))
         # tqdm's method is restored once the context exits.
         self.assertIs(tqdm.tqdm.update, orig_update)
 
@@ -698,13 +698,13 @@ class TestDownloadFeedback(unittest.TestCase):
             import tqdm
         except ImportError:
             self.skipTest("tqdm not installed")
-        q = queue.Queue()
-        with T._DownloadMonitor(q, threading.Event(), "tiny"):
+        progress = []
+        with T._DownloadMonitor(threading.Event(), "tiny",
+                                on_progress=progress.append):
             bar = tqdm.tqdm(total=4096, unit="iB", file=io.StringIO())
             bar.update(1024)
             bar.close()
-        self.assertFalse([d for (k, d) in self._drain_queue(q)
-                          if k == "download"])
+        self.assertFalse(progress)
 
     def test_download_monitor_cancel_raises(self):
         import io
@@ -717,10 +717,209 @@ class TestDownloadFeedback(unittest.TestCase):
         cancel = threading.Event()
         cancel.set()
         with self.assertRaises(T._CancelledByUser):
-            with T._DownloadMonitor(queue.Queue(), cancel, "m"):
+            with T._DownloadMonitor(cancel, "m", on_progress=lambda _d: None):
                 bar = tqdm.tqdm(total=10 * 1024 * 1024, unit="iB",
                                 file=io.StringIO())
                 bar.update(1)
+
+
+# =====================================================================
+# Model manager - ModelStore (cache discovery) and ModelController
+# =====================================================================
+
+class TestModelStore(unittest.TestCase):
+    """Inventory shaping: presence, sizes, alias de-duplication, and
+    surfacing user-downloaded 'new' models. Runs against a temp whisper
+    cache dir and a stubbed huggingface_hub size map, so no engine or
+    real download is needed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-models-")
+        self.addCleanup(self.tmp.cleanup)
+        self._saved_whisper_dir = T._whisper_cache_dir
+        self._saved_hf_sizes = T._hf_repo_sizes
+        T._whisper_cache_dir = lambda: Path(self.tmp.name)
+        self.addCleanup(
+            lambda: setattr(T, "_whisper_cache_dir", self._saved_whisper_dir))
+        self.addCleanup(
+            lambda: setattr(T, "_hf_repo_sizes", self._saved_hf_sizes))
+
+    def _pt(self, name, size):
+        (Path(self.tmp.name) / name).write_bytes(b"\0" * size)
+
+    def test_openai_presence_and_alias_dedup(self):
+        # large and large-v3 share large-v3.pt; count the file once.
+        self._pt("large-v3.pt", 2000)
+        self._pt("small.en.pt", 500)
+        T._hf_repo_sizes = lambda: {}
+        store = T.ModelStore(engines=[("whisper", "OpenAI Whisper")])
+        eng = store.payload()["engines"][0]
+        by = {m["model"]: m for m in eng["models"]}
+        self.assertTrue(by["large-v3"]["installed"])
+        self.assertTrue(by["large"]["installed"])          # alias
+        self.assertFalse(by["tiny"]["installed"])
+        self.assertEqual(by["large-v3"]["size"], 2000)
+        # 2000 (shared once) + 500, NOT 2000+2000+500.
+        self.assertEqual(eng["total"], 2500)
+        self.assertFalse(eng["supports_custom"])
+
+    def test_hf_engine_standard_and_custom(self):
+        T._hf_repo_sizes = lambda: {
+            "Systran/faster-whisper-large-v3": (1500, ["h1"]),
+            "deepdml/faster-whisper-large-v3-turbo-ct2": (900, ["h2"]),
+            "mlx-community/whisper-tiny-mlx": (300, ["h3"]),
+        }
+        store = T.ModelStore(engines=[("faster", "faster-whisper")])
+        eng = store.payload()["engines"][0]
+        by = {m["model"]: m for m in eng["models"]}
+        self.assertTrue(by["large-v3"]["installed"])
+        self.assertEqual(by["large-v3"]["size"], 1500)
+        customs = [m for m in eng["models"] if m["custom"]]
+        self.assertEqual(len(customs), 1)
+        self.assertEqual(customs[0]["model"],
+                         "deepdml/faster-whisper-large-v3-turbo-ct2")
+        # The mlx repo must not be attributed to the faster engine.
+        self.assertNotIn("mlx-community/whisper-tiny-mlx",
+                         [m["storage_key"] for m in eng["models"]])
+        self.assertTrue(eng["supports_custom"])
+        self.assertEqual(eng["total"], 2400)   # 1500 + 900
+
+    def test_grand_total_across_engines(self):
+        self._pt("tiny.pt", 1000)
+        T._hf_repo_sizes = lambda: {
+            "mlx-community/whisper-tiny-mlx": (300, ["h"]),
+        }
+        store = T.ModelStore(engines=[("whisper", "W"), ("mlx", "M")])
+        self.assertEqual(store.payload()["total"], 1300)
+
+    def test_uninstall_openai_deletes_file(self):
+        self._pt("small.en.pt", 777)
+        T._hf_repo_sizes = lambda: {}
+        freed = T._uninstall_model("whisper", "small.en")
+        self.assertEqual(freed, 777)
+        self.assertFalse((Path(self.tmp.name) / "small.en.pt").exists())
+        # Second attempt: nothing to remove.
+        with self.assertRaises(T.ApiFail) as cm:
+            T._uninstall_model("whisper", "small.en")
+        self.assertEqual(cm.exception.code, "not_installed")
+
+
+class TestModelController(unittest.TestCase):
+    """Download/uninstall job orchestration and its guards, with injected
+    prefetch/uninstall/store so no real weights are touched."""
+
+    def setUp(self):
+        self._saved_engines = T.AVAILABLE_ENGINES
+        T.AVAILABLE_ENGINES = [("faster", "faster-whisper"),
+                               ("whisper", "OpenAI Whisper")]
+        self.addCleanup(
+            lambda: setattr(T, "AVAILABLE_ENGINES", self._saved_engines))
+        self.broker = T.EventBroker()
+        self.events_q, _ = self.broker.subscribe()
+        self.store = {"engines": [], "total": 0,
+                      "whisper_cache": "w", "hf_cache": "h"}
+
+    def _events(self):
+        out = []
+        while True:
+            try:
+                _seq, event, _payload = self.events_q.get_nowait()
+            except Exception:
+                return out
+            out.append(event)
+
+    def test_download_lifecycle_publishes_and_clears(self):
+        import threading
+        started = threading.Event()
+        release = threading.Event()
+
+        def prefetch(engine, model):
+            started.set()
+            release.wait(5)
+
+        mc = T.ModelController(self.broker, prefetch_fn=prefetch,
+                               store_fn=lambda: dict(self.store))
+        mc.start_download("faster", "large-v3")
+        self.assertTrue(started.wait(5))
+        self.assertTrue(mc.is_busy())
+        # list_payload reflects the running job + busy flag.
+        payload = mc.list_payload()
+        self.assertTrue(payload["busy"])
+        self.assertEqual(payload["job"]["model"], "large-v3")
+        release.set()
+        mc.worker.join(5)
+        self.assertFalse(mc.is_busy())
+        evs = self._events()
+        self.assertIn("model_progress", evs)   # 'starting' publish
+        self.assertIn("model_done", evs)
+        self.assertIn("models", evs)
+
+    def test_second_download_rejected_while_busy(self):
+        import threading
+        release = threading.Event()
+        mc = T.ModelController(
+            self.broker, prefetch_fn=lambda e, m: release.wait(5),
+            store_fn=lambda: dict(self.store))
+        mc.start_download("faster", "large-v3")
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_download("faster", "tiny")
+        self.assertEqual(cm.exception.code, "model_busy")
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.uninstall("faster", "tiny")
+        self.assertEqual(cm.exception.code, "model_busy")
+        release.set()
+        mc.worker.join(5)
+
+    def test_download_blocked_during_transcription(self):
+        class _RC:
+            phase = "running"
+        mc = T.ModelController(self.broker, run_controller=_RC(),
+                               prefetch_fn=lambda e, m: None,
+                               store_fn=lambda: dict(self.store))
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_download("faster", "large-v3")
+        self.assertEqual(cm.exception.code, "busy")
+
+    def test_unknown_engine_and_openai_model_rejected(self):
+        mc = T.ModelController(self.broker, prefetch_fn=lambda e, m: None,
+                               store_fn=lambda: dict(self.store))
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_download("nope", "tiny")
+        self.assertEqual(cm.exception.code, "bad_engine")
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_download("whisper", "totally-made-up")
+        self.assertEqual(cm.exception.code, "unknown_model")
+
+    def test_uninstall_delegates_and_publishes(self):
+        calls = []
+        mc = T.ModelController(
+            self.broker, prefetch_fn=lambda e, m: None,
+            uninstall_fn=lambda e, m: calls.append((e, m)) or 4242,
+            store_fn=lambda: dict(self.store))
+        freed = mc.uninstall("faster", "large-v3")
+        self.assertEqual(freed, 4242)
+        self.assertEqual(calls, [("faster", "large-v3")])
+        self.assertIn("models", self._events())
+
+    def test_download_error_reported(self):
+        import json
+        def boom(engine, model):
+            raise RuntimeError("network down")
+        mc = T.ModelController(self.broker, prefetch_fn=boom,
+                               store_fn=lambda: dict(self.store))
+        mc.start_download("faster", "large-v3")
+        mc.worker.join(5)
+        done = None
+        while True:
+            try:
+                _s, ev, payload = self.events_q.get_nowait()
+            except Exception:
+                break
+            if ev == "model_done":
+                done = json.loads(payload)
+        self.assertIsNotNone(done)
+        self.assertFalse(done["ok"])
+        self.assertIn("network down", done["error"])
 
 
 # =====================================================================
@@ -969,6 +1168,35 @@ class TestHttpApi(unittest.TestCase):
         self.assertIn("light", meta["palettes"])
         self.assertIn("dark", meta["palettes"])
         self.assertIsInstance(meta["models"], list)
+
+    def test_models_endpoint_shape_and_guards(self):
+        # Point the model cache at empty temp dirs so nothing real is
+        # ever read or deleted by this test.
+        saved_dir, saved_sizes = T._whisper_cache_dir, T._hf_repo_sizes
+        T._whisper_cache_dir = lambda: Path(self.tmp.name)
+        T._hf_repo_sizes = lambda: {}
+        self.addCleanup(lambda: setattr(T, "_whisper_cache_dir", saved_dir))
+        self.addCleanup(lambda: setattr(T, "_hf_repo_sizes", saved_sizes))
+
+        status, payload = self._req("GET", "/api/models")
+        self.assertEqual(status, 200)
+        for k in ("engines", "total", "whisper_cache", "hf_cache", "busy"):
+            self.assertIn(k, payload)
+        self.assertIsInstance(payload["engines"], list)
+        # Downloading for an engine that isn't installed -> 400.
+        status, err = self._req("POST", "/api/models/download",
+                                {"engine": "faster", "model": "tiny"})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "bad_engine")
+        # Uninstalling a model that isn't present -> 404 (empty temp cache).
+        status, err = self._req("POST", "/api/models/uninstall",
+                                {"engine": "whisper", "model": "tiny"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "not_installed")
+        # Cancel with nothing running is a harmless no-op.
+        status, res = self._req("POST", "/api/models/download/cancel")
+        self.assertEqual(status, 200)
+        self.assertFalse(res["cancelling"])
 
     def test_settings_partial_put_is_non_destructive(self):
         _, before = self._req("GET", "/api/settings")
