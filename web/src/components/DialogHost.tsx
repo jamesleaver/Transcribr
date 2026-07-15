@@ -41,7 +41,7 @@ export default function DialogHost() {
         </h2>
         <p className="whitespace-pre-wrap text-sm text-fg">{spec.body}</p>
         {spec.detail && (
-          <pre className="mt-3 max-h-40 overflow-auto rounded-lg bg-surface-2 p-3 text-xs text-muted">
+          <pre className="mt-3 max-h-40 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-surface-2 p-3 text-xs text-muted">
             {spec.detail}
           </pre>
         )}

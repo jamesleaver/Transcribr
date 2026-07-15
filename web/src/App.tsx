@@ -80,7 +80,7 @@ export default function App() {
   return (
     <div className="flex h-full">
       <Sidebar />
-      <main className="min-w-0 flex-1 overflow-y-auto">
+      <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {view === "transcribe" && <TranscribeView />}
         {view === "review" && <ReviewView />}
         {view === "library" && <LibraryView />}

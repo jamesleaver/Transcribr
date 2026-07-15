@@ -17,7 +17,7 @@ function LogDrawer() {
   return (
     <pre
       ref={ref}
-      className="mt-3 h-44 overflow-y-auto rounded-lg bg-surface-2 p-3 font-mono text-[11px] leading-relaxed text-muted"
+      className="mt-3 h-44 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-3 font-mono text-[11px] leading-relaxed text-muted"
     >
       {log || "No output yet."}
     </pre>

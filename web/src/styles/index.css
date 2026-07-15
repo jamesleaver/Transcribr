@@ -48,6 +48,9 @@ body,
 
 body {
   margin: 0;
+  /* An app window must never scroll sideways; anything wide scrolls
+     inside its own container instead. */
+  overflow-x: hidden;
   background: var(--app-bg);
   color: var(--fg);
   font-family:
