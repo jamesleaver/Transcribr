@@ -31,6 +31,13 @@ onEvent("model_progress", (d) =>
 
 onEvent("model_done", (d) => useModels.getState().onDone(d as ModelDone));
 
+onEvent("engines_changed", () => {
+  // An engine was installed or removed: refresh the engine roster (so the
+  // Transcribe dropdown updates) and the model inventory.
+  void useApp.getState().refreshMeta();
+  void useModels.getState().refresh();
+});
+
 onEvent("files_dropped", (d) => {
   void useRun.getState().addPaths((d as { paths: string[] }).paths);
 });

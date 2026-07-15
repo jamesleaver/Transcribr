@@ -20,6 +20,9 @@ interface AppState {
   setView: (view: View) => void;
   setSse: (status: SseStatus) => void;
   refreshRecents: () => Promise<void>;
+  /** Re-fetch /api/meta (e.g. after an engine is installed/removed) so the
+   *  engine list reflects the new roster. */
+  refreshMeta: () => Promise<void>;
   /** Optimistic local merge + debounced PUT of the full settings dict. */
   updateSettings: (patch: Partial<Settings>) => void;
 }
@@ -65,6 +68,11 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) =>
       s.snapshot ? { snapshot: { ...s.snapshot, recents: items } } : {},
     );
+  },
+
+  refreshMeta: async () => {
+    const meta = await api.get<Meta>("/api/meta");
+    set({ meta });
   },
 
   updateSettings: (patch) => {

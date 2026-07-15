@@ -48,18 +48,10 @@ import time
 import traceback
 from pathlib import Path
 
-# Theming leftovers from the Tk era, kept as the single source of the
-# colour palettes (served to the web front-end as CSS variables).
-# sv-ttk is no longer installed; the guarded import keeps _apply_theme
-# harmless if it is.
-try:
-    import sv_ttk
-except ImportError:
-    sv_ttk = None
-try:
-    import darkdetect
-except ImportError:
-    darkdetect = None
+# The colour palettes below are the single source served to the web
+# front-end as CSS variables. (The Tk-era theme packages sv-ttk and
+# darkdetect are no longer used - the front-end resolves light/dark
+# itself, including "auto" via prefers-color-scheme.)
 
 
 # =====================================================================
@@ -122,32 +114,16 @@ _ACTIVE_THEME = "light"
 
 
 def _resolve_theme(setting):
-    """Map a theme setting ("auto"/"light"/"dark") to a palette key."""
+    """Map a theme setting ("auto"/"light"/"dark") to a palette key. The
+    running app resolves "auto" in the front-end (prefers-color-scheme);
+    server-side it falls back to light."""
     if setting in ("light", "dark"):
         return setting
-    if darkdetect is not None:
-        try:
-            if (darkdetect.theme() or "").lower() == "dark":
-                return "dark"
-        except Exception:
-            pass
     return "light"
 
 
 def _palette():
     return _PALETTES[_ACTIVE_THEME]
-
-
-def _apply_theme(setting):
-    """Activate the palette for `setting` and, when sv-ttk is installed,
-    restyle every ttk widget to match. Safe to call repeatedly."""
-    global _ACTIVE_THEME
-    _ACTIVE_THEME = _resolve_theme(setting)
-    if sv_ttk is not None:
-        try:
-            sv_ttk.set_theme(_ACTIVE_THEME)
-        except Exception as e:
-            _log(f"sv-ttk theme switch failed: {e}")
 
 
 # =====================================================================
@@ -3203,6 +3179,98 @@ def _download_status_text(model, downloaded, total, speed):
     return "   ·   ".join(parts)
 
 
+# Engines the app can pip-install on demand from the Models view, so the
+# base install stays lean. Only the reference OpenAI engine qualifies: it
+# drags in PyTorch (~2 GB), so it's opt-in. faster-whisper and mlx-whisper
+# ship with the installer and aren't listed here.
+_INSTALLABLE_ENGINES = {
+    "whisper": {
+        "name": "OpenAI Whisper (reference)",
+        "note": "The reference engine. Downloads PyTorch (~2 GB); "
+                "slower than faster-whisper with essentially identical "
+                "output.",
+        "packages": ["openai-whisper>=20250625"],
+        # For a clean uninstall we also drop torch, which nothing else in
+        # this app uses - that's where the space actually goes.
+        "uninstall": ["openai-whisper", "torch"],
+        "approx_mb": 2200,
+    },
+}
+
+
+def _engine_install_args(key):
+    """pip-install arguments for an installable engine, including the
+    Intel-macOS torch/numpy/numba pins openai-whisper needs (PyTorch
+    stopped shipping x86_64 macOS wheels after 2.2.2)."""
+    spec = _INSTALLABLE_ENGINES[key]
+    pkgs = list(spec["packages"])
+    if key == "whisper" and sys.platform == "darwin":
+        import platform as _plat
+        if _plat.machine() == "x86_64":
+            pkgs += ["torch==2.2.2", "numpy<2", "numba<0.60"]
+    return ["--upgrade", "--prefer-binary", *pkgs]
+
+
+def _engine_uninstall_pkgs(key):
+    spec = _INSTALLABLE_ENGINES[key]
+    return list(spec.get("uninstall") or spec["packages"])
+
+
+def _redetect_engines():
+    """Re-probe which engines are importable and refresh the module-level
+    AVAILABLE_ENGINES (read live by /api/meta and the controllers), so a
+    just-installed engine appears without a restart."""
+    import importlib
+    importlib.invalidate_caches()
+    global AVAILABLE_ENGINES
+    AVAILABLE_ENGINES = _detect_engines()
+    return AVAILABLE_ENGINES
+
+
+def _run_engine_op(action, key, on_line, should_cancel):
+    """Run `pip install`/`pip uninstall` for an engine in a subprocess,
+    forwarding each output line to on_line and honouring should_cancel().
+    Raises _CancelledByUser on cancel, RuntimeError on a non-zero exit."""
+    import subprocess
+    import queue as _queue
+    if action == "install":
+        args = ["install", *_engine_install_args(key)]
+    else:
+        args = ["uninstall", "-y", *_engine_uninstall_pkgs(key)]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "pip", *args],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        bufsize=1)
+    lines = _queue.Queue()
+
+    def _reader():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\n"))
+        finally:
+            proc.stdout.close()
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    while True:
+        try:
+            on_line(lines.get(timeout=0.3))
+        except _queue.Empty:
+            pass
+        if should_cancel() and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise _CancelledByUser()
+        if proc.poll() is not None and lines.empty():
+            break
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"pip {action} failed (exit code {rc})")
+
+
 def _dedupe_alias_models(raw):
     """Collapse models that resolve to the same storage into one entry.
 
@@ -3254,10 +3322,22 @@ class ModelStore:
                 if hf_sizes is None:
                     hf_sizes = _hf_repo_sizes()
                 engines_out.append(self._hf_engine(key, name, hf_sizes))
+        installed_keys = {k for k, _ in self.engines}
+        installable = [
+            {"key": key, "name": spec["name"], "note": spec["note"],
+             "approx_mb": spec.get("approx_mb", 0)}
+            for key, spec in _INSTALLABLE_ENGINES.items()
+            if key not in installed_keys
+        ]
+        # An installed engine that the app knows how to pip-install can also
+        # be removed to reclaim space.
+        for e in engines_out:
+            e["removable"] = e["key"] in _INSTALLABLE_ENGINES
         return {
             "whisper_cache": str(_whisper_cache_dir()),
             "hf_cache": str(_hf_cache_dir()),
             "engines": engines_out,
+            "installable": installable,
             "total": sum(e["total"] for e in engines_out),
         }
 
@@ -3375,16 +3455,18 @@ class ModelController:
     would be unsafe. `worker_fn`/`store_fn` are injectable for tests."""
 
     def __init__(self, broker, run_controller=None, *,
-                 prefetch_fn=None, uninstall_fn=None, store_fn=None):
+                 prefetch_fn=None, uninstall_fn=None, store_fn=None,
+                 engine_op_fn=None):
         self.broker = broker
         self.run_controller = run_controller
         self.lock = threading.RLock()
         self.cancel_event = threading.Event()
         self.worker = None
-        self.job = None            # {engine, model, phase, ...} or None
+        self.job = None            # {kind, ...} or None (one job at a time)
         self._prefetch = prefetch_fn or _prefetch_model
         self._uninstall = uninstall_fn or _uninstall_model
         self._store = store_fn or (lambda: ModelStore().payload())
+        self._engine_op = engine_op_fn or _run_engine_op
 
     def _run_active(self):
         rc = self.run_controller
@@ -3434,8 +3516,9 @@ class ModelController:
                         "New models can only be added for the faster-whisper "
                         "and mlx-whisper engines.")
             self.cancel_event.clear()
-            self.job = {"engine": engine, "model": model, "phase": "starting",
-                        "pct": 0.0, "downloaded": 0, "total": 0, "speed": 0.0,
+            self.job = {"kind": "download", "engine": engine, "model": model,
+                        "phase": "starting", "pct": 0.0, "downloaded": 0,
+                        "total": 0, "speed": 0.0,
                         "status_text": f"Preparing to download '{model}'…"}
             self._publish_progress()
             self.worker = threading.Thread(
@@ -3486,6 +3569,96 @@ class ModelController:
                 {"ok": False, "model": model, "cancelled": True})
         else:
             self.broker.publish("model_done", {"ok": True, "model": model})
+        self.broker.publish("models", self.list_payload())
+
+    # ----- Engine install / uninstall (pip in the venv) ------------------
+
+    def start_engine_install(self, key):
+        return self._start_engine_op("install", key)
+
+    def start_engine_uninstall(self, key):
+        return self._start_engine_op("uninstall", key)
+
+    def _start_engine_op(self, action, key):
+        key = (key or "").strip()
+        with self.lock:
+            if self._run_active():
+                raise ApiFail(409, "busy",
+                              "A transcription is running. Wait for it to "
+                              "finish first.")
+            if self.job is not None:
+                raise ApiFail(409, "model_busy",
+                              "Another model or engine operation is already "
+                              "in progress.")
+            if key not in _INSTALLABLE_ENGINES:
+                raise ApiFail(400, "bad_engine",
+                              f"'{key}' is not an installable engine.")
+            name = _INSTALLABLE_ENGINES[key]["name"]
+            installed = self._engine_installed(key)
+            if action == "install" and installed:
+                raise ApiFail(409, "already_installed",
+                              f"{name} is already installed.")
+            if action == "uninstall" and not installed:
+                raise ApiFail(404, "not_installed",
+                              f"{name} isn't installed.")
+            verb = "Installing" if action == "install" else "Removing"
+            self.cancel_event.clear()
+            self.job = {
+                "kind": "engine", "action": action, "engine": key,
+                "model": name,
+                "phase": "installing" if action == "install" else "removing",
+                "pct": 0.0,
+                "status_text": f"{verb} {name}… (this can take a while)",
+            }
+            self._publish_progress()
+            self.worker = threading.Thread(
+                target=self._engine_worker, args=(action, key),
+                daemon=True, name="transcribr-engine-op")
+            self.worker.start()
+
+    def _engine_worker(self, action, key):
+        def on_line(line):
+            line = (line or "").strip()
+            if not line:
+                return
+            with self.lock:
+                if self.job is None:
+                    return
+                self.job["status_text"] = line[:200]
+            self._publish_progress()
+
+        try:
+            self._engine_op(action, key, on_line=on_line,
+                            should_cancel=self.cancel_event.is_set)
+        except _CancelledByUser:
+            self._finish_engine(key, cancelled=True)
+            return
+        except Exception as e:
+            self._finish_engine(key, error=f"{type(e).__name__}: {e}")
+            return
+        # Success: a newly (un)installed engine changes what's available.
+        try:
+            _redetect_engines()
+        except Exception:
+            pass
+        self._finish_engine(key)
+
+    def _finish_engine(self, key, *, error=None, cancelled=False):
+        with self.lock:
+            self.job = None
+        name = _INSTALLABLE_ENGINES.get(key, {}).get("name", key)
+        if error:
+            self.broker.publish("model_done", {"ok": False, "engine": key,
+                                               "model": name, "error": error})
+        elif cancelled:
+            self.broker.publish("model_done",
+                                {"ok": False, "engine": key, "model": name,
+                                 "cancelled": True})
+        else:
+            self.broker.publish("model_done", {"ok": True, "engine": key,
+                                               "model": name})
+            # The engine roster changed - tell clients to refresh /api/meta.
+            self.broker.publish("engines_changed", {})
         self.broker.publish("models", self.list_payload())
 
     def cancel(self):
@@ -4356,6 +4529,26 @@ class WebBackend:
                 freed = backend.models.uninstall(
                     str(body.get("engine", "")), str(body.get("model", "")))
                 return {"ok": True, "freed": freed}
+            except ApiFail as e:
+                _fail(e)
+
+        @app.post("/api/models/engine/install")
+        def api_models_engine_install():
+            body = bottle.request.json or {}
+            try:
+                backend.models.start_engine_install(
+                    str(body.get("engine", "")))
+                return {"ok": True}
+            except ApiFail as e:
+                _fail(e)
+
+        @app.post("/api/models/engine/uninstall")
+        def api_models_engine_uninstall():
+            body = bottle.request.json or {}
+            try:
+                backend.models.start_engine_uninstall(
+                    str(body.get("engine", "")))
+                return {"ok": True}
             except ApiFail as e:
                 _fail(e)
 

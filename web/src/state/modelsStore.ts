@@ -31,6 +31,8 @@ interface ModelsSlice {
   download: (engine: string, model: string) => Promise<void>;
   cancel: () => Promise<void>;
   uninstall: (engine: string, model: string, size: number) => Promise<void>;
+  installEngine: (key: string, name: string) => Promise<void>;
+  uninstallEngine: (key: string, name: string) => Promise<void>;
 }
 
 export const useModels = create<ModelsSlice>((set) => ({
@@ -101,6 +103,42 @@ export const useModels = create<ModelsSlice>((set) => ({
       await api.post("/api/models/uninstall", { engine, model });
     } catch (err) {
       showModelError(err, "Can't uninstall");
+    }
+  },
+
+  installEngine: async (key, name) => {
+    const ok = await confirmDialog({
+      title: `Install ${name}?`,
+      body:
+        `This downloads and installs ${name} into the app. It can be a ` +
+        "large download and take several minutes. You can keep using the " +
+        "other engines meanwhile once it's done.",
+      confirmLabel: "Install",
+      defaultAnswer: true,
+    });
+    if (!ok) return;
+    try {
+      await api.post("/api/models/engine/install", { engine: key });
+    } catch (err) {
+      showModelError(err, "Can't install engine");
+    }
+  },
+
+  uninstallEngine: async (key, name) => {
+    const ok = await confirmDialog({
+      title: `Remove ${name}?`,
+      body:
+        `Remove ${name} and free the space it uses. You can re-install it ` +
+        "from here later. (Any model weights you downloaded for it stay on " +
+        "disk and can be removed separately.)",
+      confirmLabel: "Remove",
+      defaultAnswer: false,
+    });
+    if (!ok) return;
+    try {
+      await api.post("/api/models/engine/uninstall", { engine: key });
+    } catch (err) {
+      showModelError(err, "Can't remove engine");
     }
   },
 }));

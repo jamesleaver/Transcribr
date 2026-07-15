@@ -145,16 +145,29 @@ export interface EngineModels {
   models: ModelInfo[];
   /** Bytes this engine's cached models occupy (aliases counted once). */
   total: number;
+  /** True if the app can pip-remove this engine to reclaim space. */
+  removable: boolean;
+}
+
+/** An engine the app can pip-install on demand (e.g. openai-whisper). */
+export interface InstallableEngine {
+  key: string;
+  name: string;
+  note: string;
+  approx_mb: number;
 }
 
 export interface ModelJob {
+  /** "download" for model weights, "engine" for a pip install/uninstall. */
+  kind?: "download" | "engine";
+  action?: "install" | "uninstall";
   engine: string;
   model: string;
-  phase: "starting" | "downloading";
+  phase: string;
   pct: number;
-  downloaded: number;
-  total: number;
-  speed: number;
+  downloaded?: number;
+  total?: number;
+  speed?: number;
   status_text: string;
 }
 
@@ -162,16 +175,19 @@ export interface ModelsPayload {
   whisper_cache: string;
   hf_cache: string;
   engines: EngineModels[];
+  /** Engines not installed that the app can pip-install on demand. */
+  installable: InstallableEngine[];
   total: number;
-  /** The in-flight download, if any (also delivered via model_progress). */
+  /** The in-flight job, if any (also delivered via model_progress). */
   job: ModelJob | null;
-  /** True while a download or a transcription is running. */
+  /** True while a download/engine op or a transcription is running. */
   busy: boolean;
 }
 
 export interface ModelDone {
   ok: boolean;
   model: string;
+  engine?: string;
   error?: string;
   cancelled?: boolean;
 }

@@ -104,13 +104,17 @@ The installer handles all of that.
    "unidentified developer" warning. After that, double-click works.)
 4. Read what it tells you and confirm prompts. It will:
    - Ask before installing Homebrew (only if missing)
-   - Install Python 3.12, ffmpeg, and python-tk@3.12 via Homebrew
+   - Install Python 3.12 and ffmpeg via Homebrew
    - Create a venv at `~/Library/Application Support/Transcribr/`
-   - Install openai-whisper plus faster-whisper, and on Apple Silicon
-     (macOS 13.5+) mlx-whisper, along with python-docx, reportlab and
-     the UI theme packages (downloads ~1.5 GB+)
+   - Install the faster-whisper engine, plus mlx-whisper on Apple
+     Silicon (macOS 13.5+), along with python-docx, reportlab, pywebview
+     and bottle (a few hundred MB — no PyTorch)
    - Create `/Applications/Transcribr.app`
 5. Launch from Spotlight, Launchpad, or the Applications folder.
+
+   The reference **openai-whisper** engine isn't installed up front
+   (it pulls in PyTorch, ~2 GB). Add it any time from the **Models** tab
+   in the app if you want it — see [Models](#models) below.
 
 ### Windows
 
@@ -122,10 +126,14 @@ The installer handles all of that.
 4. Read what it tells you and confirm prompts. It will:
    - Use winget to install Python 3.12 and ffmpeg (Gyan.FFmpeg)
    - Create a venv at `%LOCALAPPDATA%\Transcribr\venv`
-   - Install openai-whisper and faster-whisper plus python-docx,
-     reportlab and the UI theme packages (downloads ~2 GB)
+   - Install the faster-whisper engine plus python-docx, reportlab,
+     pywebview and bottle (a few hundred MB — no PyTorch)
    - Place a Desktop shortcut and a Start Menu entry
 5. Launch from your Desktop or Start Menu (search "Transcribr").
+
+   The reference **openai-whisper** engine isn't installed up front
+   (it pulls in PyTorch, ~2 GB). Add it any time from the **Models** tab
+   in the app if you want it — see [Models](#models) below.
 
 ## Using the application
 
@@ -192,14 +200,16 @@ use the normal flow instead (which *does* pause for review).
 ### Engine and model
 
 **Engine.** Which Whisper implementation does the work. Only engines
-actually installed appear:
+actually installed appear (install more from the **Models** tab):
 
-- **openai-whisper** — the reference implementation. Most thoroughly
-  tested.
 - **faster-whisper** — CTranslate2-based; substantially faster on CPU
-  with essentially identical output.
+  with essentially identical output. Installed by default; no PyTorch.
 - **mlx-whisper** — Apple-Silicon-only (macOS 13.5+), uses the Mac's
   GPU via MLX. Fastest option on M-series machines. No mid-run Stop.
+  Installed by default on Apple Silicon.
+- **openai-whisper** — the reference implementation. Most thoroughly
+  tested, but pulls in PyTorch (~2 GB), so it's **optional**: install
+  it from the **Models** tab when you want it.
 
 **Model.** The main quality / speed trade-off. English-only models
 (`.en` suffix) are slightly more accurate on English and ignore the
@@ -214,9 +224,11 @@ actually installed appear:
 | `large-v1`, `large-v2`, `large-v3`, `large` | ~3 GB | very slow | Best raw accuracy; runtime can be painful on a CPU |
 | `turbo`, `large-v3-turbo` | ~1.6 GB | fast (despite the size) | Faster than `large-v3` with similar accuracy. No `.en` variant |
 
-Models download once on first use and are cached at
-`~/.cache/whisper/` (Mac) or `%USERPROFILE%\.cache\whisper\`
-(Windows).
+Models download once on first use and are cached locally
+(faster-whisper and mlx-whisper under `~/.cache/huggingface/`;
+openai-whisper under `~/.cache/whisper/`). The **Models** tab shows
+what's downloaded, how much space it uses, and lets you pre-download or
+remove models — see [Models](#models) below.
 
 **Language / Task.** Set the language explicitly if you know it
 (auto-detect costs a little time and accuracy). *Translate* converts
@@ -258,9 +270,10 @@ labelling and editing; **Open transcript…** browses for any other
 
 Model weights are large (75 MB for `tiny` up to ~3 GB for `large-v3`)
 and each engine keeps its **own** copy in its own cache, so the same
-model can occupy disk two or three times over. The **Models** view
-lists every model grouped by engine, shows the size of each downloaded
-one and a running total on disk, and lets you:
+model can occupy disk two or three times over. Engine cards are
+collapsible and summarise how many models are installed of the total,
+plus the space used. The **Models** view lists every model grouped by
+engine and lets you:
 
 - **Download** a model ahead of time, so the first real run doesn't
   stall on a multi-gigabyte fetch. A progress bar with size and speed
@@ -272,10 +285,17 @@ one and a running total on disk, and lets you:
   Hugging Face repo (e.g. `mlx-community/whisper-large-v3-turbo`) into
   the engine's download box. (openai-whisper only offers its fixed
   catalogue.)
+- **Install an optional engine.** The reference **openai-whisper**
+  engine isn't installed by default (it downloads PyTorch, ~2 GB). The
+  **Add an engine** panel installs it on demand; once it's done it
+  appears in the Transcribe **Engine** dropdown. You can **Remove
+  engine** later to reclaim the space.
 
-Downloading and uninstalling are paused while a transcription is
-running, and a transcription won't start while a model is downloading.
-The cache locations are shown at the bottom of the view.
+Aliased models (`large` / `large-v3`, `turbo` / `large-v3-turbo`) that
+share the same weights are shown as a single entry. Downloading,
+installing and removing are paused while a transcription is running,
+and a transcription won't start while one of those is in progress. The
+cache locations are shown at the bottom of the view.
 
 ### Run / Stop and progress
 
@@ -442,6 +462,11 @@ open the Vite URL. If the repository lives in Dropbox, mark
 ## What this does NOT install
 
 The Whisper model weights themselves. The first time you run a
-particular model from the GUI, Whisper downloads it (~150 MB for
-small.en, ~1.5 GB for medium.en, ~3 GB for large-v3) and caches it
-locally. Subsequent runs use the cached version.
+particular model from the GUI, the engine downloads it (~150 MB for
+small, ~1.5 GB for medium, ~3 GB for large-v3) and caches it locally.
+Subsequent runs use the cached version. You can also pre-download or
+remove models from the **Models** tab.
+
+The reference **openai-whisper** engine (and its ~2 GB PyTorch
+dependency) is also not installed by default — add it from the
+**Models** tab if you want it.

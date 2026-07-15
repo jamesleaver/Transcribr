@@ -815,6 +815,25 @@ class TestModelStore(unittest.TestCase):
         self.assertTrue(merged["installed"])
         self.assertEqual(merged["size"], 3000)
 
+    def test_payload_lists_installable_and_removable(self):
+        T._hf_repo_sizes = lambda: {}
+        # whisper NOT installed -> offered under `installable`; faster isn't
+        # an installable engine so it isn't removable.
+        p = T.ModelStore(engines=[("faster", "faster-whisper")]).payload()
+        self.assertEqual([e["key"] for e in p["installable"]], ["whisper"])
+        self.assertFalse(p["engines"][0]["removable"])
+        # whisper installed -> not offered, and it's removable.
+        p2 = T.ModelStore(
+            engines=[("whisper", "OpenAI"), ("faster", "faster")]).payload()
+        self.assertEqual(p2["installable"], [])
+        wh = next(e for e in p2["engines"] if e["key"] == "whisper")
+        self.assertTrue(wh["removable"])
+
+    def test_engine_install_args_base(self):
+        args = T._engine_install_args("whisper")
+        self.assertIn("openai-whisper>=20250625", args)
+        self.assertIn("--prefer-binary", args)
+
     def test_uninstall_openai_deletes_file(self):
         self._pt("small.en.pt", 777)
         T._hf_repo_sizes = lambda: {}
@@ -923,6 +942,52 @@ class TestModelController(unittest.TestCase):
         self.assertEqual(freed, 4242)
         self.assertEqual(calls, [("faster", "large-v3")])
         self.assertIn("models", self._events())
+
+    def test_engine_install_lifecycle_refreshes_engines(self):
+        import threading
+        T.AVAILABLE_ENGINES = [("faster", "faster-whisper")]
+        release = threading.Event()
+        ops = []
+
+        def fake_op(action, key, on_line, should_cancel):
+            ops.append((action, key))
+            on_line("Collecting openai-whisper")
+            release.wait(5)
+
+        orig_detect = T._detect_engines
+        T._detect_engines = lambda: [
+            ("faster", "faster-whisper"),
+            ("whisper", "OpenAI Whisper (reference)")]
+        self.addCleanup(lambda: setattr(T, "_detect_engines", orig_detect))
+
+        mc = T.ModelController(self.broker, engine_op_fn=fake_op,
+                               store_fn=lambda: dict(self.store))
+        mc.start_engine_install("whisper")
+        # A second job is refused while the engine op runs.
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_download("faster", "tiny")
+        self.assertEqual(cm.exception.code, "model_busy")
+        release.set()
+        mc.worker.join(5)
+        self.assertIn("whisper", [k for k, _ in T.AVAILABLE_ENGINES])
+        self.assertEqual(ops, [("install", "whisper")])
+        self.assertIn("engines_changed", self._events())
+
+    def test_engine_install_guards(self):
+        T.AVAILABLE_ENGINES = [("faster", "faster-whisper"),
+                               ("whisper", "OpenAI Whisper (reference)")]
+        mc = T.ModelController(self.broker,
+                               engine_op_fn=lambda *a, **k: None,
+                               store_fn=lambda: dict(self.store))
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_engine_install("whisper")     # already installed
+        self.assertEqual(cm.exception.code, "already_installed")
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_engine_install("faster")      # not an installable engine
+        self.assertEqual(cm.exception.code, "bad_engine")
+        with self.assertRaises(T.ApiFail) as cm:
+            mc.start_engine_uninstall("mlx")       # not installable
+        self.assertEqual(cm.exception.code, "bad_engine")
 
     def test_download_error_reported(self):
         import json
@@ -1220,6 +1285,16 @@ class TestHttpApi(unittest.TestCase):
         status, res = self._req("POST", "/api/models/download/cancel")
         self.assertEqual(status, 200)
         self.assertFalse(res["cancelling"])
+        # Installing a non-installable engine -> 400 (never spawns pip).
+        status, err = self._req("POST", "/api/models/engine/install",
+                                {"engine": "faster"})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "bad_engine")
+        # Removing an engine that isn't installed -> 404.
+        status, err = self._req("POST", "/api/models/engine/uninstall",
+                                {"engine": "whisper"})
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "not_installed")
 
     def test_settings_partial_put_is_non_destructive(self):
         _, before = self._req("GET", "/api/settings")

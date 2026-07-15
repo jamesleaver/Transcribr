@@ -9,19 +9,19 @@
 #   - Python 3.12 (via Homebrew)
 #   - ffmpeg (via Homebrew)
 #   - A Python virtualenv at ~/Library/Application Support/Transcribr/venv
-#   - Three Whisper engines inside that venv:
-#       * openai-whisper (reference; needed on all systems)
-#       * faster-whisper (CTranslate2-based; ~4x faster on CPU)
+#   - The default Whisper engine(s) inside that venv:
+#       * faster-whisper (CTranslate2-based; ~4x faster on CPU, no PyTorch)
 #       * mlx-whisper    (Apple Silicon only; uses the Mac's GPU/ANE)
 #   - /Applications/Transcribr.app (a thin launcher)
 #
-# Total disk usage: ~500MB - 2GB depending on what is already installed
-# (PyTorch, which Whisper needs, is the bulk of it).
+# The reference openai-whisper engine (which pulls in PyTorch, ~2 GB) is
+# NOT installed up front - it's optional and can be added later from the
+# app's Models tab. Base install is a few hundred MB.
 #
 # What this does NOT install:
 #   - Whisper model weights. The first time you run a particular model,
-#     Whisper downloads it (~150MB for small.en, ~1.5GB for medium.en) and
-#     caches it in ~/.cache/whisper/.
+#     it is downloaded (~150MB for small, ~1.5GB for large) and cached
+#     (faster-whisper / mlx-whisper: ~/.cache/huggingface/hub).
 
 set -uo pipefail   # fail on undefined vars and pipe errors, but not on
                    # individual command errors - we handle those ourselves
@@ -160,77 +160,45 @@ fi
 
 ok "venv ready"
 
-# ---------- Whisper --------------------------------------------------------
+# ---------- App libraries + Whisper engine ---------------------------------
 
-step "Step 4/6: Whisper engines (this is the slow step)"
+step "Step 4/6: App libraries and the faster-whisper engine"
 
 info "Upgrading pip..."
 "$VENV/bin/pip" install --upgrade pip --quiet \
     || fail "pip upgrade failed"
 
-# Pin openai-whisper >= 20250625; older releases use the removed
-# pkg_resources module, which is gone in setuptools 81+.
-#
-# On macOS 15 Sequoia, some Homebrew Python 3.12 builds set
-# MACOSX_DEPLOYMENT_TARGET="15" (without the required minor version).
-# Apple's clang rejects this with: "invalid version number in
-# 'MACOSX_DEPLOYMENT_TARGET=15'", which then makes pip fall back to
-# source-building numba and llvmlite (which need LLVM tooling that isn't
-# present and can't easily be installed). We override the variable to a
-# well-formed older value, which both lets clang accept it AND nudges pip
-# toward downloading the available pre-built wheels rather than building
-# from source.
+# Some Homebrew Python 3.12 builds on macOS 15 set
+# MACOSX_DEPLOYMENT_TARGET="15" (without the required minor version),
+# which Apple's clang rejects ("invalid version number"), forcing pip to
+# source-build wheels. Override with a well-formed value so pip prefers
+# the pre-built wheels.
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
-# Intel Macs are stuck on torch 2.2.2 because PyTorch stopped publishing
-# x86_64 macOS wheels after that release (Jan 2024). Torch 2.2.2 predates
-# NumPy 2.0 and cannot bridge to it -- torch.from_numpy() raises
-# "RuntimeError: Numpy is not available" with NumPy 2.x. So on Intel Macs
-# we have to pin the whole chain backwards: torch 2.2.2, numpy 1.x, and
-# numba 0.59.x (the last numba line that supports numpy 1.x with cp312
-# wheels).
-#
-# On Apple Silicon (arm64), the latest torch ships fine and the whole
-# stack works with numpy 2.x. So we only apply the constraints on Intel.
 ARCH=$("$VENV/bin/python" -c "import platform; print(platform.machine())")
 
-info "Installing openai-whisper (downloads PyTorch, ~1.5GB)..."
-if [ "$ARCH" = "x86_64" ]; then
-    info "Intel Mac detected; pinning torch/numpy/numba versions for compatibility"
-    "$VENV/bin/pip" install --upgrade --prefer-binary \
-        "openai-whisper>=20250625" python-docx reportlab \
-        pyobjc-framework-Cocoa pywebview bottle \
-        "torch==2.2.2" "numpy<2" "numba<0.60" \
-        || fail "openai-whisper / python-docx / reportlab install failed"
-else
-    "$VENV/bin/pip" install --upgrade --prefer-binary \
-        "openai-whisper>=20250625" python-docx reportlab \
-        pyobjc-framework-Cocoa pywebview bottle \
-        || fail "openai-whisper / python-docx / reportlab install failed"
-fi
+# Base libraries plus faster-whisper - the default engine. It's
+# CTranslate2-based (no PyTorch), a few hundred MB, and ~4x faster on CPU
+# than the reference OpenAI engine with essentially identical output. The
+# heavier OpenAI engine is optional and installable later from the app's
+# Models tab, so we no longer download PyTorch (~2 GB) up front.
+info "Installing app libraries + faster-whisper..."
+"$VENV/bin/pip" install --upgrade --prefer-binary \
+    faster-whisper python-docx reportlab \
+    pyobjc-framework-Cocoa pywebview bottle \
+    || fail "core install failed (faster-whisper / python-docx / reportlab \
+/ pywebview / bottle)"
 
-# The web interface (0.7.0+) is served by bottle inside a pywebview
-# window; verify both import.
+# The web interface is served by bottle inside a pywebview window; verify
+# both import.
 "$VENV/bin/python" -c "import webview, bottle" \
     || fail "pywebview / bottle import test failed"
 ok "pywebview + bottle installed"
 
-# Verify whisper imports cleanly.
-"$VENV/bin/python" -c "import whisper; print('    whisper version:', whisper.__version__ if hasattr(whisper, '__version__') else 'OK')" \
-    || fail "whisper import test failed"
-ok "openai-whisper installed"
-
-# faster-whisper - CTranslate2-based engine, ~4x faster on CPU than the
-# reference. Cross-platform via ctranslate2 wheels.
-info "Installing faster-whisper..."
-"$VENV/bin/pip" install --upgrade --prefer-binary faster-whisper \
-    || warn "faster-whisper install failed - the app will run, but only \
-the OpenAI engine will be available."
-
 "$VENV/bin/python" -c "import faster_whisper" 2>/dev/null \
     && ok "faster-whisper installed" \
-    || warn "faster-whisper import check failed; it will not be offered \
-in the app."
+    || fail "faster-whisper import check failed - no engine would be \
+available."
 
 # mlx-whisper - Apple's MLX framework. Apple Silicon only, requires
 # macOS 13.5+. The Python package depends on `mlx`, which is what

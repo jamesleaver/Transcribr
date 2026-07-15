@@ -7,10 +7,12 @@
 #   - Python 3.12 (x64) from python.org
 #   - ffmpeg (via winget, Gyan.FFmpeg)
 #   - A Python venv at %LOCALAPPDATA%\Transcribr\venv
-#   - openai-whisper inside that venv (reference engine)
-#   - faster-whisper inside that venv (CTranslate2; ~4x faster on CPU)
+#   - faster-whisper inside that venv (CTranslate2; the default engine,
+#     ~4x faster on CPU than the reference engine, no PyTorch)
 #   - Desktop and Start Menu shortcuts to the app
 #
+# The reference openai-whisper engine (PyTorch, ~2 GB) is NOT installed up
+# front - it's optional and can be added later from the app's Models tab.
 # (mlx-whisper is not installed on Windows; it's Apple Silicon-only.)
 
 $ErrorActionPreference = 'Stop'
@@ -101,8 +103,9 @@ Step 1 6 "Python 3.12 (x64)"
 
 # We always install x64 Python, even on ARM64 Windows. Native ARM64 Python
 # works for many things, but several packages in the ML/audio stack
-# (openai-whisper -> numba -> llvmlite, for one) do not publish ARM64
-# Windows wheels and have no source-build path that works out of the box.
+# (faster-whisper's ctranslate2, and openai-whisper's numba -> llvmlite if
+# the user adds it later) do not publish ARM64 Windows wheels and have no
+# source-build path that works out of the box.
 # x64 Python runs transparently under Windows-on-ARM emulation; we lose
 # perhaps 20-30% performance on transcription, which is well worth the
 # avoided headaches.
@@ -321,45 +324,35 @@ if (-not (Test-Path "$venv\Scripts\activate.bat")) {
 
 Ok "venv ready"
 
-# ---------- step 4: Whisper -------------------------------------------------
+# ---------- step 4: app libraries + faster-whisper --------------------------
 
-Step 5 6 "Whisper engines (this is the slow step)"
+Step 5 6 "App libraries and the faster-whisper engine"
 
 Info "Upgrading pip..."
 & "$venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
 if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed" }
 
-Info "Installing openai-whisper (downloads PyTorch, ~2GB)..."
-# Pin openai-whisper >= 20250625; older releases use the removed
-# pkg_resources module, which is gone in setuptools 81+.
+# faster-whisper is the default engine: CTranslate2-based (no PyTorch), a
+# few hundred MB, best CPU-only speed, and also uses CUDA if a compatible
+# GPU is present. The heavier reference OpenAI engine (PyTorch, ~2 GB) is
+# optional and can be installed later from the app's Models tab, so it's
+# no longer downloaded up front.
+Info "Installing app libraries + faster-whisper..."
 & "$venv\Scripts\python.exe" -m pip install --upgrade `
-    "openai-whisper>=20250625" python-docx reportlab `
+    faster-whisper python-docx reportlab `
     pywebview bottle
-if ($LASTEXITCODE -ne 0) { Fail "openai-whisper / python-docx / reportlab install failed" }
+if ($LASTEXITCODE -ne 0) { Fail "core install failed (faster-whisper / python-docx / reportlab / pywebview / bottle)" }
 
-# Verify whisper imports
-& "$venv\Scripts\python.exe" -c "import whisper" 2>$null
-if ($LASTEXITCODE -ne 0) { Fail "whisper import test failed" }
-Ok "openai-whisper installed"
-
-# The 0.7.0 web interface is served by bottle inside a pywebview window.
+# The web interface is served by bottle inside a pywebview window.
 & "$venv\Scripts\python.exe" -c "import webview, bottle" 2>$null
 if ($LASTEXITCODE -ne 0) { Fail "pywebview / bottle import test failed" }
 Ok "pywebview + bottle installed"
 
-# faster-whisper - CTranslate2-based engine. Best CPU-only speed; also
-# uses CUDA if a compatible GPU is present. Wheels exist for x64 Windows.
-Info "Installing faster-whisper..."
-& "$venv\Scripts\python.exe" -m pip install --upgrade faster-whisper
+& "$venv\Scripts\python.exe" -c "import faster_whisper" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Warn "faster-whisper install failed - the app will still run, but only the OpenAI engine will be available."
+    Fail "faster-whisper import check failed - no engine would be available."
 } else {
-    & "$venv\Scripts\python.exe" -c "import faster_whisper" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Warn "faster-whisper import check failed; it will not be offered in the app."
-    } else {
-        Ok "faster-whisper installed"
-    }
+    Ok "faster-whisper installed"
 }
 
 # ---------- step 5: Application files, launcher, shortcuts ------------------

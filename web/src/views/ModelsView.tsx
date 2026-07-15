@@ -1,22 +1,28 @@
 import { useEffect, useState } from "react";
-import type { EngineModels, ModelInfo } from "../api/types";
+import type { EngineModels, InstallableEngine, ModelInfo } from "../api/types";
 import { fmtBytes, useModels } from "../state/modelsStore";
 
 // The Models manager: what's cached per engine (with sizes), plus
-// download / uninstall. Each engine caches its own copy of a model, so
-// the same name can occupy disk more than once — the view groups by
-// engine to make that visible, and shows a running total.
+// download / uninstall, plus installing optional engines. Each engine
+// caches its own copy of a model, so the same name can occupy disk more
+// than once — the view groups by engine to make that visible.
 
-function ActiveDownloadBanner() {
+function ActiveJobBanner() {
   const job = useModels((s) => s.job);
   const cancel = useModels((s) => s.cancel);
   if (!job) return null;
-  const indeterminate = !job.total || job.phase === "starting";
+  const isEngine = job.kind === "engine";
+  const verb = isEngine
+    ? job.action === "uninstall"
+      ? "Removing"
+      : "Installing"
+    : "Downloading";
+  const indeterminate = isEngine || !job.total || job.phase === "starting";
   return (
     <div className="mb-6 rounded-xl border border-edge bg-surface p-4">
       <div className="mb-1 flex items-baseline justify-between gap-3">
         <span className="truncate text-sm font-medium">
-          <span className="text-accent">Downloading</span> {job.model}
+          <span className="text-accent">{verb}</span> {job.model}
         </span>
         <span className="shrink-0 text-xs tabular-nums text-muted">
           {indeterminate ? "" : `${Math.round(job.pct)}%`}
@@ -189,7 +195,66 @@ function EngineCard({
         ))}
       </ul>
       {engine.supports_custom && <CustomDownload engineKey={engine.key} busy={busy} />}
+      {engine.removable && (
+        <div className="flex items-center justify-between gap-3 border-t border-edge px-4 py-3">
+          <span className="text-xs text-muted">
+            Optional engine — remove it to reclaim the space it uses.
+          </span>
+          <button
+            className="shrink-0 rounded-lg border border-edge px-2.5 py-1 text-xs font-medium hover:border-red-400 hover:text-red-400 disabled:opacity-40"
+            disabled={busy}
+            onClick={() =>
+              void useModels.getState().uninstallEngine(engine.key, engine.name)
+            }
+          >
+            Remove engine
+          </button>
+        </div>
+      )}
     </details>
+  );
+}
+
+function InstallableEngines({
+  engines,
+  busy,
+}: {
+  engines: InstallableEngine[];
+  busy: boolean;
+}) {
+  if (engines.length === 0) return null;
+  return (
+    <section className="mt-5 rounded-xl border border-dashed border-edge bg-surface p-4">
+      <h2 className="text-sm font-semibold">Add an engine</h2>
+      <p className="mt-1 text-xs text-muted">
+        Optional engines you can install now. They download in the background;
+        the app stays usable meanwhile.
+      </p>
+      <ul className="mt-3 flex flex-col gap-2">
+        {engines.map((e) => (
+          <li
+            key={e.key}
+            className="flex items-center gap-3 rounded-lg border border-edge px-3 py-2.5"
+          >
+            <div className="min-w-0 flex-1">
+              <span className="text-sm font-medium">{e.name}</span>
+              <span className="mt-0.5 block text-xs text-muted">{e.note}</span>
+            </div>
+            <button
+              className="shrink-0 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-fg disabled:opacity-40"
+              disabled={busy}
+              onClick={() =>
+                void useModels.getState().installEngine(e.key, e.name)
+              }
+            >
+              Install
+              {e.approx_mb > 0 &&
+                ` (~${e.approx_mb >= 1000 ? `${(e.approx_mb / 1000).toFixed(1)} GB` : `${e.approx_mb} MB`})`}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -238,27 +303,32 @@ export default function ModelsView() {
         </div>
       </header>
 
-      <ActiveDownloadBanner />
+      <ActiveJobBanner />
 
       {!data ? (
         <div className="rounded-xl border border-dashed border-edge p-10 text-center text-sm text-muted">
           {loading ? "Reading the model cache…" : "No model information yet."}
         </div>
-      ) : data.engines.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-edge p-10 text-center text-sm text-muted">
-          No transcription engine is installed, so there are no models to manage.
-        </div>
       ) : (
-        <div className="flex flex-col gap-5">
-          {data.engines.map((engine) => (
-            <EngineCard
-              key={engine.key}
-              engine={engine}
-              busy={busy}
-              jobKey={jobKey}
-            />
-          ))}
-        </div>
+        <>
+          {data.engines.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-edge p-10 text-center text-sm text-muted">
+              No transcription engine is installed yet — install one below.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-5">
+              {data.engines.map((engine) => (
+                <EngineCard
+                  key={engine.key}
+                  engine={engine}
+                  busy={busy}
+                  jobKey={jobKey}
+                />
+              ))}
+            </div>
+          )}
+          <InstallableEngines engines={data.installable} busy={busy} />
+        </>
       )}
 
       {data && (
