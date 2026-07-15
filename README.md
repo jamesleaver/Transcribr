@@ -41,6 +41,20 @@ Use at your own risk.
 
 Questions: [jleaver@sgchambers.com.au](mailto:jleaver@sgchambers.com.au)
 
+Main pane:
+
+<img width="1273" height="1007" alt="1  Main pane" src="https://github.com/user-attachments/assets/59f8afb8-9eb3-45d9-8000-9463b05ea4a1" />
+
+
+Review pane:
+
+<img width="1273" height="1007" alt="2  Review pane" src="https://github.com/user-attachments/assets/0c5d41af-e3cb-4571-8562-c906325cdb9a" />
+
+
+Result:
+
+<img width="632" height="889" alt="3  Docx output" src="https://github.com/user-attachments/assets/0d9931ac-b6f1-468f-b2f9-26120c61db32" />
+
 ## What this folder contains
 
 ```
