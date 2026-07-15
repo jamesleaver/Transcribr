@@ -6,23 +6,36 @@ An experimental GUI for transcribing audio and video files on macOS and
 Windows. A Whisper engine (openai-whisper, faster-whisper, or
 mlx-whisper) does the transcription, the result is grouped into likely
 paragraphs, and a built-in review pane lets you label speakers, edit
-text, search and replace, and listen back to the source audio before
-saving as Word (`.docx`), PDF, or plain text. Several files can be
-queued and transcribed in one unattended batch. Everything runs locally
-on your computer — no audio, video, or transcripts are uploaded to the
-internet.
+text, search and replace, and specifically play each paragraph from 
+the source audio before saving as Word (`.docx`), PDF, or plain text.
+Several files can be queued and transcribed in one unattended batch.
 
-Version 0.7.0 replaces the original Tk interface with a redesigned one
-rendered by your system's built-in web view (WKWebView on macOS,
-WebView2 on Windows). It talks to the transcription engine over a
-local-only connection on your own machine — bound to 127.0.0.1 with a
-random port and a per-session token; nothing is ever sent anywhere.
-Opening the app normally launches it; `--serve` prints a local URL you
-can open in any browser instead, as a fallback.
+**Everything runs locally on your computer — no audio, video, or
+transcripts are uploaded to the internet.** This may be particularly
+important for lawyers who need to create transcriptions of material
+that it may not be appropriate to uploaded to an external website or
+AI service (for example, material that is subject to non-publication or
+suppression orders, the implied (_Harman_) undertaking, material
+produced on subpoena, or any material that is the subject of a statutory
+prohibition upon publication).
+
+The quality of the transcription will depend on the quality of the audio
+fed into it, as well as various settings that can be configured by the
+user. Good quality audio will usually produce good quality transcript.
+**Advanced decoding** can be adjusted that will improve the quality of poor
+transcripts (any even nonsense ones). It can be worth playing around 
+with them to work out what might work best for paticular types of
+recordings. See the heading **Decoding options** below for a further
+description of what various settings do.
+
+If words from different speakers are being transcribed into the same
+paragraph, adjust the **paragraph gap** setting down. If the same speaker's
+words are being transcribed into multiple paragraphs, then adjust the same
+setting up.
 
 When a particular model is run for the first time, that model will be
-downloaded to your computer and stored locally. The `medium.en` or
-`large-v3-turbo` models are recommended.
+downloaded to your computer and stored locally. The  `large-v3-turbo`
+models are recommended.
 
 Use at your own risk.
 
