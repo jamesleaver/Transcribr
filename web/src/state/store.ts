@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { Meta, RecentItem, Settings, StateSnapshot } from "../api/types";
 import { injectPalettes, setTheme } from "../theme";
 import { useRun } from "./runStore";
+import { useReview } from "./reviewStore";
 
 export type View = "transcribe" | "review" | "library";
 export type SseStatus = "connecting" | "open" | "down";
@@ -45,6 +46,11 @@ export const useApp = create<AppState>((set, get) => ({
       set({ meta, settings, snapshot, bootError: null });
       if (snapshot.run) {
         useRun.getState().applyRunState(snapshot.run, { resync: true });
+      }
+      if (snapshot.review) {
+        useReview.getState().openDoc(snapshot.review as never);
+      } else if (useReview.getState().doc) {
+        useReview.getState().closeDoc();
       }
     } catch (err) {
       set({ bootError: err instanceof Error ? err.message : String(err) });

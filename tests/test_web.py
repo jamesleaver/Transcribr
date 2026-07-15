@@ -585,6 +585,172 @@ class TestRunController(unittest.TestCase):
 
 
 # =====================================================================
+# ReviewSession
+# =====================================================================
+
+class TestReviewSession(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-rev-")
+        self.addCleanup(self.tmp.cleanup)
+        self.broker = T.EventBroker()
+        self.events_q, _ = self.broker.subscribe()
+
+    def _events(self):
+        names = []
+        while True:
+            try:
+                _seq, event, _payload = self.events_q.get_nowait()
+            except Exception:
+                return names
+            names.append(event)
+
+    def _fresh_session(self, fmt="txt", with_result=True):
+        out = str(Path(self.tmp.name) / f"doc.transcript.{fmt}")
+        info = {
+            "paragraphs": _doc(),
+            "out_path": out,
+            "show_timestamp": True,
+            "title": "Test doc",
+            "output_format": fmt,
+            "result": {"segments": []} if with_result else None,
+            "extra_formats": [],
+            "loaded": False,
+            "audio_path": None,
+            "word_conf": None,
+        }
+        return T.ReviewSession.from_fresh(info, self.broker), out
+
+    def test_fresh_session_safety_presaves(self):
+        session, out = self._fresh_session()
+        self.assertTrue(Path(out).exists())   # unlabelled safety copy
+        text = Path(out).read_text()
+        self.assertIn("Hello there.", text)
+        self.assertEqual(session.payload()["total"], 3)
+
+    def test_payload_shape(self):
+        session, _ = self._fresh_session()
+        p = session.payload()
+        self.assertEqual(p["rev"], session.model.rev)
+        self.assertEqual(len(p["paragraphs"]), 3)
+        first = p["paragraphs"][0]
+        self.assertEqual(first["body"], "Hello there. How are you?")
+        self.assertIsNone(first["speaker"])
+        self.assertAlmostEqual(first["play"]["end"], 9.3, places=2)
+        self.assertFalse(p["loaded"])
+        self.assertFalse(p["has_word_conf"])
+
+    def test_mutate_rev_guard(self):
+        session, _ = self._fresh_session()
+        rev = session.model.rev
+        session.mutate(rev, "speaker", {"index": 0, "slot": "2"})
+        with self.assertRaises(T.ApiFail) as cm:
+            session.mutate(rev, "speaker", {"index": 1, "slot": "1"})
+        self.assertEqual(cm.exception.code, "stale_rev")
+        self.assertIn("review_changed", self._events())
+
+    def test_save_with_labels_writes_resolved_names(self):
+        session, out = self._fresh_session()
+        rev = session.model.rev
+        rev = session.mutate(rev, "speaker", {"index": 0, "slot": "1"})["rev"]
+        rev = session.mutate(rev, "speaker-name",
+                             {"slot": "1", "name": "Ms Chen"})["rev"]
+        result = session.save(rev, "labels",
+                              extra_queue=None)
+        self.assertEqual(result, out)
+        text = Path(out).read_text()
+        self.assertIn("Ms Chen", text)
+        self.assertTrue(session.closed)
+        self.assertIsNone(T._autosave_load())
+        self.assertIn("review_closed", self._events())
+
+    def test_save_no_labels_omits_names(self):
+        session, out = self._fresh_session()
+        rev = session.mutate(session.model.rev, "speaker",
+                             {"index": 0, "slot": "1"})["rev"]
+        session.save(rev, "no_labels", extra_queue=None)
+        self.assertNotIn("Speaker 1", Path(out).read_text())
+
+    def test_revision_only_for_loaded(self):
+        session, _ = self._fresh_session()
+        with self.assertRaises(T.ApiFail) as cm:
+            session.save(session.model.rev, "revision", extra_queue=None)
+        self.assertEqual(cm.exception.code, "bad_request")
+
+    def test_loaded_roundtrip_and_revision(self):
+        # Save a labelled transcript, reopen it via open_transcript_info,
+        # then save a revision next to it.
+        session, out = self._fresh_session(fmt="txt")
+        rev = session.mutate(session.model.rev, "speaker",
+                             {"index": 0, "slot": "1"})["rev"]
+        rev = session.mutate(rev, "speaker-name",
+                             {"slot": "1", "name": "Witness"})["rev"]
+        session.save(rev, "labels", extra_queue=None)
+
+        info = T.open_transcript_info(out)
+        self.assertTrue(info["loaded"])
+        self.assertEqual(info["preset_speaker_names"], {"1": "Witness"})
+        self.assertEqual(info["preset_speakers"][0], "1")
+
+        session2 = T.ReviewSession(info, self.broker)
+        p = session2.payload()
+        self.assertEqual(p["speaker_names"]["1"], "Witness")
+        rev2 = session2.model.rev
+        out2 = session2.save(rev2, "revision", extra_queue=None)
+        self.assertIn(".rev1.", out2)
+        self.assertTrue(Path(out2).exists())
+        self.assertTrue(Path(out).exists())   # original untouched
+
+    def test_close_discard_rules(self):
+        session, _ = self._fresh_session()
+        with self.assertRaises(T.ApiFail):
+            session.close_discard()           # fresh must save
+        info = T.open_transcript_info(
+            self._make_loaded_file("Speaker 1"))
+        loaded = T.ReviewSession(info, self.broker)
+        loaded.close_discard()
+        self.assertTrue(loaded.closed)
+
+    def _make_loaded_file(self, speaker):
+        p = Path(self.tmp.name) / "loaded.transcript.txt"
+        T.write_paragraphs_to_file(
+            _doc(), p, show_timestamp=True, title="x",
+            output_format="txt", speakers=[speaker, None, None])
+        return str(p)
+
+    def test_too_many_speakers_refused(self):
+        paras = [[(float(i), float(i) + 2.0, f"Line {i}.")]
+                 for i in range(10)]
+        p = Path(self.tmp.name) / "many.transcript.txt"
+        T.write_paragraphs_to_file(
+            paras, p, show_timestamp=True, title="x", output_format="txt",
+            speakers=[f"Person {i}" for i in range(10)])
+        with self.assertRaises(T.ApiFail) as cm:
+            T.open_transcript_info(str(p))
+        self.assertEqual(cm.exception.code, "too_many_speakers")
+
+    def test_autosave_schema_roundtrip(self):
+        session, out = self._fresh_session()
+        rev = session.mutate(session.model.rev, "speaker",
+                             {"index": 0, "slot": "3"})["rev"]
+        session.mutate(rev, "speaker-name", {"slot": "3", "name": "Q C"})
+        session.model.flush_autosave()
+        data = T._autosave_load()
+        self.assertEqual(
+            set(data.keys()),
+            {"out_path", "show_timestamp", "title", "output_format",
+             "loaded", "audio_path", "paragraphs", "speakers",
+             "speaker_names", "saved_at"})   # exact v0.6.0 schema
+        self.assertEqual(data["speakers"][0], "3")
+        self.assertEqual(data["speaker_names"], {"3": "Q C"})
+        restored = T.autosave_restore_info(data)
+        session2 = T.ReviewSession(restored, self.broker)
+        p = session2.payload()
+        self.assertEqual(p["paragraphs"][0]["speaker"], "3")
+        self.assertEqual(p["speaker_names"]["3"], "Q C")
+        self.assertEqual(p["visible_speakers"], 4)
+
+
+# =====================================================================
 # build_worker_params
 # =====================================================================
 

@@ -7168,11 +7168,9 @@ class RunController:
                               f"The output file already exists:\n\n"
                               f"{out_path}", path=out_path)
             try:
-                # Interactive review arrives with the Phase 3 review
-                # surface; until then transcripts save directly.
                 params = build_worker_params(
                     settings, in_path, out_path,
-                    review_before_save=False)
+                    review_before_save=bool(settings.get("review")))
             except _EngineNotAvailable:
                 raise ApiFail(409, "no_engine", _NO_ENGINE_HINT)
 
@@ -7404,6 +7402,360 @@ class RunController:
 
 
 # =====================================================================
+# Web UI backend - review session
+# =====================================================================
+
+def open_transcript_info(path):
+    """Parse a saved transcript into the review-session info dict - the
+    module-level twin of WhisperGUI._load_transcript's parsing half.
+    Raises ApiFail for parse errors and the >9-speakers refusal."""
+    try:
+        parsed = read_paragraphs_from_file(path)
+    except TranscriptParseError as e:
+        raise ApiFail(400, "parse_error", str(e))
+    except Exception as e:
+        raise ApiFail(400, "parse_error",
+                      f"Unexpected error reading {path}:\n"
+                      f"{type(e).__name__}: {e}")
+
+    max_speakers = TranscriptModel.MAX_SPEAKERS
+    unique_names = []
+    for name in parsed["speakers"]:
+        if name and name not in unique_names:
+            unique_names.append(name)
+    if len(unique_names) > max_speakers:
+        raise ApiFail(
+            422, "too_many_speakers",
+            f"This transcript contains {len(unique_names)} distinct "
+            f"speakers. The review pane only supports up to "
+            f"{max_speakers}. Open the file in Word and consolidate the "
+            "speaker labels before loading it back into Transcribr.",
+            count=len(unique_names), max=max_speakers)
+
+    name_to_letter = {}
+    preset_speaker_names = {}
+    for i, name in enumerate(unique_names):
+        letter = str(i + 1)
+        name_to_letter[name] = letter
+        preset_speaker_names[letter] = name
+    preset_speakers = [name_to_letter.get(name) if name else None
+                       for name in parsed["speakers"]]
+
+    return {
+        "paragraphs": parsed["paragraphs"],
+        "out_path": path,
+        "show_timestamp": parsed["show_timestamp"],
+        "title": parsed.get("title"),
+        "output_format": ("docx" if path.lower().endswith(".docx")
+                          else "txt"),
+        "used_partial": False,
+        "result": None,
+        "extra_formats": [],
+        "preset_speakers": preset_speakers,
+        "preset_speaker_names": preset_speaker_names,
+        "loaded": True,
+        "audio_path": _guess_audio_for_transcript(path),
+    }
+
+
+def autosave_restore_info(data):
+    """Rebuild the review info dict from an autosave.json payload - the
+    twin of _maybe_offer_autosave_restore's restore half."""
+    paragraphs = [[tuple(seg) for seg in para]
+                  for para in data["paragraphs"]]
+    return {
+        "paragraphs": paragraphs,
+        "out_path": data.get("out_path", ""),
+        "show_timestamp": data.get("show_timestamp", True),
+        "title": data.get("title"),
+        "output_format": data.get("output_format", "txt"),
+        "used_partial": False,
+        "result": None,
+        "extra_formats": [],
+        "loaded": bool(data.get("loaded")),
+        "audio_path": data.get("audio_path"),
+        "preset_speakers": data.get("speakers") or [],
+        "preset_speaker_names": data.get("speaker_names") or {},
+    }
+
+
+class ReviewSession:
+    """One open review: a TranscriptModel plus document metadata and
+    the save/close orchestration - the web twin of WhisperGUI's review
+    host code. Mutations must present the client's last-seen model rev;
+    a mismatch raises ApiFail 409 so a stale window can't clobber the
+    session."""
+
+    def __init__(self, info, broker, *, log=None):
+        self.broker = broker
+        self.info = info
+        self.out_path = str(info.get("out_path", ""))
+        self.show_timestamp = bool(info.get("show_timestamp", True))
+        self.title = info.get("title")
+        self.output_format = info.get("output_format", "txt")
+        self.loaded = bool(info.get("loaded"))
+        self.audio_path = info.get("audio_path")
+        self.result = info.get("result")
+        self.extra_formats = info.get("extra_formats") or []
+        self._log_line = log or (lambda text: None)
+        self.lock = threading.RLock()
+        self.closed = False
+        preset_speakers = info.get("preset_speakers") or None
+        self.model = TranscriptModel(
+            info["paragraphs"],
+            speakers=preset_speakers,
+            speaker_names=info.get("preset_speaker_names") or None,
+            word_conf=info.get("word_conf"),
+            on_autosave=self._write_autosave,
+        )
+        # Reveal enough name fields to cover preset slots (parity with
+        # _enter_review_mode's set_visible_speakers call).
+        names = info.get("preset_speaker_names") or {}
+        slots = ([int(L) for L in names.keys()]
+                 + [int(L) for L in (preset_speakers or []) if L])
+        if slots:
+            self.model.set_visible(max(slots))
+
+    @classmethod
+    def from_fresh(cls, info, broker, *, log=None):
+        """Session for a fresh transcription: crash-safety pre-save of
+        the un-labelled transcript before review opens (port of
+        _enter_review_mode lines 5992-6010)."""
+        session = cls(info, broker, log=log)
+        if info.get("result") is not None:
+            try:
+                write_paragraphs_to_file(
+                    info["paragraphs"], Path(info["out_path"]),
+                    show_timestamp=info.get("show_timestamp", True),
+                    title=info.get("title"),
+                    output_format=info["output_format"],
+                    speakers=None,
+                )
+                session._log_line(
+                    f"Safety copy saved (no labels yet): "
+                    f"{info['out_path']}\n")
+            except Exception as e:
+                _log(f"Safety save before review failed: {e}")
+                session._log_line(
+                    f"Warning: could not save safety copy "
+                    f"({type(e).__name__}: {e}). Continuing to review.\n")
+        return session
+
+    # ----- Payload -------------------------------------------------------
+
+    def payload(self):
+        with self.lock:
+            m = self.model
+            conf = m.confidence_spans()
+            paragraphs = []
+            for i, para in enumerate(m.paragraphs):
+                span = m.playback_span(i)
+                if span is None:
+                    play = None
+                else:
+                    start, dur = span
+                    play = {"start": start,
+                            "end": None if dur is None else start + dur}
+                paragraphs.append({
+                    "id": m.ids[i],
+                    "start": para[0][0] if para else 0.0,
+                    "end": para[-1][1] if para else 0.0,
+                    "body": m.body(i),
+                    "speaker": m.speakers[i],
+                    "play": play,
+                    "conf": [list(s) for s in conf[i]],
+                })
+            labelled, total = m.label_counts()
+            return {
+                "rev": m.rev,
+                "out_path": self.out_path,
+                "output_format": self.output_format,
+                "show_timestamp": self.show_timestamp,
+                "title": self.title,
+                "loaded": self.loaded,
+                "audio": {"state": "unavailable"},   # audio lands in P4
+                "speaker_names": dict(m.speaker_names),
+                "visible_speakers": m.visible_speakers,
+                "labelled": labelled,
+                "total": total,
+                "can_undo": m.can_undo(),
+                "can_redo": m.can_redo(),
+                "has_word_conf": bool(m.word_conf),
+                "paragraphs": paragraphs,
+            }
+
+    def _slim(self, **extra):
+        labelled, total = self.model.label_counts()
+        return {"rev": self.model.rev, "labelled": labelled,
+                "total": total,
+                "visible_speakers": self.model.visible_speakers, **extra}
+
+    # ----- Mutations ------------------------------------------------------
+
+    def _check_rev(self, rev):
+        if rev != self.model.rev:
+            raise ApiFail(409, "stale_rev",
+                          "The document changed under you - refetch.",
+                          rev=self.model.rev)
+
+    def mutate(self, rev, action, body):
+        """Apply one named mutation; returns a slim delta for hot ops
+        and the full payload for structural ones."""
+        with self.lock:
+            self._check_rev(rev)
+            m = self.model
+            if action == "speaker":
+                idx = int(body.get("index", -1))
+                letter = body.get("slot")
+                if not m.set_speaker(idx, letter):
+                    raise ApiFail(400, "bad_request", "Bad index or slot.")
+                result = self._slim(index=idx, speaker=letter)
+            elif action == "speaker-name":
+                if not m.set_speaker_name(str(body.get("slot")),
+                                          str(body.get("name", ""))):
+                    raise ApiFail(400, "bad_request", "Bad slot.")
+                result = self._slim(speaker_names=dict(m.speaker_names))
+            elif action == "visible-speakers":
+                m.set_visible(int(body.get("n", m.DEFAULT_VISIBLE)))
+                result = self._slim()
+            elif action == "edit":
+                m.commit_edit(int(body.get("index", -1)),
+                              str(body.get("text", "")))
+                result = self.payload()
+            elif action == "split":
+                new_idx = m.split(int(body.get("index", -1)),
+                                  int(body.get("offset", -1)))
+                result = self.payload()
+                result["new_index"] = new_idx
+            elif action == "merge":
+                if not m.merge_with_previous(int(body.get("index", -1))):
+                    raise ApiFail(400, "bad_request",
+                                  "Can't merge the first paragraph.")
+                result = self.payload()
+            elif action == "replace-all":
+                count = m.replace_all(str(body.get("find", "")),
+                                      str(body.get("replace", "")),
+                                      bool(body.get("match_case")))
+                result = self.payload()
+                result["count"] = count
+            elif action == "undo":
+                m.undo()
+                result = self.payload()
+            elif action == "redo":
+                m.redo()
+                result = self.payload()
+            else:
+                raise ApiFail(404, "unknown_action", action)
+            self.broker.publish("review_changed", {"rev": m.rev})
+            return result
+
+    # ----- Autosave -------------------------------------------------------
+
+    def _write_autosave(self, paragraphs, speakers, speaker_names):
+        """Crash-recovery snapshot in the exact v0.6.0 schema (port of
+        _on_review_autosave, incl. the used-or-renamed names filter)."""
+        if self.closed:
+            return
+        defaults = {L: f"Speaker {L}" for L in TranscriptModel.LETTERS}
+        used = {letter for letter in speakers if letter}
+        names = {letter: name for letter, name in speaker_names.items()
+                 if letter in used or name != defaults.get(letter)}
+        _autosave_save({
+            "out_path": self.out_path,
+            "show_timestamp": self.show_timestamp,
+            "title": self.title,
+            "output_format": self.output_format,
+            "loaded": self.loaded,
+            "audio_path": self.audio_path,
+            "paragraphs": [[list(seg) for seg in para]
+                           for para in paragraphs],
+            "speakers": list(speakers),
+            "speaker_names": names,
+            "saved_at": time.time(),
+        })
+        self.broker.publish("autosave", {"saved_at": time.time()})
+
+    # ----- Save / close ----------------------------------------------------
+
+    def _write(self, out_path, speakers):
+        try:
+            write_paragraphs_to_file(
+                self.model.paragraphs, Path(out_path),
+                show_timestamp=self.show_timestamp,
+                title=self.title,
+                output_format=self.output_format,
+                speakers=speakers,
+            )
+        except ImportError as e:
+            raise ApiFail(500, "missing_dependency", str(e))
+        except ApiFail:
+            raise
+        except Exception as e:
+            raise ApiFail(500, "save_failed", f"{type(e).__name__}: {e}")
+
+    def save(self, rev, mode, extra_queue=None):
+        """mode: "labels" | "no_labels" | "revision". Returns the final
+        out_path. Ports _on_review_save / _on_review_cancel(fresh) /
+        _on_review_save_revision."""
+        with self.lock:
+            self._check_rev(rev)
+            m = self.model
+            for letter in m.LETTERS:
+                m.speaker_names[letter] = m.speaker_names.get(
+                    letter, "").strip() or f"Speaker {letter}"
+            if mode == "revision":
+                if not self.loaded:
+                    raise ApiFail(400, "bad_request",
+                                  "Revisions only apply to loaded "
+                                  "transcripts.")
+                out_path = str(_next_revision_path(Path(self.out_path)))
+                self._write(out_path, m.resolved_speakers())
+                self._log_line(f"Saved revision: {out_path}\n")
+            elif mode == "labels":
+                out_path = self.out_path
+                self._write(out_path, m.resolved_speakers())
+                self._log_line(
+                    f"Wrote {len(m.paragraphs)} paragraphs (with speaker "
+                    f"labels)\nto: {out_path}\n")
+            elif mode == "no_labels":
+                out_path = self.out_path
+                self._write(out_path, None)
+                self._log_line(f"Saved without speaker labels: "
+                               f"{out_path}\n")
+            else:
+                raise ApiFail(400, "bad_request", f"Unknown mode {mode}.")
+
+            # Extra formats only accompany full fresh runs (parity).
+            if (mode in ("labels", "no_labels") and self.result
+                    and self.extra_formats and extra_queue is not None):
+                _write_extra_formats(self.result, Path(out_path),
+                                     self.extra_formats, extra_queue)
+            self._finish(reason="saved", out_path=out_path)
+            return out_path
+
+    def close_discard(self):
+        """Close a LOADED session without saving (the original file is
+        untouched). Fresh sessions use save(mode="no_labels") instead."""
+        with self.lock:
+            if not self.loaded:
+                raise ApiFail(400, "bad_request",
+                              "A fresh transcription must be saved "
+                              "(with or without labels).")
+            self._log_line(f"Closed without saving: {self.out_path}\n")
+            self._finish(reason="discarded", out_path=None)
+
+    def _finish(self, *, reason, out_path):
+        self.closed = True
+        self.model.close()
+        _autosave_clear()
+        if out_path:
+            _recent_add(out_path)
+            self.broker.publish("recents", {})
+        self.broker.publish("review_closed",
+                            {"reason": reason, "out_path": out_path})
+
+
+# =====================================================================
 # Web UI backend - HTTP server (bottle on a threading WSGI server)
 # =====================================================================
 #
@@ -7425,9 +7777,38 @@ class WebBackend:
         self.token = token
         self.broker = EventBroker()
         self.controller = RunController(self.broker)
+        self.controller.on_paragraphs_ready = self._open_review_fresh
+        self.review = None        # the open ReviewSession, if any
         self.server = None        # set by serve()
         self.has_window = False   # True once a pywebview window owns us
         self._pump_stop = threading.Event()
+
+    def _open_review_fresh(self, info):
+        """paragraphs_ready arrived from the worker (review-before-save
+        run): build the session and tell every client. Runs on the pump
+        thread."""
+        self.controller.phase = "idle"
+        self.controller._append_log(
+            f"\n{len(info['paragraphs'])} paragraphs ready for review.\n")
+        self.controller._publish_run_state()
+        session = ReviewSession.from_fresh(
+            info, self.broker, log=self.controller._append_log)
+        self.review = session
+        self.broker.publish("review_opened", {"review": session.payload()})
+
+    def _open_review(self, info):
+        """Open a session for a loaded transcript or autosave restore."""
+        session = ReviewSession(info, self.broker,
+                                log=self.controller._append_log)
+        self.review = session
+        self.broker.publish("review_opened", {"review": session.payload()})
+        return session
+
+    def _live_review(self):
+        session = self.review
+        if session is None or session.closed:
+            raise ApiFail(404, "no_review", "No review session is open.")
+        return session
 
     def start_pump(self):
         """Drain the worker queue on a daemon thread, dispatching into
@@ -7527,12 +7908,111 @@ class WebBackend:
 
         @app.get("/api/state")
         def api_state():
+            review = None
+            if backend.review is not None and not backend.review.closed:
+                review = backend.review.payload()
             return {
                 "run": backend.controller.state(),
-                "review": None,
+                "review": review,
                 "autosave_pending": bool(_autosave_load()),
                 "recents": _recents_payload(),
             }
+
+        # -- review --------------------------------------------------------
+
+        @app.get("/api/review")
+        def api_review():
+            try:
+                return backend._live_review().payload()
+            except ApiFail as e:
+                _fail(e)
+
+        @app.post("/api/transcripts/open")
+        def api_transcripts_open():
+            body = bottle.request.json or {}
+            path = (body.get("path") or "").strip()
+            try:
+                if backend.review is not None and not backend.review.closed:
+                    raise ApiFail(409, "review_open",
+                                  "A review session is already open.")
+                if backend.controller.phase in ("running", "stopping"):
+                    raise ApiFail(409, "busy",
+                                  "Wait for the current transcription "
+                                  "to finish.")
+                if not path or not Path(path).exists():
+                    raise ApiFail(400, "input_not_found",
+                                  f"No such file:\n{path}", path=path)
+                info = open_transcript_info(path)
+                session = backend._open_review(info)
+            except ApiFail as e:
+                _fail(e)
+            backend.controller.last_output = path
+            _recent_add(path)
+            backend.broker.publish("recents", {})
+            backend.controller._append_log(
+                f"\nLoaded transcript from: {path}\n")
+            return {"review": session.payload()}
+
+        @app.post("/api/review/<action>")
+        def api_review_mutate(action):
+            if action in ("save", "close"):
+                return _review_lifecycle(action)
+            body = bottle.request.json or {}
+            try:
+                session = backend._live_review()
+                return session.mutate(int(body.get("rev", -1)),
+                                      action, body)
+            except ApiFail as e:
+                _fail(e)
+
+        def _review_lifecycle(action):
+            body = bottle.request.json or {}
+            try:
+                session = backend._live_review()
+                if action == "save":
+                    out_path = session.save(
+                        int(body.get("rev", -1)),
+                        str(body.get("mode", "labels")),
+                        extra_queue=backend.controller.queue)
+                    backend.controller.last_output = out_path
+                    backend.review = None
+                    return {"out_path": out_path}
+                session.close_discard()
+                backend.review = None
+                return {"ok": True}
+            except ApiFail as e:
+                _fail(e)
+
+        @app.get("/api/autosave")
+        def api_autosave():
+            data = _autosave_load()
+            if not data:
+                return {"pending": False}
+            name = Path(data.get("out_path") or "").name or "transcript"
+            return {"pending": True, "name": name,
+                    "saved_at": data.get("saved_at")}
+
+        @app.post("/api/autosave/restore")
+        def api_autosave_restore():
+            data = _autosave_load()
+            try:
+                if not data:
+                    raise ApiFail(404, "no_autosave",
+                                  "Nothing to restore.")
+                if backend.review is not None and not backend.review.closed:
+                    raise ApiFail(409, "review_open",
+                                  "A review session is already open.")
+                session = backend._open_review(autosave_restore_info(data))
+            except ApiFail as e:
+                _fail(e)
+            backend.controller._append_log(
+                f"Restored unsaved review session: {session.out_path}\n")
+            return {"review": session.payload()}
+
+        @app.post("/api/autosave/discard")
+        def api_autosave_discard():
+            _autosave_clear()
+            return {"ok": True}
 
         # -- run / batch -------------------------------------------------
 
@@ -7540,6 +8020,9 @@ class WebBackend:
         def api_run():
             body = bottle.request.json or {}
             try:
+                if backend.review is not None and not backend.review.closed:
+                    raise ApiFail(409, "review_open",
+                                  "Finish the open review first.")
                 run_id = backend.controller.start_single(
                     body.get("input"), body.get("output"),
                     current_settings(), force=bool(body.get("force")))

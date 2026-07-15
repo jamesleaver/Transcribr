@@ -38,8 +38,7 @@ export default function OptionsPanel() {
             label="Review and label speakers before saving"
             checked={settings.review}
             onChange={(v) => update({ review: v })}
-            disabled
-            note="The review workspace arrives in Phase 3 — until then transcripts save directly."
+            note="Applies to single files — batches always save directly."
           />
         </div>
       </Card>

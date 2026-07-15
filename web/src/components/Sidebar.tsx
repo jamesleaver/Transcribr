@@ -1,5 +1,6 @@
 import type { JSX } from "react";
 import { useApp, type View } from "../state/store";
+import { useReview } from "../state/reviewStore";
 import type { ThemeSetting } from "../api/types";
 
 const THEME_CYCLE: ThemeSetting[] = ["auto", "light", "dark"];
@@ -49,6 +50,7 @@ export default function Sidebar() {
   const meta = useApp((s) => s.meta);
   const sse = useApp((s) => s.sse);
   const theme = useApp((s) => s.settings?.theme ?? "auto");
+  const hasReview = useReview((s) => s.doc !== null);
 
   const cycleTheme = () => {
     const next = THEME_CYCLE[(THEME_CYCLE.indexOf(theme) + 1) % THEME_CYCLE.length];
@@ -63,7 +65,8 @@ export default function Sidebar() {
 
       <nav className="flex flex-col gap-1">
         <NavButton view="transcribe" label="Transcribe" icon={<Icon d={ICONS.transcribe} />} />
-        <NavButton view="review" label="Review" icon={<Icon d={ICONS.review} />} disabled />
+        <NavButton view="review" label="Review" icon={<Icon d={ICONS.review} />}
+          disabled={!hasReview} />
         <NavButton view="library" label="Library" icon={<Icon d={ICONS.library} />} />
       </nav>
 
