@@ -91,7 +91,12 @@ export const useRun = create<RunSlice>((set, get) => ({
   derivedOutput: () => {
     const s = get();
     if (s.outputTouched && s.outputPath) return s.outputPath;
-    return s.staged[0]?.derived_output ?? "";
+    // Derive from the CURRENT format - the inspect-time derived_output
+    // goes stale if the user changes format after staging.
+    const src = s.staged[0]?.path;
+    if (!src) return "";
+    const fmt = useApp.getState().settings?.output_format ?? "docx";
+    return src.replace(/\.[^./\\]+$/, "") + `.transcript.${fmt}`;
   },
 
   browse: async () => {

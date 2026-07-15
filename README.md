@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026.
+(c) James Leaver, 2026. Version 0.7.0.
 
 An experimental GUI for transcribing audio and video files on macOS and
 Windows. A Whisper engine (openai-whisper, faster-whisper, or
@@ -11,6 +11,15 @@ saving as Word (`.docx`), PDF, or plain text. Several files can be
 queued and transcribed in one unattended batch. Everything runs locally
 on your computer — no audio, video, or transcripts are uploaded to the
 internet.
+
+Version 0.7.0 introduces a redesigned interface rendered by your
+system's built-in web view (WKWebView on macOS, WebView2 on Windows).
+It talks to the transcription engine over a local-only connection on
+your own machine — bound to 127.0.0.1 with a random port and a
+per-session token; nothing is ever sent anywhere. Launch it with
+`--web`; the classic interface remains the default for this release
+while the new one is being proven, and `--serve` prints a local URL
+you can open in any browser as a fallback.
 
 When a particular model is run for the first time, that model will be
 downloaded to your computer and stored locally. The `medium.en` or
@@ -51,6 +60,9 @@ Transcribr-Installer/
 - ~5 GB free disk space
 - `winget` (built into modern Windows; install "App Installer" from the
   Microsoft Store if missing)
+- The Microsoft Edge WebView2 runtime, for the 0.7.0 interface —
+  already present on Windows 11 and most Windows 10 machines; the
+  installer checks and installs it if missing
 
 You do **not** need Python, ffmpeg, or Whisper pre-installed.
 The installer handles all of that.
@@ -282,6 +294,7 @@ Both installers are safe to re-run. They will:
 |---|---|
 | Python virtualenv | `~/Library/Application Support/Transcribr/venv/` |
 | The GUI script | `~/Library/Application Support/Transcribr/transcribr.py` |
+| The web interface (pre-built) | `~/Library/Application Support/Transcribr/webdist/` |
 | The application | `/Applications/Transcribr.app` |
 | Settings / recent / autosave | `~/Library/Application Support/Transcribr/*.json` |
 | Launch logs | `~/Library/Logs/Transcribr/launch.log` |
@@ -293,6 +306,7 @@ Both installers are safe to re-run. They will:
 |---|---|
 | Python virtualenv | `%LOCALAPPDATA%\Transcribr\venv\` |
 | The GUI script | `%LOCALAPPDATA%\Transcribr\transcribr.py` |
+| The web interface (pre-built) | `%LOCALAPPDATA%\Transcribr\webdist\` |
 | Desktop shortcut | `%USERPROFILE%\Desktop\Transcribr.lnk` |
 | Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk` |
 | Settings / recent / autosave | `%APPDATA%\Transcribr\*.json` |
@@ -342,6 +356,36 @@ If the app does not launch:
    & "$env:LOCALAPPDATA\Transcribr\venv\Scripts\python.exe" `
      "$env:LOCALAPPDATA\Transcribr\transcribr.py"
    ```
+
+4. **If the new (web) interface's window won't open**, run it without
+   a window and use your browser instead — from the same venv python:
+
+   ```bash
+   python transcribr.py --serve
+   ```
+
+   then open the printed `http://127.0.0.1:…` URL. That URL only works
+   on your own machine.
+
+## Development
+
+The web interface's source lives in `web/` (React + TypeScript,
+built with Vite). Node.js (≥ 20) is needed **only for development** —
+end users receive the pre-built files in `webdist/`, which are
+committed to the repository and must be rebuilt and committed after
+changing anything in `web/`:
+
+```bash
+cd web
+npm install
+npm run build     # type-checks, then writes ../webdist/
+```
+
+For live-reload development: `python3 transcribr.py --serve` in one
+terminal (port 8737, token `dev`) and `npm run dev` in another, then
+open the Vite URL. If the repository lives in Dropbox, mark
+`web/node_modules` as ignored so it doesn't sync:
+`xattr -w com.dropbox.ignored 1 web/node_modules` (macOS).
 
 ## What this does NOT install
 

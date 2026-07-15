@@ -97,7 +97,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 
 # ---------- step 1: Python --------------------------------------------------
 
-Step 1 5 "Python 3.12 (x64)"
+Step 1 6 "Python 3.12 (x64)"
 
 # We always install x64 Python, even on ARM64 Windows. Native ARM64 Python
 # works for many things, but several packages in the ML/audio stack
@@ -215,7 +215,7 @@ Info "Using: $python312"
 
 # ---------- step 2: ffmpeg --------------------------------------------------
 
-Step 2 5 "ffmpeg"
+Step 2 6 "ffmpeg"
 
 $ffmpegId = "Gyan.FFmpeg"
 $ffmpegPresent = (winget list -e --id $ffmpegId 2>$null | Select-String $ffmpegId) -ne $null
@@ -245,9 +245,53 @@ if ($ffmpegBin) {
     $ffmpegDir = $null
 }
 
-# ---------- step 3: venv ----------------------------------------------------
+# ---------- step 3: WebView2 runtime ----------------------------------------
+#
+# The 0.7.0 interface renders in a WebView2 window. Windows 11 and most
+# up-to-date Windows 10 machines already have the Evergreen runtime; on
+# the rest we install it via winget, falling back to Microsoft's
+# bootstrapper.
 
-Step 3 5 "Python virtual environment"
+Step 3 6 "Microsoft Edge WebView2 runtime"
+
+function Test-WebView2 {
+    $keys = @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+        "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    )
+    foreach ($k in $keys) {
+        $pv = (Get-ItemProperty -Path $k -Name pv -ErrorAction SilentlyContinue).pv
+        if ($pv -and $pv -ne "0.0.0.0") { return $pv }
+    }
+    return $null
+}
+
+$wv2 = Test-WebView2
+if ($wv2) {
+    Ok "WebView2 runtime present (version $wv2)"
+} else {
+    Info "Installing the WebView2 runtime via winget..."
+    winget install -e --id Microsoft.EdgeWebView2Runtime --silent --accept-package-agreements --accept-source-agreements
+    if (-not (Test-WebView2)) {
+        Info "winget route failed; trying Microsoft's bootstrapper..."
+        $bootstrapper = Join-Path $env:TEMP "MicrosoftEdgeWebview2Setup.exe"
+        try {
+            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
+            Start-Process -FilePath $bootstrapper -ArgumentList "/silent", "/install" -Wait
+        } catch {
+            Warn "Bootstrapper download/run failed: $_"
+        }
+    }
+    if (Test-WebView2) {
+        Ok "WebView2 runtime installed"
+    } else {
+        Warn "Could not verify the WebView2 runtime. The new interface may not start; the classic interface is unaffected."
+    }
+}
+
+# ---------- step 4: venv ----------------------------------------------------
+
+Step 4 6 "Python virtual environment"
 
 if (-not (Test-Path $appDir)) {
     New-Item -ItemType Directory -Path $appDir | Out-Null
@@ -285,7 +329,7 @@ Ok "venv ready"
 
 # ---------- step 4: Whisper -------------------------------------------------
 
-Step 4 5 "Whisper engines (this is the slow step)"
+Step 5 6 "Whisper engines (this is the slow step)"
 
 Info "Upgrading pip..."
 & "$venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
@@ -295,13 +339,19 @@ Info "Installing openai-whisper (downloads PyTorch, ~2GB)..."
 # Pin openai-whisper >= 20250625; older releases use the removed
 # pkg_resources module, which is gone in setuptools 81+.
 & "$venv\Scripts\python.exe" -m pip install --upgrade `
-    "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect
+    "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect `
+    pywebview bottle
 if ($LASTEXITCODE -ne 0) { Fail "openai-whisper / python-docx / reportlab install failed" }
 
 # Verify whisper imports
 & "$venv\Scripts\python.exe" -c "import whisper" 2>$null
 if ($LASTEXITCODE -ne 0) { Fail "whisper import test failed" }
 Ok "openai-whisper installed"
+
+# The 0.7.0 web interface is served by bottle inside a pywebview window.
+& "$venv\Scripts\python.exe" -c "import webview, bottle" 2>$null
+if ($LASTEXITCODE -ne 0) { Fail "pywebview / bottle import test failed" }
+Ok "pywebview + bottle installed"
 
 # faster-whisper - CTranslate2-based engine. Best CPU-only speed; also
 # uses CUDA if a compatible GPU is present. Wheels exist for x64 Windows.
@@ -320,10 +370,23 @@ if ($LASTEXITCODE -ne 0) {
 
 # ---------- step 5: Application files, launcher, shortcuts ------------------
 
-Step 5 5 "Application files and shortcuts"
+Step 6 6 "Application files and shortcuts"
 
 Copy-Item $sharedScript "$appDir\$scriptName" -Force
 Copy-Item $iconFile     "$appDir\$iconName"   -Force
+
+# The built web interface. Shipped pre-built in webdist\ - end users
+# never need Node.
+$sharedWebdist = Join-Path $sharedDir "webdist"
+if (Test-Path (Join-Path $sharedWebdist "index.html")) {
+    if (Test-Path "$appDir\webdist") {
+        Remove-Item -Recurse -Force "$appDir\webdist"
+    }
+    Copy-Item -Recurse $sharedWebdist "$appDir\webdist"
+    Ok "Copied web interface (webdist)"
+} else {
+    Fail "webdist\index.html is missing - the web interface has not been built. From the repository: cd web && npm install && npm run build"
+}
 
 # Optional PNG copy — used by the in-app About dialog. Tk's PhotoImage
 # reads PNG but not .ico/.icns, so we ship a separate file.

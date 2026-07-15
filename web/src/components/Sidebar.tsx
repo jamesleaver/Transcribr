@@ -1,4 +1,5 @@
 import type { JSX } from "react";
+import { api } from "../api/client";
 import { alertDialog } from "../state/dialogs";
 import { useApp, type View } from "../state/store";
 import { useReview } from "../state/reviewStore";
@@ -104,6 +105,27 @@ export default function Sidebar() {
         >
           <Icon d="M12 8v.01M12 11v5m0 5a9 9 0 1 1 0-18 9 9 0 0 1 0 18z" />
         </button>
+        <button
+          onClick={() => void api.post("/api/log/open", {}).catch(() => {})}
+          title="Open the log file"
+          className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        >
+          <Icon d="M6 3h8l4 4v14H6V3zm8 0v4h4M9 12h6M9 16h6" />
+        </button>
+        {meta?.readme_available && (
+          <button
+            onClick={() =>
+              void api
+                .get<{ path: string }>("/api/readme")
+                .then((r) => api.post("/api/path/open", { path: r.path }))
+                .catch(() => {})
+            }
+            title="View the README"
+            className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+          >
+            <Icon d="M4 5a2 2 0 0 1 2-2h5v18H6a2 2 0 0 0-2 2V5zm7-2h5a2 2 0 0 1 2 2v18a2 2 0 0 0-2-2h-5V3z" />
+          </button>
+        )}
         <button
           onClick={cycleTheme}
           title={THEME_LABEL[theme]}

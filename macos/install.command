@@ -205,15 +205,21 @@ if [ "$ARCH" = "x86_64" ]; then
     info "Intel Mac detected; pinning torch/numpy/numba versions for compatibility"
     "$VENV/bin/pip" install --upgrade --prefer-binary \
         "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect \
-        pyobjc-framework-Cocoa \
+        pyobjc-framework-Cocoa pywebview bottle \
         "torch==2.2.2" "numpy<2" "numba<0.60" \
         || fail "openai-whisper / python-docx / reportlab install failed"
 else
     "$VENV/bin/pip" install --upgrade --prefer-binary \
         "openai-whisper>=20250625" python-docx reportlab sv-ttk darkdetect \
-        pyobjc-framework-Cocoa \
+        pyobjc-framework-Cocoa pywebview bottle \
         || fail "openai-whisper / python-docx / reportlab install failed"
 fi
+
+# The web interface (0.7.0+) is served by bottle inside a pywebview
+# window; verify both import.
+"$VENV/bin/python" -c "import webview, bottle" \
+    || fail "pywebview / bottle import test failed"
+ok "pywebview + bottle installed"
 
 # Verify whisper imports cleanly.
 "$VENV/bin/python" -c "import whisper; print('    whisper version:', whisper.__version__ if hasattr(whisper, '__version__') else 'OK')" \
@@ -285,6 +291,17 @@ step "Step 5/6: Application files"
 
 cp "$SHARED_DIR/transcribr.py" "$APP_SUPPORT/transcribr.py"
 ok "Copied transcribr.py to $APP_SUPPORT"
+
+# The built web interface. Shipped pre-built in webdist/ - end users
+# never need Node.
+if [ -e "$SHARED_DIR/webdist/index.html" ]; then
+    rm -rf "$APP_SUPPORT/webdist"
+    cp -R "$SHARED_DIR/webdist" "$APP_SUPPORT/webdist"
+    ok "Copied web interface (webdist) to $APP_SUPPORT"
+else
+    fail "webdist/index.html is missing - the web interface has not \
+been built. From the repository: cd web && npm install && npm run build"
+fi
 
 if [ -f "$SHARED_DIR/icon.png" ]; then
     cp "$SHARED_DIR/icon.png" "$APP_SUPPORT/icon.png"

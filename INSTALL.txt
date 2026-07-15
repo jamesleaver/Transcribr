@@ -7,7 +7,9 @@ To install:
   On Windows      Open the "windows" folder, double-click "install.bat"
 
 The installer will set up everything automatically: Python, ffmpeg,
-Whisper, the application, and Desktop / Start Menu shortcuts.
+Whisper, the application, and Desktop / Start Menu shortcuts. On
+Windows it also checks for Microsoft's WebView2 runtime (used by the
+0.7.0 interface) and installs it if missing.
 
 The first time you run the installer, your operating system may warn
 you that it's from an unidentified developer:

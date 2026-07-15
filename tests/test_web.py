@@ -751,6 +751,238 @@ class TestReviewSession(unittest.TestCase):
 
 
 # =====================================================================
+# HTTP API (real server on an ephemeral port)
+# =====================================================================
+
+def _have_bottle():
+    try:
+        import bottle  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_have_bottle(), "needs bottle")
+class TestHttpApi(unittest.TestCase):
+    TOKEN = "test-token"
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        cls.backend = T.WebBackend(cls.TOKEN)
+        cls.server = cls.backend.serve(port=0)
+        cls.thread = threading.Thread(target=cls.server.serve_forever,
+                                      daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        # Each test starts with no open review and clean config files.
+        self.backend.review = None
+        T._autosave_clear()
+        T._recent_save([])
+        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-http-")
+        self.addCleanup(self.tmp.cleanup)
+
+    # -- tiny urllib client ----------------------------------------------
+
+    def _req(self, method, path, body=None, *, token=True, raw=False):
+        import json as _json
+        import urllib.request
+        import urllib.error
+        headers = {}
+        if token:
+            headers["X-Transcribr-Token"] = self.TOKEN
+        data = None
+        if body is not None:
+            data = _json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base + path, data=data,
+                                     headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = resp.read()
+                return resp.status, (payload if raw
+                                     else _json.loads(payload or b"{}"))
+        except urllib.error.HTTPError as e:
+            payload = e.read()
+            try:
+                return e.code, _json.loads(payload or b"{}")
+            except ValueError:
+                return e.code, {}
+
+    # -- tests -------------------------------------------------------------
+
+    def test_api_requires_token(self):
+        status, _ = self._req("GET", "/api/meta", token=False)
+        self.assertEqual(status, 401)
+        status, _ = self._req("GET", "/api/meta")
+        self.assertEqual(status, 200)
+
+    def test_meta_shape(self):
+        _, meta = self._req("GET", "/api/meta")
+        self.assertEqual(meta["version"], T.__version__)
+        self.assertIn("light", meta["palettes"])
+        self.assertIn("dark", meta["palettes"])
+        self.assertIsInstance(meta["models"], list)
+
+    def test_settings_partial_put_is_non_destructive(self):
+        _, before = self._req("GET", "/api/settings")
+        status, after = self._req("PUT", "/api/settings",
+                                  {"model": "small.en",
+                                   "beam_size": "junk"})
+        self.assertEqual(status, 200)
+        self.assertEqual(after["model"], "small.en")
+        self.assertEqual(after["beam_size"], before["beam_size"])
+        self.assertEqual(after["gap"], before["gap"])
+        # Restore.
+        self._req("PUT", "/api/settings", {"model": before["model"]})
+
+    def test_run_validations_over_http(self):
+        status, err = self._req("POST", "/api/run", {"input": ""})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "missing_input")
+        status, err = self._req(
+            "POST", "/api/run",
+            {"input": str(Path(self.tmp.name) / "ghost.mp3")})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "input_not_found")
+
+    def test_audio_404_when_none(self):
+        status, err = self._req("GET", "/audio/current")
+        self.assertEqual(status, 404)
+        self.assertEqual(err["error"]["code"], "no_audio")
+
+    def _write_transcript(self):
+        p = Path(self.tmp.name) / "doc.transcript.txt"
+        T.write_paragraphs_to_file(
+            _doc(), p, show_timestamp=True, title="HTTP test",
+            output_format="txt", speakers=["Alice", None, None])
+        return str(p)
+
+    def test_open_mutate_save_roundtrip(self):
+        path = self._write_transcript()
+        status, res = self._req("POST", "/api/transcripts/open",
+                                {"path": path})
+        self.assertEqual(status, 200)
+        doc = res["review"]
+        self.assertEqual(doc["speaker_names"]["1"], "Alice")
+        self.assertTrue(doc["loaded"])
+
+        rev = doc["rev"]
+        status, delta = self._req("POST", "/api/review/speaker",
+                                  {"rev": rev, "index": 1, "slot": "2"})
+        self.assertEqual(status, 200)
+        rev = delta["rev"]
+        status, delta = self._req("POST", "/api/review/speaker-name",
+                                  {"rev": rev, "slot": "2",
+                                   "name": "Bob"})
+        rev = delta["rev"]
+        status, full = self._req("POST", "/api/review/edit",
+                                 {"rev": rev, "index": 2,
+                                  "text": "Very good."})
+        rev = full["rev"]
+
+        status, out = self._req("POST", "/api/review/save",
+                                {"rev": rev, "mode": "labels"})
+        self.assertEqual(status, 200)
+        text = Path(out["out_path"]).read_text()
+        self.assertIn("Alice", text)
+        self.assertIn("Bob", text)
+        self.assertIn("Very good.", text)
+        # Session is gone afterwards.
+        status, _ = self._req("GET", "/api/review")
+        self.assertEqual(status, 404)
+        # ... and the file landed in recents (paths stored resolved).
+        _, recents = self._req("GET", "/api/recents")
+        self.assertIn(str(Path(out["out_path"]).resolve()),
+                      [str(Path(r["path"]).resolve())
+                       for r in recents["items"]])
+
+    def test_stale_rev_conflicts(self):
+        path = self._write_transcript()
+        _, res = self._req("POST", "/api/transcripts/open", {"path": path})
+        rev = res["review"]["rev"]
+        self._req("POST", "/api/review/speaker",
+                  {"rev": rev, "index": 0, "slot": "1"})
+        status, err = self._req("POST", "/api/review/speaker",
+                                {"rev": rev, "index": 1, "slot": "2"})
+        self.assertEqual(status, 409)
+        self.assertEqual(err["error"]["code"], "stale_rev")
+        self._req("POST", "/api/review/close",
+                  {"rev": err["error"]["rev"]})
+
+    def test_second_open_refused_while_review_open(self):
+        path = self._write_transcript()
+        _, res = self._req("POST", "/api/transcripts/open", {"path": path})
+        status, err = self._req("POST", "/api/transcripts/open",
+                                {"path": path})
+        self.assertEqual(status, 409)
+        self.assertEqual(err["error"]["code"], "review_open")
+        self._req("POST", "/api/review/close",
+                  {"rev": res["review"]["rev"]})
+
+    def test_sse_stream_delivers_events(self):
+        import urllib.request
+        req = urllib.request.Request(
+            f"{self.base}/api/events?token={self.TOKEN}")
+        resp = urllib.request.urlopen(req, timeout=10)
+        try:
+            self.assertEqual(
+                resp.headers.get("Content-Type"), "text/event-stream")
+            # Padding comment, then retry hint.
+            first = resp.readline()
+            self.assertTrue(first.startswith(b":"))
+            self.assertIn(b"retry:", resp.readline())
+            resp.readline()
+            self.backend.broker.publish("log", {"text": "ping-test"})
+            deadline_lines = []
+            for _ in range(8):
+                line = resp.readline()
+                deadline_lines.append(line)
+                if b"ping-test" in line:
+                    break
+            self.assertTrue(any(b"ping-test" in ln
+                                for ln in deadline_lines))
+        finally:
+            resp.close()
+
+    def test_autosave_matches_golden_fixture(self):
+        """Schema-drift tripwire: the autosave a web session writes must
+        match the v0.6.0 file byte-for-byte in structure and value
+        types (dynamic fields normalised)."""
+        import json as _json
+        golden = _json.loads(
+            (Path(__file__).parent / "fixtures"
+             / "autosave-0.6.0.json").read_text())
+
+        out = str(Path(self.tmp.name) / "golden.transcript.txt")
+        info = {
+            "paragraphs": _doc(), "out_path": out,
+            "show_timestamp": True, "title": "Golden doc",
+            "output_format": "txt", "result": None,
+            "extra_formats": [], "loaded": False,
+            "audio_path": None, "word_conf": None,
+        }
+        session = T.ReviewSession(info, T.EventBroker())
+        rev = session.mutate(session.model.rev, "speaker",
+                             {"index": 0, "slot": "3"})["rev"]
+        session.mutate(rev, "speaker-name", {"slot": "3", "name": "Q C"})
+        session.model.flush_autosave()
+        produced = T._autosave_load()
+
+        golden["out_path"] = out
+        golden["saved_at"] = produced["saved_at"]
+        self.assertEqual(produced, golden)
+        session.model.close()
+
+
+# =====================================================================
 # AudioPrep
 # =====================================================================
 
