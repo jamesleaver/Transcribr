@@ -126,6 +126,8 @@ export interface InspectedFile {
 
 export interface ModelInfo {
   model: string;
+  /** Other names for the same weights (e.g. "large" for "large-v3"). */
+  aliases: string[];
   installed: boolean;
   /** On-disk size in bytes (0 when not installed). */
   size: number;

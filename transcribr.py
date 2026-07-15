@@ -3203,6 +3203,38 @@ def _download_status_text(model, downloaded, total, speed):
     return "   ·   ".join(parts)
 
 
+def _dedupe_alias_models(raw):
+    """Collapse models that resolve to the same storage into one entry.
+
+    `raw` is a list of (model, storage_key, installed, size) in preference
+    order. Aliases share weights - openai-whisper's 'large' is the same
+    .pt as 'large-v3', 'turbo' the same as 'large-v3-turbo', and the
+    HF-backed engines map those pairs to one repo too - so showing both
+    is redundant and would double-count. Each unique storage_key becomes
+    one entry: the most descriptive (longest) name is canonical, the
+    rest are listed as `aliases`."""
+    groups, order = {}, []
+    for model, skey, installed, size in raw:
+        if skey not in groups:
+            groups[skey] = []
+            order.append(skey)
+        groups[skey].append((model, installed, size))
+    out = []
+    for skey in order:
+        members = groups[skey]
+        names = [m for m, _i, _s in members]
+        canonical = max(names, key=len)
+        out.append({
+            "model": canonical,
+            "aliases": [n for n in names if n != canonical],
+            "installed": any(i for _m, i, _s in members),
+            "size": max((s for _m, _i, s in members), default=0),
+            "storage_key": skey,
+            "custom": False,
+        })
+    return out
+
+
 class ModelStore:
     """Read-only view of which Whisper models are cached on disk, per
     installed engine, with sizes. `engines` defaults to the detected
@@ -3230,7 +3262,7 @@ class ModelStore:
         }
 
     def _openai_engine(self, key, name):
-        models = []
+        raw = []
         for m in WHISPER_MODELS:
             fn = _whisper_pt_filename(m)
             size, installed = 0, False
@@ -3242,43 +3274,31 @@ class ModelStore:
                         installed = size > 0
                 except OSError:
                     pass
-            models.append({"model": m, "installed": installed, "size": size,
-                           "storage_key": fn or m, "custom": False})
-        # Aliased models share a file; count each file once.
-        total, counted = 0, set()
-        for e in models:
-            if e["installed"] and e["storage_key"] not in counted:
-                counted.add(e["storage_key"])
-                total += e["size"]
+            raw.append((m, fn or m, installed, size))
+        models = _dedupe_alias_models(raw)
+        total = sum(e["size"] for e in models if e["installed"])
         return {"key": key, "name": name, "supports_custom": False,
                 "models": models, "total": total}
 
     def _hf_engine(self, key, name, hf_sizes):
         repo_of = _faster_repo_for if key == "faster" else _mlx_repo_for
-        models, known_repos = [], set()
-        total, counted = 0, set()
+        raw, known_repos = [], set()
         for m in WHISPER_MODELS:
             repo = repo_of(m)
             known_repos.add(repo)
             entry = hf_sizes.get(repo)
-            size = entry[0] if entry else 0
-            installed = bool(entry)
-            models.append({"model": m, "installed": installed, "size": size,
-                           "storage_key": repo, "custom": False})
-            if installed and repo not in counted:
-                counted.add(repo)
-                total += size
+            raw.append((m, repo, bool(entry), entry[0] if entry else 0))
+        models = _dedupe_alias_models(raw)
+        total = sum(e["size"] for e in models if e["installed"])
         # Models the user fetched that aren't in the built-in list
         # (e.g. a newly released repo). Surfaced so they can be removed.
         custom = []
         for repo, (size, _hashes) in hf_sizes.items():
             if repo in known_repos or not _repo_belongs_to_engine(key, repo):
                 continue
-            custom.append({"model": repo, "installed": True, "size": size,
-                           "storage_key": repo, "custom": True})
-            if repo not in counted:
-                counted.add(repo)
-                total += size
+            custom.append({"model": repo, "aliases": [], "installed": True,
+                           "size": size, "storage_key": repo, "custom": True})
+            total += size
         models.extend(sorted(custom, key=lambda e: e["model"]))
         return {"key": key, "name": name, "supports_custom": True,
                 "models": models, "total": total}

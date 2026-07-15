@@ -64,7 +64,12 @@ function ModelRow({
   return (
     <li className="flex items-center gap-3 px-4 py-2.5">
       <div className="min-w-0 flex-1">
-        <span className="truncate text-sm font-medium">{m.model}</span>
+        <span className="text-sm font-medium">{m.model}</span>
+        {m.aliases.length > 0 && (
+          <span className="ml-1.5 text-xs text-muted">
+            or {m.aliases.join(", ")}
+          </span>
+        )}
         {m.custom && (
           <span className="ml-2 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted">
             custom
@@ -145,15 +150,34 @@ function EngineCard({
   busy: boolean;
   jobKey: string | null;
 }) {
+  const [open, setOpen] = useState(true);
+
+  const builtin = engine.models.filter((m) => !m.custom);
+  const installedBuiltin = builtin.filter((m) => m.installed).length;
+  const customCount = engine.models.length - builtin.length;
+  const summary =
+    `${installedBuiltin} of ${builtin.length} installed` +
+    (customCount > 0 ? ` · ${customCount} custom` : "") +
+    ` · ${engine.total > 0 ? fmtBytes(engine.total) : "nothing cached"}`;
+
   return (
-    <section className="overflow-hidden rounded-xl border border-edge bg-surface">
-      <header className="flex items-baseline justify-between gap-3 border-b border-edge px-4 py-3">
-        <h2 className="text-sm font-semibold">{engine.name}</h2>
-        <span className="text-xs tabular-nums text-muted">
-          {engine.total > 0 ? fmtBytes(engine.total) : "nothing cached"}
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+      className="overflow-hidden rounded-xl border border-edge bg-surface"
+    >
+      <summary className="flex cursor-pointer select-none items-baseline justify-between gap-3 px-4 py-3 marker:content-none">
+        <span className="flex items-baseline gap-2">
+          <span
+            className={`text-muted transition-transform ${open ? "rotate-90" : ""}`}
+          >
+            ▸
+          </span>
+          <span className="text-sm font-semibold">{engine.name}</span>
         </span>
-      </header>
-      <ul className="divide-y divide-edge">
+        <span className="shrink-0 text-xs tabular-nums text-muted">{summary}</span>
+      </summary>
+      <ul className="divide-y divide-edge border-t border-edge">
         {engine.models.map((m) => (
           <ModelRow
             key={`${engine.key}:${m.model}`}
@@ -165,7 +189,7 @@ function EngineCard({
         ))}
       </ul>
       {engine.supports_custom && <CustomDownload engineKey={engine.key} busy={busy} />}
-    </section>
+    </details>
   );
 }
 

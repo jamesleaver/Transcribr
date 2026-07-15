@@ -748,17 +748,26 @@ class TestModelStore(unittest.TestCase):
         (Path(self.tmp.name) / name).write_bytes(b"\0" * size)
 
     def test_openai_presence_and_alias_dedup(self):
-        # large and large-v3 share large-v3.pt; count the file once.
+        # large and large-v3 share large-v3.pt; collapse into one row and
+        # count the file once.
         self._pt("large-v3.pt", 2000)
         self._pt("small.en.pt", 500)
         T._hf_repo_sizes = lambda: {}
         store = T.ModelStore(engines=[("whisper", "OpenAI Whisper")])
         eng = store.payload()["engines"][0]
         by = {m["model"]: m for m in eng["models"]}
+        # The alias names collapse into the descriptive canonical row.
+        self.assertIn("large-v3", by)
+        self.assertNotIn("large", by)
+        self.assertIn("large", by["large-v3"]["aliases"])
+        self.assertIn("large-v3-turbo", by)
+        self.assertNotIn("turbo", by)
+        self.assertIn("turbo", by["large-v3-turbo"]["aliases"])
         self.assertTrue(by["large-v3"]["installed"])
-        self.assertTrue(by["large"]["installed"])          # alias
         self.assertFalse(by["tiny"]["installed"])
         self.assertEqual(by["large-v3"]["size"], 2000)
+        # 14 built-in names collapse to 12 rows.
+        self.assertEqual(len(eng["models"]), 12)
         # 2000 (shared once) + 500, NOT 2000+2000+500.
         self.assertEqual(eng["total"], 2500)
         self.assertFalse(eng["supports_custom"])
@@ -791,6 +800,20 @@ class TestModelStore(unittest.TestCase):
         }
         store = T.ModelStore(engines=[("whisper", "W"), ("mlx", "M")])
         self.assertEqual(store.payload()["total"], 1300)
+
+    def test_dedupe_alias_models_helper(self):
+        raw = [
+            ("large-v3", "large-v3.pt", True, 3000),
+            ("large", "large-v3.pt", False, 0),   # alias, same file
+            ("tiny", "tiny.pt", False, 0),
+        ]
+        out = T._dedupe_alias_models(raw)
+        self.assertEqual([e["model"] for e in out], ["large-v3", "tiny"])
+        merged = out[0]
+        self.assertEqual(merged["aliases"], ["large"])
+        # Any member installed -> installed; size is the shared file's.
+        self.assertTrue(merged["installed"])
+        self.assertEqual(merged["size"], 3000)
 
     def test_uninstall_openai_deletes_file(self):
         self._pt("small.en.pt", 777)
