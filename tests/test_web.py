@@ -1,0 +1,477 @@
+"""Tests for the web-backend layer: the headless TranscriptModel and
+build_worker_params. Run with the whole suite:
+
+    python3 -m unittest discover -s tests -v
+
+Uses only the standard library. These tests are direct ports of the
+editing-logic assertions that TestReviewPaneText makes through Tk
+widgets; when the Tk pane is retired, this file carries that coverage.
+
+Config-directory access is redirected to a temp directory, mirroring
+test_transcribr.py.
+"""
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+try:
+    import transcribr as T
+except ImportError as e:
+    raise unittest.SkipTest(
+        f"cannot import transcribr in this interpreter: {e}")
+
+_real_config_dir = T._config_dir
+_tmp_config = None
+
+
+def setUpModule():
+    global _tmp_config
+    _tmp_config = tempfile.TemporaryDirectory(prefix="transcribr-web-tests-")
+    T._config_dir = lambda: Path(_tmp_config.name)
+
+
+def tearDownModule():
+    T._config_dir = _real_config_dir
+    if _tmp_config is not None:
+        _tmp_config.cleanup()
+
+
+class _FakeTimer:
+    """Stands in for threading.Timer so autosave tests are synchronous."""
+
+    def __init__(self, delay, fn):
+        self.delay = delay
+        self.fn = fn
+        self.started = False
+        self.cancelled = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def _doc():
+    """A small three-paragraph document.
+
+    p0 has two segments and real end times; p1 one segment; p2 a
+    placeholder-like ~1s span (as loaded transcripts have)."""
+    return [
+        [(0.0, 5.0, "Hello there."), (5.0, 9.0, "How are you?")],
+        [(10.0, 15.5, "I am well thank you.")],
+        [(16.0, 17.0, "Good.")],
+    ]
+
+
+_WORD_CONF = [
+    (0.0, 0.4, "Hello", 0.9),
+    (0.5, 0.9, "there.", 0.30),   # low  (< 0.35)
+    (5.0, 5.4, "How", 0.50),      # med  (< 0.6)
+    (5.5, 5.9, "are", 0.95),
+    (6.0, 6.4, "you?", 0.98),
+    (10.0, 10.4, "I", 0.99),
+    (10.5, 10.9, "am", 0.99),
+    (11.0, 11.4, "well", 0.99),
+    (11.5, 11.9, "thank", 0.99),
+    (12.0, 12.4, "you.", 0.99),
+    (16.0, 16.4, "Good.", 0.99),
+]
+
+
+def _model(**kw):
+    return T.TranscriptModel(_doc(), **kw)
+
+
+# =====================================================================
+# TranscriptModel - speakers, undo/redo
+# =====================================================================
+
+class TestModelSpeakers(unittest.TestCase):
+    def test_set_speaker_and_undo(self):
+        m = _model()
+        rev0 = m.rev
+        self.assertTrue(m.set_speaker(0, "2"))
+        self.assertEqual(m.speakers[0], "2")
+        self.assertGreater(m.rev, rev0)
+        self.assertTrue(m.can_undo())
+        self.assertTrue(m.undo())
+        self.assertIsNone(m.speakers[0])
+        self.assertTrue(m.can_redo())
+        self.assertTrue(m.redo())
+        self.assertEqual(m.speakers[0], "2")
+
+    def test_clear_speaker(self):
+        m = _model()
+        m.set_speaker(1, "3")
+        m.set_speaker(1, None)
+        self.assertIsNone(m.speakers[1])
+
+    def test_high_slot_reveals_name_field(self):
+        m = _model()
+        self.assertEqual(m.visible_speakers, m.DEFAULT_VISIBLE)
+        m.set_speaker(0, "7")
+        self.assertEqual(m.visible_speakers, 7)
+
+    def test_invalid_slot_rejected(self):
+        m = _model()
+        self.assertFalse(m.set_speaker(0, "0"))
+        self.assertFalse(m.set_speaker(0, "10"))
+        self.assertFalse(m.set_speaker(99, "1"))
+        self.assertFalse(m.can_undo())
+
+    def test_visible_speakers_clamped(self):
+        m = _model()
+        self.assertEqual(m.set_visible(2), m.DEFAULT_VISIBLE)
+        self.assertEqual(m.set_visible(99), m.MAX_SPEAKERS)
+
+    def test_visible_initialised_from_used_slots(self):
+        m = T.TranscriptModel(_doc(), speakers=["6", None, "2"])
+        self.assertEqual(m.visible_speakers, 6)
+
+    def test_rename_no_undo_step_but_revs(self):
+        m = _model()
+        rev0 = m.rev
+        self.assertTrue(m.set_speaker_name("1", "Ms Chen"))
+        self.assertEqual(m.speaker_names["1"], "Ms Chen")
+        self.assertGreater(m.rev, rev0)
+        self.assertFalse(m.can_undo())
+
+    def test_label_counts_and_resolved(self):
+        m = _model()
+        m.set_speaker(0, "1")
+        m.set_speaker(2, "2")
+        m.set_speaker_name("1", "  Ms Chen  ")
+        m.set_speaker_name("2", "")
+        self.assertEqual(m.label_counts(), (2, 3))
+        self.assertEqual(m.resolved_speakers(), ["Ms Chen", None, None])
+
+    def test_undo_limit_caps_stack(self):
+        m = _model()
+        for i in range(m._UNDO_LIMIT + 20):
+            m.set_speaker(0, m.LETTERS[i % 9])
+        self.assertEqual(len(m._undo_stack), m._UNDO_LIMIT)
+
+    def test_new_mutation_clears_redo(self):
+        m = _model()
+        m.set_speaker(0, "1")
+        m.undo()
+        self.assertTrue(m.can_redo())
+        m.set_speaker(1, "2")
+        self.assertFalse(m.can_redo())
+
+
+# =====================================================================
+# TranscriptModel - structure: edit / merge / split / replace
+# =====================================================================
+
+class TestModelStructure(unittest.TestCase):
+    def test_commit_edit_collapses_keeping_span(self):
+        m = _model()
+        self.assertTrue(m.commit_edit(0, "Hello there, how are you?"))
+        self.assertEqual(m.paragraphs[0],
+                         [(0.0, 9.0, "Hello there, how are you?")])
+
+    def test_commit_edit_empty_is_cancel(self):
+        m = _model()
+        before = [list(p) for p in m.paragraphs]
+        self.assertFalse(m.commit_edit(0, "   "))
+        self.assertEqual(m.paragraphs, before)
+        self.assertFalse(m.can_undo())
+
+    def test_commit_edit_unchanged_records_no_undo(self):
+        m = _model()
+        self.assertTrue(m.commit_edit(1, m.body(1)))
+        self.assertFalse(m.can_undo())
+        # ... but the paragraph still collapses to one segment.
+        self.assertEqual(len(m.paragraphs[1]), 1)
+
+    def test_merge_concatenates_and_keeps_first_speaker(self):
+        m = _model()
+        m.set_speaker(0, "1")
+        m.set_speaker(1, "2")
+        ids_before = list(m.ids)
+        self.assertTrue(m.merge_with_previous(1))
+        self.assertEqual(len(m.paragraphs), 2)
+        self.assertEqual(len(m.paragraphs[0]), 3)
+        self.assertEqual(m.speakers[0], "1")
+        self.assertEqual(m.ids, [ids_before[0], ids_before[2]])
+
+    def test_merge_first_paragraph_refused(self):
+        m = _model()
+        self.assertFalse(m.merge_with_previous(0))
+
+    def test_merge_undo_restores_ids(self):
+        m = _model()
+        ids_before = list(m.ids)
+        m.merge_with_previous(1)
+        m.undo()
+        self.assertEqual(m.ids, ids_before)
+        self.assertEqual(len(m.paragraphs), 3)
+
+    def test_split_interpolates_time_without_word_conf(self):
+        m = _model()
+        body = m.body(1)                    # "I am well thank you."
+        offset = body.index("thank")
+        new_idx = m.split(1, offset)
+        self.assertEqual(new_idx, 2)
+        self.assertEqual(m.body(1), "I am well")
+        self.assertEqual(m.body(2), "thank you.")
+        # Interpolated: 10.0 + 5.5 * (10/20) = 12.75
+        self.assertAlmostEqual(m.paragraphs[1][0][1], 12.75, places=2)
+        self.assertAlmostEqual(m.paragraphs[2][0][0], 12.75, places=2)
+        self.assertAlmostEqual(m.paragraphs[2][0][1], 15.5, places=2)
+
+    def test_split_prefers_word_timestamps(self):
+        m = T.TranscriptModel(_doc(), word_conf=_WORD_CONF)
+        body = m.body(1)
+        offset = body.index("thank")
+        m.split(1, offset)
+        # The word "thank" starts at 11.5 in _WORD_CONF - not the 12.75
+        # character interpolation would give.
+        self.assertAlmostEqual(m.paragraphs[2][0][0], 11.5, places=2)
+
+    def test_split_copies_speaker_and_gets_fresh_id(self):
+        m = _model()
+        m.set_speaker(1, "4")
+        ids_before = list(m.ids)
+        new_idx = m.split(1, m.body(1).index("thank"))
+        self.assertEqual(m.speakers[new_idx], "4")
+        self.assertEqual(m.ids[1], ids_before[1])
+        self.assertNotIn(m.ids[new_idx], ids_before)
+
+    def test_split_at_edges_refused(self):
+        m = _model()
+        self.assertIsNone(m.split(1, 0))
+        self.assertIsNone(m.split(1, len(m.body(1))))
+        self.assertFalse(m.can_undo())
+
+    def test_split_multisegment_boundary(self):
+        m = _model()
+        body = m.body(0)                    # "Hello there. How are you?"
+        offset = body.index("How")
+        new_idx = m.split(0, offset)
+        self.assertEqual(m.body(0), "Hello there.")
+        self.assertEqual(m.body(new_idx), "How are you?")
+        # Clean segment-boundary split keeps the original times.
+        self.assertEqual(m.paragraphs[0], [(0.0, 5.0, "Hello there.")])
+        self.assertEqual(m.paragraphs[1], [(5.0, 9.0, "How are you?")])
+
+    def test_replace_all_counts_and_single_undo(self):
+        m = _model()
+        n = m.replace_all("you", "YOU")
+        self.assertEqual(n, 2)              # "are you?" and "thank you."
+        self.assertIn("YOU", m.body(0))
+        self.assertIn("YOU", m.body(1))
+        self.assertTrue(m.undo())
+        self.assertNotIn("YOU", m.body(0))
+        self.assertFalse(m.can_undo())      # exactly one step was pushed
+
+    def test_replace_all_no_matches_records_nothing(self):
+        m = _model()
+        self.assertEqual(m.replace_all("zebra", "x"), 0)
+        self.assertFalse(m.can_undo())
+
+    def test_replace_all_match_case(self):
+        m = _model()
+        self.assertEqual(m.replace_all("hello", "x", match_case=True), 0)
+        self.assertEqual(m.replace_all("Hello", "x", match_case=True), 1)
+
+
+# =====================================================================
+# TranscriptModel - playback spans, confidence, attention
+# =====================================================================
+
+class TestModelDerived(unittest.TestCase):
+    def test_playback_span_real_ends_padded(self):
+        m = _model()
+        start, dur = m.playback_span(0)
+        self.assertEqual(start, 0.0)
+        self.assertAlmostEqual(dur, 9.3, places=2)   # 9.0 + 0.3 tail
+
+    def test_playback_span_synthetic_runs_to_next_start(self):
+        # p2's 1.0s span is a placeholder; as the LAST paragraph it
+        # plays open-ended...
+        m = _model()
+        self.assertEqual(m.playback_span(2), (16.0, None))
+        # ...while a mid-document placeholder plays to the next start.
+        m2 = T.TranscriptModel([
+            [(0.0, 1.0, "One.")],
+            [(8.0, 9.0, "Two.")],
+        ])
+        start, dur = m2.playback_span(0)
+        self.assertEqual(start, 0.0)
+        self.assertAlmostEqual(dur, 8.3, places=2)   # to next start + 0.3
+
+    def test_playback_span_bad_index(self):
+        m = _model()
+        self.assertIsNone(m.playback_span(99))
+
+    def test_confidence_spans_thresholds(self):
+        m = T.TranscriptModel(_doc(), word_conf=_WORD_CONF)
+        spans = m.confidence_spans()
+        body0 = m.body(0)
+        lo = body0.index("there.")
+        med = body0.index("How")
+        self.assertIn((lo, lo + len("there."), "low"), spans[0])
+        self.assertIn((med, med + len("How"), "med"), spans[0])
+        self.assertEqual(spans[1], [])       # all high-confidence
+        self.assertEqual(len(spans), 3)
+
+    def test_confidence_bails_on_drift(self):
+        m = T.TranscriptModel(_doc(), word_conf=_WORD_CONF)
+        m.commit_edit(0, "Completely rewritten text")
+        spans = m.confidence_spans()
+        self.assertEqual(spans[0], [])       # never mis-highlight
+        self.assertEqual(spans[1], [])
+
+    def test_confidence_empty_without_word_conf(self):
+        m = _model()
+        self.assertEqual(m.confidence_spans(), [[], [], []])
+
+    def test_attention_unlabelled(self):
+        m = _model()
+        m.set_speaker(0, "1")
+        self.assertEqual(m.attention_flags(), [False, True, True])
+
+    def test_attention_low_confidence_only_when_shading_on(self):
+        m = T.TranscriptModel(_doc(), word_conf=_WORD_CONF)
+        for i in range(3):
+            m.set_speaker(i, "1")
+        self.assertEqual(m.attention_flags(), [False, False, False])
+        m.show_confidence = True
+        # p0 contains words with prob 0.30 and 0.50 (< 0.6).
+        self.assertEqual(m.attention_flags(), [True, False, False])
+
+
+# =====================================================================
+# TranscriptModel - autosave debounce
+# =====================================================================
+
+class TestModelAutosave(unittest.TestCase):
+    def _make(self):
+        fired = []
+        timers = []
+
+        def factory(delay, fn):
+            t = _FakeTimer(delay, fn)
+            timers.append(t)
+            return t
+
+        m = T.TranscriptModel(
+            _doc(),
+            on_autosave=lambda p, s, names: fired.append((p, s, names)),
+            timer_factory=factory)
+        return m, fired, timers
+
+    def test_mutation_schedules_and_debounces(self):
+        m, fired, timers = self._make()
+        m.set_speaker(0, "1")
+        self.assertEqual(len(timers), 1)
+        self.assertEqual(timers[0].delay, 3.0)
+        self.assertTrue(timers[0].started)
+        m.set_speaker(1, "2")
+        self.assertTrue(timers[0].cancelled)   # debounced
+        self.assertEqual(len(timers), 2)
+        self.assertEqual(fired, [])            # nothing fired yet
+
+    def test_flush_fires_payload(self):
+        m, fired, timers = self._make()
+        m.set_speaker(0, "3")
+        m.set_speaker_name("3", "Witness")
+        m.flush_autosave()
+        self.assertEqual(len(fired), 1)
+        paragraphs, speakers, names = fired[0]
+        self.assertEqual(speakers[0], "3")
+        self.assertEqual(names["3"], "Witness")
+
+    def test_no_callback_no_timers(self):
+        m = T.TranscriptModel(_doc(), timer_factory=lambda d, f: _FakeTimer(d, f))
+        m.set_speaker(0, "1")
+        self.assertIsNone(m._autosave_timer)
+
+    def test_close_cancels_pending(self):
+        m, fired, timers = self._make()
+        m.set_speaker(0, "1")
+        m.close()
+        self.assertTrue(timers[0].cancelled)
+        self.assertEqual(fired, [])
+
+
+# =====================================================================
+# build_worker_params
+# =====================================================================
+
+class TestBuildWorkerParams(unittest.TestCase):
+    _ENGINES = [("whisper", "OpenAI Whisper (reference)"),
+                ("faster", "faster-whisper (CTranslate2)")]
+
+    def setUp(self):
+        self._saved = T.AVAILABLE_ENGINES
+        T.AVAILABLE_ENGINES = list(self._ENGINES)
+        self.settings = T.default_settings()
+        self.settings["engine"] = "faster-whisper (CTranslate2)"
+
+    def tearDown(self):
+        T.AVAILABLE_ENGINES = self._saved
+
+    def _params(self, **overrides):
+        self.settings.update(overrides)
+        return T.build_worker_params(
+            self.settings, "/tmp/interview.mp3", "/tmp/out.docx",
+            review_before_save=True)
+
+    def test_engine_display_name_maps_to_key(self):
+        self.assertEqual(self._params()["engine"], "faster")
+
+    def test_unknown_engine_falls_back_to_whisper(self):
+        self.assertEqual(
+            self._params(engine="Something Else")["engine"], "whisper")
+
+    def test_title_falls_back_to_filename(self):
+        p = self._params(prompt="")
+        self.assertEqual(p["title"], "interview.mp3")
+        self.assertIsNone(p["initial_prompt"])
+
+    def test_prompt_is_both_initial_prompt_and_title(self):
+        p = self._params(prompt="  Smith v Jones directions hearing ")
+        self.assertEqual(p["initial_prompt"],
+                         "Smith v Jones directions hearing")
+        self.assertEqual(p["title"], "Smith v Jones directions hearing")
+
+    def test_confidence_forces_word_timestamps(self):
+        p = self._params(word_timestamps=False, highlight_confidence=True)
+        self.assertTrue(p["word_timestamps"])
+        p = self._params(word_timestamps=False, highlight_confidence=False)
+        self.assertFalse(p["word_timestamps"])
+
+    def test_language_display_to_code(self):
+        self.assertEqual(self._params(language="German")["language"], "de")
+        self.assertIsNone(self._params(language="Auto-detect")["language"])
+        self.assertEqual(
+            self._params(language="Klingon")["language"], "en")
+
+    def test_extra_formats_list(self):
+        p = self._params(extra_srt=True, extra_json=True)
+        self.assertEqual(p["extra_formats"], ["json", "srt"])
+        self.assertEqual(self._params(extra_srt=False,
+                                      extra_json=False)["extra_formats"], [])
+
+    def test_review_flag_passthrough(self):
+        p = T.build_worker_params(self.settings, "/tmp/a.mp3", "/tmp/a.txt",
+                                  review_before_save=False)
+        self.assertFalse(p["review_before_save"])
+
+    def test_no_engine_raises(self):
+        T.AVAILABLE_ENGINES = []
+        with self.assertRaises(T._EngineNotAvailable):
+            self._params()
+
+
+if __name__ == "__main__":
+    unittest.main()

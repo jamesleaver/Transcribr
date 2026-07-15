@@ -6395,6 +6395,494 @@ class WhisperGUI:
 
 
 # =====================================================================
+# Web UI backend - transcript model
+# =====================================================================
+#
+# The review pane's document logic with no widgets: paragraphs (lists
+# of (start, end, text) segment tuples), speaker slots "1".."9",
+# snapshot-based undo/redo, split/merge/edit/replace-all, playback
+# spans, confidence spans, and the debounced autosave trigger. The web
+# review surface drives one of these over the API; ReviewPaneText keeps
+# its own fused copy of the same logic until the Tk UI is retired.
+#
+# Semantics are ported 1:1 from ReviewPaneText - where behaviour looks
+# arbitrary (the +0.3s playback tail, bailing out of confidence shading
+# on alignment drift, empty edit meaning cancel) it is deliberate and
+# matches what the Tk pane does today.
+
+class TranscriptModel:
+    MAX_SPEAKERS = 9
+    DEFAULT_VISIBLE = 4
+    LETTERS = tuple(str(i) for i in range(1, 10))
+    _UNDO_LIMIT = 200
+
+    def __init__(self, paragraphs, speakers=None, speaker_names=None,
+                 word_conf=None, *, on_autosave=None, timer_factory=None):
+        self.paragraphs = [list(p) for p in paragraphs]
+        n = len(self.paragraphs)
+        self.speakers = (list(speakers) if speakers is not None
+                         else [None] * n)
+        self.speaker_names = {letter: f"Speaker {letter}"
+                              for letter in self.LETTERS}
+        if speaker_names:
+            self.speaker_names.update(speaker_names)
+        self.word_conf = word_conf
+        self.show_confidence = False
+        used = [int(s) for s in self.speakers if s]
+        self.visible_speakers = max(self.DEFAULT_VISIBLE,
+                                    min(max(used, default=0),
+                                        self.MAX_SPEAKERS))
+        self._next_id = 0
+        self.ids = [self._new_id() for _ in self.paragraphs]
+        self.rev = 0
+        self._undo_stack = []
+        self._redo_stack = []
+        self.on_autosave = on_autosave
+        self._timer_factory = timer_factory or (
+            lambda delay, fn: threading.Timer(delay, fn))
+        self._autosave_timer = None
+
+    def _new_id(self):
+        self._next_id += 1
+        return self._next_id
+
+    # ----- Queries ----------------------------------------------------
+
+    def body(self, idx):
+        """The paragraph's rendered text - exactly what the client
+        displays and what split()'s character offset indexes into."""
+        return " ".join(seg[2] for seg in self.paragraphs[idx]).strip()
+
+    def can_undo(self):
+        return bool(self._undo_stack)
+
+    def can_redo(self):
+        return bool(self._redo_stack)
+
+    def label_counts(self):
+        labelled = sum(1 for s in self.speakers if s is not None)
+        return labelled, len(self.speakers)
+
+    def resolved_speakers(self):
+        """Slot letters -> stripped display names (None stays None)."""
+        return [self.speaker_names.get(letter, "").strip() or None
+                if letter else None
+                for letter in self.speakers]
+
+    def playback_span(self, idx):
+        """(start_seconds, duration_or_None) covering paragraph `idx`,
+        or None if there's nothing to play. Loaded transcripts only
+        know start times (the parsers synthesise ~1s spans), so a span
+        that still looks like a placeholder plays through to the next
+        paragraph's start instead - or open-ended for the last one."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return None
+        para = self.paragraphs[idx]
+        if not para:
+            return None
+        start = max(0.0, float(para[0][0]))
+        end = float(para[-1][1])
+        if end - start <= 1.0:
+            if idx + 1 < len(self.paragraphs) and self.paragraphs[idx + 1]:
+                next_start = float(self.paragraphs[idx + 1][0][0])
+                if next_start > start:
+                    return (start, max(0.5, next_start - start + 0.3))
+            return (start, None)
+        # A touch of tail padding so the last word isn't clipped.
+        return (start, max(0.5, end - start + 0.3))
+
+    def _bucket_words_by_paragraph(self):
+        """Partition word_conf into one [(word, prob)] list per
+        paragraph by end time; single forward pass (both sides are
+        time-ordered)."""
+        buckets = [[] for _ in self.paragraphs]
+        words = self.word_conf or []
+        wi = 0
+        n_para = len(self.paragraphs)
+        for i, para in enumerate(self.paragraphs):
+            if not para:
+                continue
+            p_end = para[-1][1]
+            is_last = (i == n_para - 1)
+            while wi < len(words):
+                if not is_last and words[wi][0] >= p_end:
+                    break
+                buckets[i].append((words[wi][2], words[wi][3]))
+                wi += 1
+        return buckets
+
+    def confidence_spans(self):
+        """Per paragraph: [(start_char, end_char, "low"|"med"), ...] in
+        body() coordinates. A paragraph whose text no longer aligns
+        with the captured words gets an empty list - never a wrong
+        highlight."""
+        if not self.word_conf:
+            return [[] for _ in self.paragraphs]
+        result = []
+        for i, words_i in enumerate(self._bucket_words_by_paragraph()):
+            spans = []
+            body = self.body(i)
+            cursor = 0
+            for wtext, prob in words_i:
+                token = (wtext or "").strip()
+                if not token:
+                    continue
+                pos = body.find(token, cursor)
+                if pos < 0:
+                    spans = []      # alignment lost - leave unshaded
+                    break
+                cursor = pos + len(token)
+                if prob is None:
+                    continue
+                if prob < 0.35:
+                    spans.append((pos, cursor, "low"))
+                elif prob < 0.6:
+                    spans.append((pos, cursor, "med"))
+            result.append(spans)
+        return result
+
+    def attention_flags(self):
+        """True per paragraph when it still needs attention: no speaker,
+        or (with confidence shading on) a word below 0.6."""
+        buckets = (self._bucket_words_by_paragraph()
+                   if (self.show_confidence and self.word_conf) else None)
+        flags = []
+        for i, letter in enumerate(self.speakers):
+            if letter is None:
+                flags.append(True)
+            elif buckets is not None:
+                flags.append(any(p is not None and p < 0.6
+                                 for _, p in buckets[i]))
+            else:
+                flags.append(False)
+        return flags
+
+    def _time_at_body_offset(self, para, joined, offset):
+        """Start time of the word at/after character `offset` in
+        `joined`, from the engine's word timestamps; None when word
+        data is missing or no longer aligns with the edited text."""
+        if not self.word_conf or not para:
+            return None
+        p_start = para[0][0]
+        p_end = para[-1][1]
+        cursor = 0
+        for w_start, _w_end, w_text, _prob in self.word_conf:
+            if w_start < p_start - 0.001:
+                continue
+            if w_start > p_end + 0.001:
+                break
+            token = (w_text or "").strip()
+            if not token:
+                continue
+            pos = joined.find(token, cursor)
+            if pos < 0:
+                return None
+            if pos >= offset:
+                return float(w_start)
+            cursor = pos + len(token)
+        return None
+
+    # ----- Undo / redo / autosave --------------------------------------
+
+    def _snapshot(self):
+        return {
+            "paragraphs": [list(p) for p in self.paragraphs],
+            "speakers": list(self.speakers),
+            "speaker_names": dict(self.speaker_names),
+            "visible_speakers": self.visible_speakers,
+            "ids": list(self.ids),
+        }
+
+    def _restore(self, snap):
+        self.paragraphs = [list(p) for p in snap["paragraphs"]]
+        self.speakers = list(snap["speakers"])
+        self.speaker_names = dict(snap["speaker_names"])
+        self.visible_speakers = snap["visible_speakers"]
+        self.ids = list(snap["ids"])
+
+    def _push_undo(self):
+        self._undo_stack.append(self._snapshot())
+        if len(self._undo_stack) > self._UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        # Every mutation passes through here, so it doubles as the
+        # autosave trigger (as in the Tk pane).
+        self._schedule_autosave()
+
+    def undo(self):
+        if not self._undo_stack:
+            return False
+        self._redo_stack.append(self._snapshot())
+        self._restore(self._undo_stack.pop())
+        self.rev += 1
+        self._schedule_autosave()
+        return True
+
+    def redo(self):
+        if not self._redo_stack:
+            return False
+        self._undo_stack.append(self._snapshot())
+        self._restore(self._redo_stack.pop())
+        self.rev += 1
+        self._schedule_autosave()
+        return True
+
+    def _schedule_autosave(self):
+        """Debounced crash-recovery snapshot: fires 3s after the last
+        mutation rather than on every keystroke of a rename."""
+        if self.on_autosave is None:
+            return
+        if self._autosave_timer is not None:
+            self._autosave_timer.cancel()
+        t = self._timer_factory(3.0, self._fire_autosave)
+        if hasattr(t, "daemon"):
+            t.daemon = True
+        t.start()
+        self._autosave_timer = t
+
+    def _fire_autosave(self):
+        self._autosave_timer = None
+        if self.on_autosave is not None:
+            self.on_autosave(self.paragraphs, self.speakers,
+                             dict(self.speaker_names))
+
+    def flush_autosave(self):
+        """Run any pending autosave immediately (shutdown, tests)."""
+        if self._autosave_timer is not None:
+            self._autosave_timer.cancel()
+            self._fire_autosave()
+
+    def close(self):
+        if self._autosave_timer is not None:
+            self._autosave_timer.cancel()
+            self._autosave_timer = None
+
+    # ----- Mutations ----------------------------------------------------
+
+    def set_speaker(self, idx, letter):
+        """Assign slot `letter` ("1".."9") or None to paragraph idx."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return False
+        if letter is not None and letter not in self.LETTERS:
+            return False
+        self._push_undo()
+        self.speakers[idx] = letter
+        if letter is not None and int(letter) > self.visible_speakers:
+            self.set_visible(int(letter))
+        self.rev += 1
+        return True
+
+    def set_speaker_name(self, letter, name):
+        """Rename a slot. No undo step (matches the Tk pane, where each
+        keystroke of a rename would otherwise flood the stack), but it
+        reschedules the autosave."""
+        if letter not in self.LETTERS:
+            return False
+        self.speaker_names[letter] = name
+        self.rev += 1
+        self._schedule_autosave()
+        return True
+
+    def set_visible(self, n):
+        """Show at least `n` speaker-name fields (clamped)."""
+        n = max(self.DEFAULT_VISIBLE, min(int(n), self.MAX_SPEAKERS))
+        if n != self.visible_speakers:
+            self.visible_speakers = n
+            self.rev += 1
+        return self.visible_speakers
+
+    def commit_edit(self, idx, new_text):
+        """Replace paragraph idx's text, collapsing it to one segment
+        that keeps the original outer time span. Empty text means
+        cancel (no-op); unchanged text records no undo step."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return False
+        new_text = (new_text or "").strip()
+        if not new_text:
+            return False
+        para = self.paragraphs[idx]
+        if not para:
+            return False
+        if new_text != self.body(idx):
+            self._push_undo()
+        start_t = para[0][0]
+        end_t = para[-1][1]
+        self.paragraphs[idx] = [(start_t, end_t, new_text)]
+        self.rev += 1
+        return True
+
+    def merge_with_previous(self, idx):
+        if idx is None or idx <= 0 or idx >= len(self.paragraphs):
+            return False
+        self._push_undo()
+        self.paragraphs[idx - 1] = (list(self.paragraphs[idx - 1])
+                                    + list(self.paragraphs[idx]))
+        del self.paragraphs[idx]
+        del self.speakers[idx]
+        del self.ids[idx]
+        self.rev += 1
+        return True
+
+    def split(self, idx, offset):
+        """Split paragraphs[idx] at character `offset` within body().
+        Both halves get real start/end times: preferring the engine's
+        word timestamps, falling back to interpolating by character
+        position. The new second half keeps the speaker and gets a
+        fresh id. Returns the new paragraph's index, or None."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return None
+        para = self.paragraphs[idx]
+        if not para:
+            return None
+        joined = " ".join(seg[2] for seg in para)
+        leading_strip = len(joined) - len(joined.lstrip())
+        adjusted_offset = offset + leading_strip
+        if adjusted_offset <= 0 or adjusted_offset >= len(joined):
+            return None
+
+        seg_starts = []
+        running = ""
+        for k, (_, _, t) in enumerate(para):
+            if k > 0:
+                running += " "
+            seg_starts.append(len(running))
+            running += t
+
+        split_seg = None
+        split_within = 0
+        for k in range(len(para)):
+            seg_start = seg_starts[k]
+            seg_end = seg_start + len(para[k][2])
+            if adjusted_offset <= seg_start:
+                split_seg = k
+                split_within = 0
+                break
+            if adjusted_offset <= seg_end:
+                split_seg = k
+                split_within = adjusted_offset - seg_start
+                break
+        if split_seg is None:
+            return None
+
+        if split_within == 0:
+            first = list(para[:split_seg])
+            second = list(para[split_seg:])
+        else:
+            seg_start_t, seg_end_t, seg_text = para[split_seg]
+            text_before = seg_text[:split_within].rstrip()
+            text_after = seg_text[split_within:].lstrip()
+            split_t = self._time_at_body_offset(para, joined,
+                                                adjusted_offset)
+            if split_t is None and seg_text:
+                split_t = (seg_start_t
+                           + (seg_end_t - seg_start_t)
+                           * (split_within / len(seg_text)))
+            if split_t is None:
+                split_t = seg_start_t
+            split_t = max(seg_start_t, min(float(split_t), seg_end_t))
+            first = list(para[:split_seg])
+            if text_before:
+                first.append((seg_start_t, split_t, text_before))
+            second = []
+            if text_after:
+                second.append((split_t, seg_end_t, text_after))
+            second.extend(para[split_seg + 1:])
+
+        if not first or not second:
+            return None
+
+        self._push_undo()
+        self.paragraphs[idx] = first
+        self.paragraphs.insert(idx + 1, second)
+        self.speakers.insert(idx + 1, self.speakers[idx])
+        self.ids.insert(idx + 1, self._new_id())
+        self.rev += 1
+        return idx + 1
+
+    def replace_all(self, term, replacement, match_case=False):
+        """Replace every occurrence across the document. One undo step;
+        returns the number of replacements (0 = nothing recorded)."""
+        if not term:
+            return 0
+        flags = 0 if match_case else re.IGNORECASE
+        pattern = re.compile(re.escape(term), flags)
+        total = sum(pattern.subn(lambda _m: replacement, seg[2])[1]
+                    for para in self.paragraphs for seg in para)
+        if total == 0:
+            return 0
+        self._push_undo()
+        for para in self.paragraphs:
+            for k, seg in enumerate(para):
+                new_text, n = pattern.subn(lambda _m: replacement, seg[2])
+                if n:
+                    para[k] = (seg[0], seg[1], new_text)
+        self.rev += 1
+        return total
+
+
+def build_worker_params(settings, in_path, out_path, *,
+                        review_before_save):
+    """Assemble the transcribe_worker params dict from a validated
+    settings dict for one (in_path -> out_path) job - the module-level
+    twin of WhisperGUI._build_params. Raises _EngineNotAvailable when
+    no Whisper engine is installed."""
+    if not AVAILABLE_ENGINES:
+        raise _EngineNotAvailable(
+            "No Whisper engine is installed in this Python.\n\n"
+            "Install at least one:\n"
+            "  pip install openai-whisper\n"
+            "  pip install faster-whisper\n"
+            "  pip install mlx-whisper   (Apple Silicon only)\n")
+
+    lang_code = next(
+        (c for n, c in LANGUAGES if n == settings["language"]), "en")
+
+    extra_formats = [fmt for fmt in ("json", "srt", "vtt", "tsv")
+                     if settings.get(f"extra_{fmt}")]
+
+    # The same text is fed to Whisper as initial_prompt (helps with
+    # proper-noun accuracy) and used as the document title.
+    description = (settings.get("prompt") or "").strip()
+
+    engine_key = next(
+        (k for k, n in AVAILABLE_ENGINES if n == settings["engine"]),
+        "whisper")
+
+    return dict(
+        input=in_path,
+        output=out_path,
+        engine=engine_key,
+        model=settings["model"],
+        language=lang_code,
+        task=settings["task"],
+        temperature=settings["temperature"],
+        beam_size=settings["beam_size"],
+        best_of=settings["best_of"],
+        compression_ratio_threshold=settings[
+            "compression_ratio_threshold"],
+        logprob_threshold=settings["logprob_threshold"],
+        no_speech_threshold=settings["no_speech_threshold"],
+        condition_on_previous_text=settings["condition_on_previous_text"],
+        # Confidence highlighting requires word timestamps, so enable
+        # them whenever either option is on.
+        word_timestamps=(settings["word_timestamps"]
+                         or settings["highlight_confidence"]),
+        highlight_confidence=settings["highlight_confidence"],
+        initial_prompt=description or None,
+        # With no description, title the document after the source file
+        # (the filename is NOT fed to Whisper as a prompt - recorder
+        # names like REC_0042 would only mislead it).
+        title=description or Path(in_path).name,
+        gap=settings["gap"],
+        extra_formats=extra_formats,
+        output_format=settings["output_format"],
+        show_timestamp=settings["show_timestamp"],
+        audio_duration=get_audio_duration(in_path),
+        review_before_save=review_before_save,
+    )
+
+
+# =====================================================================
 # Web UI backend - settings contract
 # =====================================================================
 #
