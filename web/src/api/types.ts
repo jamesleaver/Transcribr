@@ -79,9 +79,20 @@ export type RunPhase =
   | "error"
   | "cancelled";
 
+export type ProgressStage =
+  | "downloading"
+  | "loading"
+  | "transcribing";
+
 export interface Progress {
   pct: number;
   status_text: string;
+  /** Which phase of the run this readout describes. Absent on older
+   *  snapshots and on the terminal done/error progress. */
+  stage?: ProgressStage;
+  /** True while the percentage is not meaningful (model loading / start of
+   *  transcription); the UI shows an animated indeterminate bar. */
+  indeterminate?: boolean;
 }
 
 export interface RunState {

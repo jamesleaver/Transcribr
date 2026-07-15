@@ -1060,6 +1060,205 @@ class _CancelledByUser(Exception):
     pass
 
 
+# Approximate on-disk download sizes per model, used only for first-run
+# messaging before the real byte totals arrive from the downloader.
+_MODEL_APPROX_MB = {
+    "tiny.en": 75, "tiny": 75,
+    "base.en": 145, "base": 145,
+    "small.en": 480, "small": 480,
+    "medium.en": 1500, "medium": 1500,
+    "large-v1": 2900, "large-v2": 2900, "large-v3": 2900, "large": 2900,
+    "turbo": 1600, "large-v3-turbo": 1600,
+}
+
+
+def _humanize_bytes(n):
+    """Compact human-readable byte count, e.g. '1.6 GB', '480 MB'."""
+    n = float(n or 0)
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.0f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{int(n)} B"
+
+
+# '[mm:ss.sss --> mm:ss.sss] text' - the line openai-whisper and
+# mlx-whisper both print when verbose=True. Parsed to drive the ETA/
+# progress readout.
+_SEGMENT_LINE_RE = re.compile(
+    r"\[(\d+):(\d+(?:\.\d+)?)\s*-->\s*(\d+):(\d+(?:\.\d+)?)\]\s*(.*)")
+
+
+class _ProgressWriter:
+    """File-like that mirrors an engine's verbose stdout/stderr to the log
+    queue while parsing segment lines to emit 'eta' progress events.
+
+    Both openai-whisper and mlx-whisper print '[mm:ss --> mm:ss] text'
+    lines as they decode (with verbose=True), so a single parser drives
+    the progress bar for both. If `captured` is a list, parsed segments
+    are appended to it - openai-whisper relies on that to salvage a
+    partial transcript when the user hits Stop mid-run."""
+
+    def __init__(self, q, audio_duration, transcribe_start, captured=None):
+        self.q = q
+        self._buf = ""
+        self.audio_duration = audio_duration
+        self.transcribe_start = transcribe_start
+        self.captured = captured
+
+    def write(self, text):
+        if not text:
+            return
+        self.q.put(("log", text))
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            m = _SEGMENT_LINE_RE.search(line)
+            if not m:
+                continue
+            sm, ss, em, es, body = m.groups()
+            start = int(sm) * 60 + float(ss)
+            end = int(em) * 60 + float(es)
+            body = body.strip()
+            if not body:
+                continue
+            if self.captured is not None:
+                self.captured.append((start, end, body))
+            if self.audio_duration and end >= 5.0:
+                wall = time.time() - self.transcribe_start
+                if wall > 0:
+                    speed = end / wall
+                    remaining = max(0.0, self.audio_duration - end)
+                    eta = remaining / speed if speed > 0 else 0
+                    self.q.put(("eta", {
+                        "audio_done": end,
+                        "audio_total": self.audio_duration,
+                        "wall_elapsed": wall,
+                        "eta_seconds": eta,
+                        "speed": speed,
+                    }))
+
+    def flush(self):
+        pass
+
+
+class _DownloadMonitor:
+    """Surfaces first-run model downloads that would otherwise look like a
+    frozen 'Loading model...'.
+
+    Every engine's downloader (openai-whisper's own fetch, and the
+    huggingface_hub fetch behind faster-whisper and mlx-whisper) reports
+    progress through a tqdm byte-scale bar. This context manager patches
+    tqdm so those bars are forwarded to the worker queue as ('download',
+    ...) messages - the controller turns them into a moving progress bar
+    with a clear 'Downloading model...' status. Non-download bars (e.g.
+    tiny config files) are ignored via a minimum-size filter.
+
+    It also honours cancel_event: pressing Stop during a download raises
+    _CancelledByUser, aborting the fetch instead of forcing the user to
+    wait for gigabytes."""
+
+    _MIN_TOTAL = 1024 * 1024  # ignore sub-1 MB bars (configs, tokenizers)
+
+    def __init__(self, q, cancel_event, model_name):
+        self.q = q
+        self.cancel_event = cancel_event
+        self.model_name = model_name
+        self._bars = {}            # id(bar) -> (downloaded, total)
+        self._tqdm = None
+        self._orig_update = None
+        self._orig_close = None
+        self._last_emit = 0.0
+        self._last_done = 0
+        self._last_speed_t = 0.0
+        self._announced = False
+
+    def _is_byte_bar(self, bar):
+        unit = getattr(bar, "unit", "") or ""
+        total = getattr(bar, "total", None) or 0
+        return "B" in unit and total >= self._MIN_TOTAL
+
+    def _snapshot(self):
+        downloaded = sum(d for d, _ in self._bars.values())
+        total = sum(t for _, t in self._bars.values())
+        return downloaded, total
+
+    def _emit(self, force=False):
+        now = time.time()
+        if not force and now - self._last_emit < 0.25:
+            return
+        downloaded, total = self._snapshot()
+        if total <= 0:
+            return
+        speed = 0.0
+        if self._last_speed_t:
+            dt = now - self._last_speed_t
+            if dt > 0:
+                speed = max(0.0, (downloaded - self._last_done) / dt)
+        self._last_speed_t = now
+        self._last_done = downloaded
+        self._last_emit = now
+        self.q.put(("download", {
+            "model": self.model_name,
+            "downloaded": downloaded,
+            "total": total,
+            "speed": speed,
+        }))
+
+    def __enter__(self):
+        try:
+            import tqdm
+        except ImportError:
+            return self          # no tqdm - degrade to no-op
+        self._tqdm = tqdm
+        monitor = self
+        self._orig_update = tqdm.tqdm.update
+        self._orig_close = tqdm.tqdm.close
+
+        def patched_update(bar, n=1):
+            result = monitor._orig_update(bar, n)
+            if monitor.cancel_event.is_set():
+                raise _CancelledByUser()
+            if monitor._is_byte_bar(bar):
+                monitor._bars[id(bar)] = (
+                    getattr(bar, "n", 0) or 0, getattr(bar, "total", 0) or 0)
+                if not monitor._announced:
+                    monitor._announced = True
+                    approx = _MODEL_APPROX_MB.get(monitor.model_name)
+                    size = f" (~{approx / 1000:.1f} GB)" if approx and \
+                        approx >= 1000 else (f" (~{approx} MB)" if approx
+                                             else "")
+                    monitor.q.put(("log",
+                                   f"Downloading model "
+                                   f"'{monitor.model_name}'{size} - first "
+                                   "use only, then it's cached locally...\n"))
+                monitor._emit()
+            return result
+
+        def patched_close(bar):
+            if monitor._is_byte_bar(bar):
+                total = getattr(bar, "total", 0) or 0
+                monitor._bars[id(bar)] = (total, total)
+                monitor._emit(force=True)
+            return monitor._orig_close(bar)
+
+        tqdm.tqdm.update = patched_update
+        tqdm.tqdm.close = patched_close
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._tqdm is not None:
+            self._tqdm.tqdm.update = self._orig_update
+            self._tqdm.tqdm.close = self._orig_close
+        if self._announced and exc_type is None:
+            _, total = self._snapshot()
+            self.q.put(("log", f"  download complete "
+                               f"({_humanize_bytes(total)})\n"))
+        return False
+
+
 def _extract_word_conf(result):
     """Flatten per-word (start, end, word, probability) tuples from a
     Whisper-style result dict. Returns [] when no word-level data is present
@@ -1193,14 +1392,19 @@ def _run_openai_whisper(params, q, cancel_event):
             "is launched from within that environment.")
 
     q.put(("log", f"Loading model '{params['model']}'...\n"))
+    q.put(("status", {"stage": "loading",
+                      "text": f"Loading model '{params['model']}'..."}))
     t0 = time.time()
-    model = whisper.load_model(params["model"])
+    with _DownloadMonitor(q, cancel_event, params["model"]):
+        model = whisper.load_model(params["model"])
     q.put(("log", f"  loaded in {time.time() - t0:.1f}s\n\n"))
 
     if cancel_event.is_set():
         return [], None, True
 
     q.put(("log", f"Transcribing {Path(params['input']).name}...\n"))
+    q.put(("status", {"stage": "transcribing",
+                      "text": "Transcribing..."}))
     t0 = time.time()
 
     kwargs = dict(
@@ -1221,55 +1425,9 @@ def _run_openai_whisper(params, q, cancel_event):
     if params.get("initial_prompt"):
         kwargs["initial_prompt"] = params["initial_prompt"]
 
-    ts_re = re.compile(
-        r"\[(\d+):(\d+(?:\.\d+)?)\s*-->\s*(\d+):(\d+(?:\.\d+)?)\]\s*(.*)"
-    )
-
-    class _CapturingWriter:
-        def __init__(self, q_, audio_duration_, t0_):
-            self.q = q_
-            self._buf = ""
-            self.audio_duration = audio_duration_
-            self.transcribe_start = t0_
-
-        def write(self, text):
-            if not text:
-                return
-            self.q.put(("log", text))
-            self._buf += text
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
-                m = ts_re.search(line)
-                if m:
-                    sm, ss, em, es, body = m.groups()
-                    start = int(sm) * 60 + float(ss)
-                    end = int(em) * 60 + float(es)
-                    body = body.strip()
-                    if body:
-                        captured_segments.append((start, end, body))
-                        if self.audio_duration and end >= 5.0:
-                            wall = time.time() - self.transcribe_start
-                            if wall > 0:
-                                speed = end / wall
-                                remaining_audio = max(
-                                    0.0, self.audio_duration - end)
-                                eta = remaining_audio / speed if speed > 0 else 0
-                                self.q.put((
-                                    "eta",
-                                    {
-                                        "audio_done": end,
-                                        "audio_total": self.audio_duration,
-                                        "wall_elapsed": wall,
-                                        "eta_seconds": eta,
-                                        "speed": speed,
-                                    },
-                                ))
-
-        def flush(self):
-            pass
-
     audio_duration = params.get("audio_duration")
-    writer = _CapturingWriter(q, audio_duration, t0)
+    writer = _ProgressWriter(q, audio_duration, t0,
+                             captured=captured_segments)
 
     original_update = tqdm.tqdm.update
 
@@ -1320,18 +1478,24 @@ def _run_faster_whisper(params, q, cancel_event):
             "faster-whisper")
 
     q.put(("log", f"Loading model '{params['model']}'...\n"))
+    q.put(("status", {"stage": "loading",
+                      "text": f"Loading model '{params['model']}'..."}))
     t0 = time.time()
     # device="auto" picks cuda if available, else cpu.
     # compute_type="auto" picks float16 on cuda, int8 on cpu - both fast,
     # both essentially indistinguishable from float32 for our use.
-    model = WhisperModel(
-        params["model"], device="auto", compute_type="auto")
+    # The download monitor surfaces the huggingface_hub fetch on first use.
+    with _DownloadMonitor(q, cancel_event, params["model"]):
+        model = WhisperModel(
+            params["model"], device="auto", compute_type="auto")
     q.put(("log", f"  loaded in {time.time() - t0:.1f}s\n\n"))
 
     if cancel_event.is_set():
         return [], None, True
 
     q.put(("log", f"Transcribing {Path(params['input']).name}...\n"))
+    q.put(("status", {"stage": "transcribing",
+                      "text": "Transcribing..."}))
     t0 = time.time()
 
     kwargs = dict(
@@ -1454,7 +1618,10 @@ def _run_mlx_whisper(params, q, cancel_event):
         condition_on_previous_text=params.get(
             "condition_on_previous_text", True),
         word_timestamps=params.get("word_timestamps", False),
-        verbose=False,
+        # verbose=True so mlx prints '[mm:ss --> mm:ss] text' segment lines
+        # as it decodes; _ProgressWriter parses them to drive the progress
+        # bar (mlx exposes no per-segment callback otherwise).
+        verbose=True,
     )
     if params.get("compression_ratio_threshold") is not None:
         kwargs["compression_ratio_threshold"] = params[
@@ -1467,8 +1634,18 @@ def _run_mlx_whisper(params, q, cancel_event):
         kwargs["initial_prompt"] = params["initial_prompt"]
 
     q.put(("log", f"Transcribing {Path(params['input']).name}...\n"))
+    q.put(("status", {"stage": "loading",
+                      "text": f"Loading model '{params['model']}'..."}))
     t0 = time.time()
-    result = mlx_whisper.transcribe(params["input"], **kwargs)
+    audio_duration = params.get("audio_duration")
+    writer = _ProgressWriter(q, audio_duration, t0)
+    # mlx downloads the model inside transcribe() on first use, so the
+    # download monitor wraps the whole call. Only stdout is redirected -
+    # the huggingface_hub download bar lives on stderr and is reported via
+    # the monitor instead of spamming the log with carriage returns.
+    with _DownloadMonitor(q, cancel_event, params["model"]):
+        with contextlib.redirect_stdout(writer):
+            result = mlx_whisper.transcribe(params["input"], **kwargs)
     q.put(("log", f"\n  transcribed in {time.time() - t0:.1f}s\n\n"))
 
     captured = [
@@ -2733,6 +2910,10 @@ class RunController:
                 self._append_log(data)
             elif kind == "eta":
                 self._handle_eta(data)
+            elif kind == "download":
+                self._handle_download(data)
+            elif kind == "status":
+                self._handle_status(data)
             elif kind == "paragraphs_ready":
                 if self.on_paragraphs_ready is not None:
                     self.on_paragraphs_ready(data)
@@ -2761,11 +2942,45 @@ class RunController:
         pct = (done / total * 100) if total else 0
         self.progress = {
             "pct": max(0.0, min(100.0, float(pct))),
+            "stage": "transcribing",
             "status_text": (
                 f"{_format_duration(done)} of {_format_duration(total)}"
                 f"   ·   about {_format_duration(info['eta_seconds'])} "
                 f"remaining   ·   {info['speed']:.1f}x audio speed"),
             **info,
+        }
+        self.broker.publish("progress", self.progress)
+
+    def _handle_download(self, info):
+        """Turn a worker 'download' message (first-run model fetch) into a
+        moving progress bar with a clear 'Downloading model...' status, so
+        a multi-gigabyte download never looks like a frozen app."""
+        downloaded = info.get("downloaded") or 0
+        total = info.get("total") or 0
+        speed = info.get("speed") or 0
+        pct = (downloaded / total * 100) if total else 0
+        parts = [f"Downloading model '{info.get('model', '')}'",
+                 f"{_humanize_bytes(downloaded)} of {_humanize_bytes(total)}"]
+        if speed > 0:
+            parts.append(f"{_humanize_bytes(speed)}/s")
+        parts.append("first use only")
+        self.progress = {
+            "pct": max(0.0, min(100.0, float(pct))),
+            "stage": "downloading",
+            "status_text": "   ·   ".join(parts),
+        }
+        self.broker.publish("progress", self.progress)
+
+    def _handle_status(self, info):
+        """A stage marker with no measurable percentage (loading a model
+        into memory, starting transcription). Shows the user which step is
+        running - as an indeterminate bar - so the flat stretches before
+        the first segment don't read as a hang."""
+        self.progress = {
+            "pct": 0.0,
+            "stage": info.get("stage", ""),
+            "indeterminate": True,
+            "status_text": info.get("text", ""),
         }
         self.broker.publish("progress", self.progress)
 

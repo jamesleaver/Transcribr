@@ -38,6 +38,19 @@
   --color-muted: var(--fg-muted);
   --color-accent: var(--accent);
   --color-accent-fg: var(--accent-fg);
+  /* Indeterminate run-bar stripe: a short bar sweeping left-to-right,
+     used while a model is loading or a download hasn't reported bytes
+     yet — so the progress card never looks frozen. */
+  --animate-progress-indeterminate: progress-indeterminate 1.3s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
 }
 
 html,

@@ -583,6 +583,145 @@ class TestRunController(unittest.TestCase):
         self.assertNotIn("two.mp3", log.split("Batch stopped")[0]
                          .split("---")[-1])
 
+    def test_download_message_produces_downloading_progress(self):
+        c, events_q = self._controller(lambda p, q, e: None)
+        c.handle_message("download", {
+            "model": "large-v3",
+            "downloaded": 512 * 1024 * 1024,
+            "total": 1024 * 1024 * 1024,
+            "speed": 20 * 1024 * 1024,
+        })
+        self.assertEqual(c.progress["stage"], "downloading")
+        self.assertAlmostEqual(c.progress["pct"], 50.0, places=3)
+        self.assertIn("Downloading model 'large-v3'",
+                      c.progress["status_text"])
+        self.assertIn("first use only", c.progress["status_text"])
+        self.assertIn("progress", self._events(events_q))
+
+    def test_status_message_is_indeterminate(self):
+        c, _ = self._controller(lambda p, q, e: None)
+        c.handle_message("status", {"stage": "loading",
+                                    "text": "Loading model 'x'..."})
+        self.assertTrue(c.progress["indeterminate"])
+        self.assertEqual(c.progress["stage"], "loading")
+        self.assertEqual(c.progress["pct"], 0.0)
+
+    def test_eta_message_tagged_transcribing(self):
+        c, _ = self._controller(lambda p, q, e: None)
+        c.handle_message("eta", {"audio_done": 30.0, "audio_total": 120.0,
+                                 "wall_elapsed": 10.0, "eta_seconds": 30.0,
+                                 "speed": 3.0})
+        self.assertEqual(c.progress["stage"], "transcribing")
+        self.assertAlmostEqual(c.progress["pct"], 25.0, places=3)
+
+
+# =====================================================================
+# First-run download / per-segment progress feedback
+# =====================================================================
+
+class TestDownloadFeedback(unittest.TestCase):
+    """The _DownloadMonitor / _ProgressWriter machinery that surfaces
+    first-run model downloads and drives the progress bar for every
+    engine (mlx-whisper included)."""
+
+    @staticmethod
+    def _drain_queue(q):
+        out = []
+        while True:
+            try:
+                out.append(q.get_nowait())
+            except Exception:
+                return out
+
+    def test_humanize_bytes(self):
+        self.assertEqual(T._humanize_bytes(0), "0 B")
+        self.assertEqual(T._humanize_bytes(512), "512 B")
+        self.assertEqual(T._humanize_bytes(2 * 1024), "2 KB")
+        self.assertEqual(T._humanize_bytes(5 * 1024 * 1024), "5 MB")
+        self.assertEqual(T._humanize_bytes(3 * 1024 ** 3), "3.0 GB")
+
+    def test_progress_writer_emits_eta_from_segment_lines(self):
+        import queue
+        q = queue.Queue()
+        w = T._ProgressWriter(q, audio_duration=120.0,
+                              transcribe_start=T.time.time() - 10.0)
+        w.write("[00:00.000 --> 00:30.000]  Hello world\n")
+        kinds, etas = [], []
+        for kind, data in self._drain_queue(q):
+            kinds.append(kind)
+            if kind == "eta":
+                etas.append(data)
+        self.assertIn("log", kinds)          # verbose line still logged
+        self.assertEqual(len(etas), 1)
+        self.assertAlmostEqual(etas[0]["audio_done"], 30.0, places=3)
+        self.assertEqual(etas[0]["audio_total"], 120.0)
+
+    def test_progress_writer_captures_segments_when_asked(self):
+        import queue
+        cap = []
+        w = T._ProgressWriter(queue.Queue(), None, 0.0, captured=cap)
+        w.write("[00:01.000 --> 00:02.500]  One two\n")
+        self.assertEqual(cap, [(1.0, 2.5, "One two")])
+
+    def test_download_monitor_forwards_byte_bars(self):
+        import io
+        import queue
+        import threading
+        try:
+            import tqdm
+        except ImportError:
+            self.skipTest("tqdm not installed")
+        q = queue.Queue()
+        cancel = threading.Event()
+        orig_update = tqdm.tqdm.update
+        with T._DownloadMonitor(q, cancel, "large-v3"):
+            bar = tqdm.tqdm(total=100 * 1024 * 1024, unit="iB",
+                            file=io.StringIO())
+            bar.n = 50 * 1024 * 1024
+            bar.update(0)   # patched update records + emits
+            bar.close()
+        msgs = self._drain_queue(q)
+        downloads = [d for (k, d) in msgs if k == "download"]
+        self.assertTrue(downloads, "expected a download progress message")
+        self.assertEqual(downloads[-1]["model"], "large-v3")
+        self.assertEqual(downloads[-1]["total"], 100 * 1024 * 1024)
+        self.assertTrue(any("Downloading model 'large-v3'" in d
+                            for (k, d) in msgs if k == "log"))
+        # tqdm's method is restored once the context exits.
+        self.assertIs(tqdm.tqdm.update, orig_update)
+
+    def test_download_monitor_ignores_tiny_bars(self):
+        import io
+        import queue
+        import threading
+        try:
+            import tqdm
+        except ImportError:
+            self.skipTest("tqdm not installed")
+        q = queue.Queue()
+        with T._DownloadMonitor(q, threading.Event(), "tiny"):
+            bar = tqdm.tqdm(total=4096, unit="iB", file=io.StringIO())
+            bar.update(1024)
+            bar.close()
+        self.assertFalse([d for (k, d) in self._drain_queue(q)
+                          if k == "download"])
+
+    def test_download_monitor_cancel_raises(self):
+        import io
+        import queue
+        import threading
+        try:
+            import tqdm
+        except ImportError:
+            self.skipTest("tqdm not installed")
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(T._CancelledByUser):
+            with T._DownloadMonitor(queue.Queue(), cancel, "m"):
+                bar = tqdm.tqdm(total=10 * 1024 * 1024, unit="iB",
+                                file=io.StringIO())
+                bar.update(1)
+
 
 # =====================================================================
 # ReviewSession

@@ -48,6 +48,21 @@ export default function RunBar() {
     (phase === "running" ? "Starting…" : phase === "done" ? "Done"
       : phase === "error" ? "Failed" : phase === "cancelled" ? "Stopped" : "");
 
+  // While running we may be downloading a model, loading it, or actually
+  // transcribing. Downloading and loading get their own caption so a long
+  // first-run wait is obviously progress, not a hang. The bar animates as
+  // an indeterminate stripe when there's no meaningful percentage yet.
+  const stage = progress?.stage;
+  const indeterminate =
+    running && (progress?.indeterminate ?? false);
+  const stageLabel =
+    running && stage === "downloading"
+      ? "Downloading model (first use)"
+      : running && stage === "loading"
+        ? "Loading model"
+        : null;
+  const showPct = (running && !indeterminate) || phase === "done";
+
   return (
     <div className="sticky bottom-0 border-t border-edge bg-surface/95 px-6 py-4 backdrop-blur">
       <div className="mx-auto max-w-5xl">
@@ -71,16 +86,29 @@ export default function RunBar() {
             {(running || phase === "done" || phase === "error" || phase === "cancelled") && (
               <>
                 <div className="flex items-baseline justify-between gap-3">
-                  <span className="truncate text-xs font-medium">{currentFile ?? ""}</span>
+                  <span className="truncate text-xs font-medium">
+                    {stageLabel ? (
+                      <>
+                        <span className="text-accent">{stageLabel}</span>
+                        {currentFile ? <span className="text-muted"> · {currentFile}</span> : null}
+                      </>
+                    ) : (
+                      currentFile ?? ""
+                    )}
+                  </span>
                   <span className="shrink-0 text-xs tabular-nums text-muted">
-                    {running || phase === "done" ? `${Math.round(pct)}%` : ""}
+                    {showPct ? `${Math.round(pct)}%` : ""}
                   </span>
                 </div>
                 <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-2">
-                  <div
-                    className="h-full rounded-full bg-accent transition-[width] duration-300"
-                    style={{ width: `${pct}%` }}
-                  />
+                  {indeterminate ? (
+                    <div className="h-full w-1/3 animate-progress-indeterminate rounded-full bg-accent" />
+                  ) : (
+                    <div
+                      className="h-full rounded-full bg-accent transition-[width] duration-300"
+                      style={{ width: `${pct}%` }}
+                    />
+                  )}
                 </div>
                 <div className="mt-1 truncate text-xs text-muted">{statusText}</div>
               </>
