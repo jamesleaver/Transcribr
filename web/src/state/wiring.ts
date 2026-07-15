@@ -38,6 +38,10 @@ onEvent("review_closed", () => {
   }
 });
 
+onEvent("audio_status", (d) => {
+  useReview.getState().setAudioStatus(d as never);
+});
+
 onEvent("review_changed", (d) => {
   const rev = (d as { rev: number }).rev;
   const doc = useReview.getState().doc;

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, ApiError } from "../api/client";
+import { playSpan, stopPlayback } from "../audio";
 import { confirmDialog, errorDialog } from "./dialogs";
 import { useApp } from "./store";
 
@@ -17,6 +18,13 @@ export interface ReviewParagraph {
   conf: [number, number, "low" | "med"][];
 }
 
+export interface AudioStatus {
+  state: "probing" | "extracting" | "ready" | "unavailable";
+  url?: string;
+  duration?: number | null;
+  error?: string;
+}
+
 export interface ReviewPayload {
   rev: number;
   out_path: string;
@@ -24,7 +32,7 @@ export interface ReviewPayload {
   show_timestamp: boolean;
   title: string | null;
   loaded: boolean;
-  audio: { state: string };
+  audio: AudioStatus;
   speaker_names: Record<string, string>;
   visible_speakers: number;
   labelled: number;
@@ -75,6 +83,10 @@ interface ReviewSlice {
   setFindTerm: (value: string) => void;
   setReplaceTerm: (value: string) => void;
   setMatchCase: (value: boolean) => void;
+
+  playing: number | null;
+  setAudioStatus: (status: AudioStatus) => void;
+  togglePlay: (index: number) => void;
 
   needsAttention: (index: number) => boolean;
   jumpNextAttention: () => void;
@@ -162,7 +174,37 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       showConfidence: payload.has_word_conf,
     }),
 
-  closeDoc: () => set({ doc: null, editing: null, searchHit: null }),
+  closeDoc: () => {
+    stopPlayback();
+    set({ doc: null, editing: null, searchHit: null, playing: null });
+  },
+
+  playing: null,
+
+  setAudioStatus: (status) =>
+    set((s) => {
+      if (!s.doc) return {};
+      if (status.state !== "ready" && s.playing !== null) stopPlayback();
+      return { doc: { ...s.doc, audio: status } };
+    }),
+
+  togglePlay: (index) => {
+    const s = get();
+    const doc = s.doc;
+    if (!doc) return;
+    if (s.playing === index) {
+      stopPlayback();
+      set({ playing: null });
+      return;
+    }
+    const span = doc.paragraphs[index]?.play;
+    if (!span || doc.audio.state !== "ready" || !doc.audio.url) return;
+    stopPlayback();
+    set({ playing: index });
+    playSpan(doc.audio.url, span, () => {
+      if (useReview.getState().playing === index) set({ playing: null });
+    });
+  },
 
   refetch: async () => {
     try {

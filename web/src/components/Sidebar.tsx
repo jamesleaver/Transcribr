@@ -1,4 +1,5 @@
 import type { JSX } from "react";
+import { alertDialog } from "../state/dialogs";
 import { useApp, type View } from "../state/store";
 import { useReview } from "../state/reviewStore";
 import type { ThemeSetting } from "../api/types";
@@ -71,6 +72,38 @@ export default function Sidebar() {
       </nav>
 
       <div className="mt-auto flex flex-col items-center gap-2">
+        <button
+          onClick={() =>
+            void alertDialog(
+              "Keyboard shortcuts",
+              "In the review workspace:",
+              [
+                "1–9      assign speaker (auto-advances)",
+                "0        clear speaker",
+                "M        merge with previous paragraph",
+                "N        next paragraph needing attention",
+                "P        play/stop the selected paragraph",
+                "Enter    edit paragraph (Enter commits, Esc cancels)",
+                "double-click a word to split there",
+                "⌘Z / ⌘⇧Z / ⌘Y   undo / redo",
+                "⌘F       find",
+              ].join("\n"),
+            )
+          }
+          title="Keyboard shortcuts"
+          className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        >
+          <Icon d="M9 9a3 3 0 1 1 4.6 2.5c-.9.6-1.6 1.1-1.6 2.5m0 3.5v.01" />
+        </button>
+        <button
+          onClick={() =>
+            void alertDialog("About Transcribr", meta?.about_text ?? "")
+          }
+          title="About Transcribr"
+          className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        >
+          <Icon d="M12 8v.01M12 11v5m0 5a9 9 0 1 1 0-18 9 9 0 0 1 0 18z" />
+        </button>
         <button
           onClick={cycleTheme}
           title={THEME_LABEL[theme]}

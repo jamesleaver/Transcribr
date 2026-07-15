@@ -66,7 +66,8 @@ export function useReviewHotkeys(): void {
           st.jumpNextAttention();
           return;
         case "p": case "P":
-          e.preventDefault();          // playback arrives in Phase 4
+          e.preventDefault();
+          st.togglePlay(st.selected);
           return;
         case "Enter": case "F2":
           e.preventDefault();

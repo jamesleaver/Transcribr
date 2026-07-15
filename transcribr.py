@@ -7402,6 +7402,144 @@ class RunController:
 
 
 # =====================================================================
+# Web UI backend - audio preparation for playback
+# =====================================================================
+#
+# The review pane's <audio> element needs a source both webviews can
+# actually play and seek: mp3/m4a/aac/wav are served as-is; anything
+# else (video containers, flac/ogg/opus) is extracted once to AAC in
+# an .m4a, cached under the config dir keyed by (path, size, mtime).
+# When the source's audio stream is already AAC the extraction is a
+# near-instant remux (-c:a copy). WKWebView refuses media from servers
+# without Range support, which is why /audio/current is served through
+# bottle's static_file.
+
+_AUDIO_PASSTHROUGH_EXTS = {".mp3", ".m4a", ".aac", ".wav"}
+_AUDIO_CACHE_MAX_FILES = 8
+_AUDIO_CACHE_MAX_BYTES = 1_000_000_000
+
+
+def _audio_cache_dir():
+    d = _config_dir() / "audio_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _sweep_audio_cache():
+    """Keep the newest few extracts within the size budget."""
+    try:
+        files = sorted(_audio_cache_dir().glob("*.m4a"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        total = 0
+        for i, p in enumerate(files):
+            total += p.stat().st_size
+            if i >= _AUDIO_CACHE_MAX_FILES or total > _AUDIO_CACHE_MAX_BYTES:
+                p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _audio_cache_key(path):
+    import hashlib
+    st = Path(path).stat()
+    raw = f"{Path(path).resolve()}|{st.st_size}|{st.st_mtime_ns}"
+    return hashlib.sha1(raw.encode()).hexdigest()
+
+
+def _source_audio_codec(path):
+    """The first audio stream's codec name, or None."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+             str(path)],
+            capture_output=True, text=True, timeout=30)
+        codec = (out.stdout or "").strip()
+        return codec or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+class AudioPrep:
+    """Prepares one review session's audio for the <audio> element on a
+    background thread, reporting progress as audio_status SSE events.
+    States: probing -> extracting -> ready | unavailable."""
+
+    def __init__(self, audio_path, broker):
+        self.source = audio_path
+        self.broker = broker
+        self.state = "unavailable" if not audio_path else "probing"
+        self.serve_path = None
+        self.duration = None
+        self.error = None
+        if audio_path:
+            threading.Thread(target=self._run, daemon=True,
+                             name="transcribr-audio").start()
+
+    def status(self):
+        out = {"state": self.state}
+        if self.state == "ready":
+            out["url"] = "/audio/current"
+            out["duration"] = self.duration
+        if self.error:
+            out["error"] = self.error
+        return out
+
+    def _set(self, state, error=None):
+        self.state = state
+        self.error = error
+        self.broker.publish("audio_status", self.status())
+
+    def _run(self):
+        try:
+            src = Path(self.source)
+            if not src.exists():
+                self._set("unavailable", "Source audio not found.")
+                return
+            self.duration = get_audio_duration(str(src))
+            if src.suffix.lower() in _AUDIO_PASSTHROUGH_EXTS:
+                self.serve_path = str(src)
+                self._set("ready")
+                return
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                self._set("unavailable",
+                          "ffmpeg is needed to play this file type.")
+                return
+            target = _audio_cache_dir() / f"{_audio_cache_key(src)}.m4a"
+            if target.exists():
+                self.serve_path = str(target)
+                self._set("ready")
+                return
+            self._set("extracting")
+            codec_args = (["-c:a", "copy"]
+                          if _source_audio_codec(src) == "aac"
+                          else ["-c:a", "aac", "-b:a", "128k"])
+            tmp = target.with_suffix(".part.m4a")
+            cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                   "-i", str(src), "-vn", "-map", "0:a:0",
+                   *codec_args, str(tmp)]
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=1800)
+            if proc.returncode != 0 or not tmp.exists():
+                detail = (proc.stderr or "").strip().splitlines()
+                self._set("unavailable",
+                          detail[-1] if detail else "Extraction failed.")
+                tmp.unlink(missing_ok=True)
+                return
+            os.replace(tmp, target)
+            _sweep_audio_cache()
+            self.serve_path = str(target)
+            self._set("ready")
+        except Exception as e:
+            _log(f"audio prep failed: {traceback.format_exc()}")
+            self._set("unavailable", f"{type(e).__name__}: {e}")
+
+
+# =====================================================================
 # Web UI backend - review session
 # =====================================================================
 
@@ -7500,6 +7638,7 @@ class ReviewSession:
         self._log_line = log or (lambda text: None)
         self.lock = threading.RLock()
         self.closed = False
+        self.audio_status_fn = None   # set by the backend (AudioPrep)
         preset_speakers = info.get("preset_speakers") or None
         self.model = TranscriptModel(
             info["paragraphs"],
@@ -7573,7 +7712,9 @@ class ReviewSession:
                 "show_timestamp": self.show_timestamp,
                 "title": self.title,
                 "loaded": self.loaded,
-                "audio": {"state": "unavailable"},   # audio lands in P4
+                "audio": (self.audio_status_fn()
+                          if self.audio_status_fn is not None
+                          else {"state": "unavailable"}),
                 "speaker_names": dict(m.speaker_names),
                 "visible_speakers": m.visible_speakers,
                 "labelled": labelled,
@@ -7779,6 +7920,7 @@ class WebBackend:
         self.controller = RunController(self.broker)
         self.controller.on_paragraphs_ready = self._open_review_fresh
         self.review = None        # the open ReviewSession, if any
+        self.audio = None         # AudioPrep for the open session
         self.server = None        # set by serve()
         self.has_window = False   # True once a pywebview window owns us
         self._pump_stop = threading.Event()
@@ -7793,6 +7935,7 @@ class WebBackend:
         self.controller._publish_run_state()
         session = ReviewSession.from_fresh(
             info, self.broker, log=self.controller._append_log)
+        self._attach_audio(session)
         self.review = session
         self.broker.publish("review_opened", {"review": session.payload()})
 
@@ -7800,9 +7943,14 @@ class WebBackend:
         """Open a session for a loaded transcript or autosave restore."""
         session = ReviewSession(info, self.broker,
                                 log=self.controller._append_log)
+        self._attach_audio(session)
         self.review = session
         self.broker.publish("review_opened", {"review": session.payload()})
         return session
+
+    def _attach_audio(self, session):
+        self.audio = AudioPrep(session.audio_path, self.broker)
+        session.audio_status_fn = self.audio.status
 
     def _live_review(self):
         session = self.review
@@ -8014,6 +8162,20 @@ class WebBackend:
             _autosave_clear()
             return {"ok": True}
 
+        # -- audio ---------------------------------------------------------
+
+        @app.get("/audio/current")
+        def audio_current():
+            prep = backend.audio
+            if (prep is None or prep.state != "ready"
+                    or not prep.serve_path):
+                _fail(ApiFail(404, "no_audio", "No audio is ready."))
+            p = Path(prep.serve_path)
+            mimetype = ("audio/mp4" if p.suffix.lower() == ".m4a"
+                        else "auto")
+            return bottle.static_file(p.name, root=str(p.parent),
+                                      mimetype=mimetype)
+
         # -- run / batch -------------------------------------------------
 
         @app.post("/api/run")
@@ -8034,6 +8196,9 @@ class WebBackend:
         def api_batch():
             body = bottle.request.json or {}
             try:
+                if backend.review is not None and not backend.review.closed:
+                    raise ApiFail(409, "review_open",
+                                  "Finish the open review first.")
                 run_id = backend.controller.start_batch(
                     body.get("files") or [], current_settings(),
                     force=bool(body.get("force")))

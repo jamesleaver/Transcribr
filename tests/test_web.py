@@ -751,6 +751,76 @@ class TestReviewSession(unittest.TestCase):
 
 
 # =====================================================================
+# AudioPrep
+# =====================================================================
+
+class TestAudioPrep(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-audio-")
+        self.addCleanup(self.tmp.cleanup)
+        self.broker = T.EventBroker()
+
+    @staticmethod
+    def _wait(prep, timeout=15.0):
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while prep.state not in ("ready", "unavailable"):
+            if _time.monotonic() > deadline:
+                raise AssertionError(f"stuck in {prep.state!r}")
+            _time.sleep(0.05)
+
+    def _tiny_wav(self):
+        import wave
+        p = Path(self.tmp.name) / "tone.wav"
+        with wave.open(str(p), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(b"\x00\x00" * 4000)   # 0.5s of silence
+        return p
+
+    def test_no_source_is_unavailable(self):
+        prep = T.AudioPrep(None, self.broker)
+        self.assertEqual(prep.state, "unavailable")
+        self.assertEqual(prep.status(), {"state": "unavailable"})
+
+    def test_missing_file_is_unavailable(self):
+        prep = T.AudioPrep(str(Path(self.tmp.name) / "ghost.mp3"),
+                           self.broker)
+        self._wait(prep)
+        self.assertEqual(prep.state, "unavailable")
+
+    def test_passthrough_serves_source(self):
+        wav = self._tiny_wav()
+        prep = T.AudioPrep(str(wav), self.broker)
+        self._wait(prep)
+        self.assertEqual(prep.state, "ready")
+        self.assertEqual(prep.serve_path, str(wav))
+        self.assertEqual(prep.status()["url"], "/audio/current")
+
+    @unittest.skipUnless(T.shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_extracts_non_passthrough_and_caches(self):
+        import subprocess as sp
+        wav = self._tiny_wav()
+        flac = Path(self.tmp.name) / "tone.flac"
+        sp.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(wav), str(flac)], check=True, timeout=60)
+
+        prep = T.AudioPrep(str(flac), self.broker)
+        self._wait(prep)
+        self.assertEqual(prep.state, "ready", prep.error)
+        self.assertTrue(prep.serve_path.endswith(".m4a"))
+        cached = Path(prep.serve_path)
+        self.assertTrue(cached.exists())
+        self.assertEqual(cached.parent, T._audio_cache_dir())
+
+        # Second prep of the same source hits the cache.
+        prep2 = T.AudioPrep(str(flac), self.broker)
+        self._wait(prep2)
+        self.assertEqual(prep2.serve_path, prep.serve_path)
+
+
+# =====================================================================
 # build_worker_params
 # =====================================================================
 

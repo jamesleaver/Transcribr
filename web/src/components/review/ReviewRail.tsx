@@ -120,12 +120,60 @@ function FindReplace() {
   );
 }
 
+function PlaybackCard() {
+  const audio = useReview((s) => s.doc?.audio);
+  const playing = useReview((s) => s.playing);
+  const selected = useReview((s) => s.selected);
+  if (!audio) return null;
+
+  const label =
+    audio.state === "ready"
+      ? playing !== null
+        ? "■ Stop"
+        : "▶ Play paragraph"
+      : audio.state === "probing"
+        ? "Checking audio…"
+        : audio.state === "extracting"
+          ? "Preparing audio…"
+          : null;
+
+  return (
+    <section className="rounded-xl border border-edge bg-surface p-4">
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+        Playback
+      </h2>
+      {label === null ? (
+        <p className="text-[11px] leading-relaxed text-muted">
+          No audio available for this transcript
+          {audio.error ? ` — ${audio.error}` : "."}
+        </p>
+      ) : (
+        <>
+          <button
+            className="w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-40"
+            disabled={audio.state !== "ready"}
+            onClick={() =>
+              useReview.getState().togglePlay(playing ?? selected)
+            }
+          >
+            {label}
+          </button>
+          <p className="mt-2 text-[11px] text-muted">
+            P plays the selected paragraph; press again to stop.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function ReviewRail() {
   const hasConf = useReview((s) => s.doc?.has_word_conf ?? false);
   const showConf = useReview((s) => s.showConfidence);
   return (
     <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
       <SpeakersPanel />
+      <PlaybackCard />
       <FindReplace />
       {hasConf && (
         <section className="rounded-xl border border-edge bg-surface p-4">
@@ -136,9 +184,6 @@ export default function ReviewRail() {
           />
         </section>
       )}
-      <section className="rounded-xl border border-dashed border-edge p-4 text-[11px] text-muted">
-        Audio playback (P key) arrives in Phase 4.
-      </section>
     </aside>
   );
 }
