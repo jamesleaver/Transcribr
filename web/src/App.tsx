@@ -1,3 +1,4 @@
+import DialogHost from "./components/DialogHost";
 import Sidebar from "./components/Sidebar";
 import LibraryView from "./views/LibraryView";
 import ReviewView from "./views/ReviewView";
@@ -42,6 +43,7 @@ export default function App() {
         {view === "review" && <ReviewView />}
         {view === "library" && <LibraryView />}
       </main>
+      <DialogHost />
     </div>
   );
 }

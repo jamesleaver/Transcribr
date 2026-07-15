@@ -7043,6 +7043,367 @@ def _sse_format(item):
 
 
 # =====================================================================
+# Web UI backend - run controller
+# =====================================================================
+
+class ApiFail(Exception):
+    """A request failure with an HTTP status and machine-readable code;
+    the route layer turns it into a JSON error response."""
+
+    def __init__(self, status, code, message, **extra):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.extra = extra
+
+
+_NO_ENGINE_HINT = (
+    "No Whisper engine is installed in this Python.\n\n"
+    "Install at least one:\n"
+    "  pip install openai-whisper\n"
+    "  pip install faster-whisper\n"
+    "  pip install mlx-whisper   (Apple Silicon only)")
+
+
+class RunController:
+    """Single-run and batch state machine - the module-level twin of
+    WhisperGUI's run/batch/stop handlers. Mutating entry points raise
+    ApiFail on validation problems; progress flows out as SSE events
+    via the broker. `worker_fn` is injectable for tests."""
+
+    _LOG_CAP = 4000          # lines kept for late-joining clients
+
+    def __init__(self, broker, *, worker_fn=None):
+        self.broker = broker
+        self.queue = queue.Queue()
+        self.cancel_event = threading.Event()
+        self.worker = None
+        self.worker_fn = worker_fn or transcribe_worker
+        self.lock = threading.RLock()
+        self._batch = None
+        self.phase = "idle"    # idle|running|stopping|done|error|cancelled
+        self.current_file = None
+        self.run_id = 0
+        self.last_output = None
+        self.log_lines = []
+        self.progress = None
+        # Phase 3 sets this to route paragraphs_ready into a review
+        # session; until then runs force review_before_save=False.
+        self.on_paragraphs_ready = None
+
+    # ----- Snapshots ----------------------------------------------------
+
+    def state(self):
+        with self.lock:
+            batch = None
+            if self._batch is not None:
+                batch = {"index": self._batch["index"],
+                         "total": len(self._batch["items"])}
+            return {
+                "phase": self.phase,
+                "file": self.current_file,
+                "run_id": self.run_id,
+                "batch": batch,
+                "out_path": self.last_output,
+                "progress": self.progress,
+                "log": "".join(self.log_lines)[-40000:],
+            }
+
+    def _publish_run_state(self, **extra):
+        self.broker.publish("run_state", {**{
+            "phase": self.phase,
+            "file": self.current_file,
+            "run_id": self.run_id,
+            "batch": (None if self._batch is None else
+                      {"index": self._batch["index"],
+                       "total": len(self._batch["items"])}),
+            "out_path": self.last_output,
+        }, **extra})
+
+    def _append_log(self, text):
+        self.log_lines.append(text)
+        if len(self.log_lines) > self._LOG_CAP:
+            del self.log_lines[:len(self.log_lines) - self._LOG_CAP]
+        self.broker.publish("log", {"text": text})
+
+    def _reset_log(self):
+        self.log_lines = []
+
+    # ----- Starting work -------------------------------------------------
+
+    def _ensure_idle(self):
+        if self.phase in ("running", "stopping"):
+            raise ApiFail(409, "busy", "A transcription is already "
+                                       "running.")
+
+    def _spawn(self, params):
+        self.cancel_event.clear()
+        self.worker = threading.Thread(
+            target=self.worker_fn,
+            args=(params, self.queue, self.cancel_event),
+            daemon=True)
+        self.worker.start()
+
+    def start_single(self, in_path, out_path, settings, *, force=False):
+        """Validate and launch one transcription. Returns the new
+        run_id. Mirrors WhisperGUI._on_run."""
+        with self.lock:
+            self._ensure_idle()
+            in_path = (in_path or "").strip()
+            if not in_path:
+                raise ApiFail(400, "missing_input",
+                              "Please choose an input audio/video file, "
+                              "or add files to the batch queue.")
+            if not Path(in_path).exists():
+                raise ApiFail(400, "input_not_found",
+                              f"Input file does not exist:\n{in_path}",
+                              path=in_path)
+            out_path = (out_path or "").strip()
+            if not out_path:
+                ext = settings["output_format"]
+                out_path = str(Path(in_path).with_suffix(
+                    f".transcript.{ext}"))
+            if Path(out_path).exists() and not force:
+                raise ApiFail(409, "output_exists",
+                              f"The output file already exists:\n\n"
+                              f"{out_path}", path=out_path)
+            try:
+                # Interactive review arrives with the Phase 3 review
+                # surface; until then transcripts save directly.
+                params = build_worker_params(
+                    settings, in_path, out_path,
+                    review_before_save=False)
+            except _EngineNotAvailable:
+                raise ApiFail(409, "no_engine", _NO_ENGINE_HINT)
+
+            self._batch = None
+            self.run_id += 1
+            self.phase = "running"
+            self.current_file = Path(in_path).name
+            self.last_output = None
+            self.progress = None
+            self._reset_log()
+            self._publish_run_state()
+            self._append_log(f"=== {Path(in_path).name} ===\n")
+            self._spawn(params)
+            return self.run_id
+
+    def start_batch(self, files, settings, *, force=False):
+        """Validate and launch a sequential unattended batch (never
+        reviews). Mirrors WhisperGUI._start_batch."""
+        with self.lock:
+            self._ensure_idle()
+            files = [f for f in (files or []) if (f or "").strip()]
+            if not files:
+                raise ApiFail(400, "missing_input",
+                              "The batch queue is empty.")
+            ext = settings["output_format"]
+            items = []
+            missing = []
+            for in_path in files:
+                if not Path(in_path).exists():
+                    missing.append(in_path)
+                    continue
+                items.append((in_path, str(Path(in_path).with_suffix(
+                    f".transcript.{ext}"))))
+            if missing:
+                raise ApiFail(400, "missing_inputs",
+                              "These queued files no longer exist.",
+                              missing=missing)
+            existing = [o for _, o in items if Path(o).exists()]
+            if existing and not force:
+                raise ApiFail(409, "outputs_exist",
+                              f"{len(existing)} output file(s) already "
+                              "exist and will be overwritten.",
+                              existing=existing[:8], total=len(existing))
+            try:
+                # Probe once so an engine problem surfaces before any
+                # file is committed to the run.
+                build_worker_params(settings, items[0][0], items[0][1],
+                                    review_before_save=False)
+            except _EngineNotAvailable:
+                raise ApiFail(409, "no_engine", _NO_ENGINE_HINT)
+
+            self._batch = {"items": items, "index": 0, "settings":
+                           dict(settings), "succeeded": [], "failed": [],
+                           "stop": False}
+            self.run_id += 1
+            self.last_output = None
+            self.progress = None
+            self._reset_log()
+            self._append_log(
+                f"=== Batch: {len(items)} file(s) queued ===\n")
+            self._start_batch_item()
+            return self.run_id
+
+    def _start_batch_item(self):
+        b = self._batch
+        if b is None:
+            return
+        idx = b["index"]
+        in_path, out_path = b["items"][idx]
+        n = len(b["items"])
+        self._append_log(
+            f"\n--- File {idx + 1} of {n}: {Path(in_path).name} ---\n")
+        self.phase = "running"
+        self.current_file = f"{Path(in_path).name}  (file {idx + 1} of {n})"
+        self.progress = None
+        try:
+            params = build_worker_params(b["settings"], in_path, out_path,
+                                         review_before_save=False)
+        except _EngineNotAvailable:
+            # Engine vanished mid-run; abort the batch.
+            self._finish_batch(stopped=True)
+            return
+        self._publish_run_state()
+        self._spawn(params)
+
+    def stop(self):
+        """Stop after the current segment (single) / current file
+        (batch), saving the partial transcript. Mirrors _on_stop."""
+        with self.lock:
+            if self._batch is not None:
+                self._batch["stop"] = True
+            if self.worker and self.worker.is_alive():
+                self.cancel_event.set()
+                self.phase = "stopping"
+                self._append_log(
+                    "\n[Stop requested - finishing current segment "
+                    "and saving partial transcript...]\n")
+                self._publish_run_state()
+                return True
+            return False
+
+    # ----- Worker-queue dispatch (called from the pump thread) -----------
+
+    def handle_message(self, kind, data):
+        with self.lock:
+            if kind == "log":
+                self._append_log(data)
+            elif kind == "eta":
+                self._handle_eta(data)
+            elif kind == "paragraphs_ready":
+                if self.on_paragraphs_ready is not None:
+                    self.on_paragraphs_ready(data)
+                else:
+                    self._append_log("\n[Internal: review payload arrived "
+                                     "with no review surface]\n")
+            elif kind == "done":
+                if self._batch is not None:
+                    self._batch_item_done(data, error=None)
+                else:
+                    self._on_done(data)
+            elif kind == "error":
+                if self._batch is not None:
+                    self._batch_item_done(None, error=data)
+                else:
+                    self._on_error(data)
+            elif kind == "cancelled":
+                if self._batch is not None:
+                    self._batch_cancelled(data)
+                else:
+                    self._on_cancelled(data)
+
+    def _handle_eta(self, info):
+        done = info["audio_done"]
+        total = info["audio_total"]
+        pct = (done / total * 100) if total else 0
+        self.progress = {
+            "pct": max(0.0, min(100.0, float(pct))),
+            "status_text": (
+                f"{_format_duration(done)} of {_format_duration(total)}"
+                f"   ·   about {_format_duration(info['eta_seconds'])} "
+                f"remaining   ·   {info['speed']:.1f}x audio speed"),
+            **info,
+        }
+        self.broker.publish("progress", self.progress)
+
+    def _on_done(self, output_path):
+        self.phase = "done"
+        self.last_output = output_path
+        self.progress = {"pct": 100.0, "status_text": "Done"}
+        self.broker.publish("progress", self.progress)
+        self._append_log("\n=== Done ===\n")
+        if output_path and Path(output_path).exists():
+            _recent_add(output_path)
+            self.broker.publish("recents", {})
+        self._publish_run_state()
+
+    def _on_error(self, message):
+        self.phase = "error"
+        first_line = (message.splitlines()[0] if message
+                      else "Unknown error")
+        self._append_log(f"\n!!! Error !!!\n{message}\n")
+        self._publish_run_state(message=message, first_line=first_line)
+
+    def _on_cancelled(self, message):
+        self.phase = "cancelled"
+        if message:
+            self._append_log(f"\n=== Stopped: {message} ===\n")
+        else:
+            self._append_log("\n=== Stopped ===\n")
+        self._publish_run_state()
+
+    def _batch_item_done(self, output_path, error):
+        b = self._batch
+        if b is None:
+            return
+        idx = b["index"]
+        in_path = b["items"][idx][0]
+        if error is not None:
+            first_line = (error.splitlines()[0] if error
+                          else "Unknown error")
+            b["failed"].append([in_path, first_line])
+            self._append_log(
+                f"FAILED: {Path(in_path).name}: {first_line}\n")
+        else:
+            b["succeeded"].append(output_path)
+            if output_path and Path(output_path).exists():
+                _recent_add(output_path)
+                self.broker.publish("recents", {})
+        if b["stop"]:
+            self._finish_batch(stopped=True)
+            return
+        b["index"] += 1
+        if b["index"] < len(b["items"]):
+            self._start_batch_item()
+        else:
+            self._finish_batch(stopped=False)
+
+    def _batch_cancelled(self, message):
+        if self._batch is None:
+            return
+        if message:
+            self._append_log(f"\n=== Stopped: {message} ===\n")
+        self._finish_batch(stopped=True)
+
+    def _finish_batch(self, *, stopped):
+        b = self._batch
+        self._batch = None
+        succeeded = b["succeeded"] if b else []
+        failed = b["failed"] if b else []
+        if succeeded:
+            self.last_output = succeeded[-1]
+        head = "Batch stopped" if stopped else "Batch complete"
+        self.phase = "cancelled" if stopped else "done"
+        self.current_file = head
+        lines = [f"\n=== {head} ===",
+                 f"Transcribed: {len(succeeded)}",
+                 f"Failed: {len(failed)}"]
+        for in_path, why in failed:
+            lines.append(f"  - {Path(in_path).name}: {why}")
+        lines.append("Open each transcript from the Library to review "
+                     "and label speakers.")
+        self._append_log("\n".join(lines) + "\n")
+        self.broker.publish("batch_done", {
+            "stopped": stopped,
+            "succeeded": succeeded,
+            "failed": failed,
+        })
+        self._publish_run_state()
+
+
+# =====================================================================
 # Web UI backend - HTTP server (bottle on a threading WSGI server)
 # =====================================================================
 #
@@ -7063,8 +7424,27 @@ class WebBackend:
     def __init__(self, token):
         self.token = token
         self.broker = EventBroker()
+        self.controller = RunController(self.broker)
         self.server = None        # set by serve()
         self.has_window = False   # True once a pywebview window owns us
+        self._pump_stop = threading.Event()
+
+    def start_pump(self):
+        """Drain the worker queue on a daemon thread, dispatching into
+        the controller (whose handlers publish SSE) - the web
+        replacement for WhisperGUI._poll_queue's after() loop."""
+        def pump():
+            while not self._pump_stop.is_set():
+                try:
+                    kind, data = self.controller.queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                try:
+                    self.controller.handle_message(kind, data)
+                except Exception:
+                    _log("web pump error:\n" + traceback.format_exc())
+        threading.Thread(target=pump, daemon=True,
+                         name="transcribr-pump").start()
 
     # -- routes ---------------------------------------------------------
 
@@ -7125,8 +7505,15 @@ class WebBackend:
                 "readme_available": _find_readme() is not None,
             }
 
-        @app.get("/api/state")
-        def api_state():
+        def _fail(e):
+            raise bottle.HTTPResponse(
+                body=json.dumps({"error": {"code": e.code,
+                                           "message": str(e),
+                                           **e.extra}}),
+                status=e.status,
+                headers={"Content-Type": "application/json"})
+
+        def _recents_payload():
             recents = []
             for p in _recent_load():
                 try:
@@ -7136,12 +7523,155 @@ class WebBackend:
                 if exists:
                     recents.append({"path": p, "name": Path(p).name,
                                     "exists": True})
+            return recents
+
+        @app.get("/api/state")
+        def api_state():
             return {
-                "run": None,
+                "run": backend.controller.state(),
                 "review": None,
                 "autosave_pending": bool(_autosave_load()),
-                "recents": recents,
+                "recents": _recents_payload(),
             }
+
+        # -- run / batch -------------------------------------------------
+
+        @app.post("/api/run")
+        def api_run():
+            body = bottle.request.json or {}
+            try:
+                run_id = backend.controller.start_single(
+                    body.get("input"), body.get("output"),
+                    current_settings(), force=bool(body.get("force")))
+            except ApiFail as e:
+                _fail(e)
+            return {"run_id": run_id}
+
+        @app.post("/api/batch")
+        def api_batch():
+            body = bottle.request.json or {}
+            try:
+                run_id = backend.controller.start_batch(
+                    body.get("files") or [], current_settings(),
+                    force=bool(body.get("force")))
+            except ApiFail as e:
+                _fail(e)
+            return {"run_id": run_id,
+                    "count": len(body.get("files") or [])}
+
+        @app.post("/api/run/stop")
+        def api_run_stop():
+            stopping = backend.controller.stop()
+            return {"ok": True, "stopping": stopping}
+
+        # -- files & dialogs ----------------------------------------------
+
+        @app.post("/api/files/inspect")
+        def api_files_inspect():
+            body = bottle.request.json or {}
+            fmt = current_settings()["output_format"]
+            out = []
+            for p in (body.get("paths") or [])[:200]:
+                try:
+                    exists = Path(p).exists()
+                except OSError:
+                    exists = False
+                out.append({
+                    "path": p,
+                    "name": Path(p).name,
+                    "exists": exists,
+                    "derived_output": str(Path(p).with_suffix(
+                        f".transcript.{fmt}")),
+                })
+            return {"files": out}
+
+        @app.post("/api/pick")
+        def api_pick():
+            body = bottle.request.json or {}
+            try:
+                result = backend.pick_files(
+                    kind=body.get("kind", "media"),
+                    multiple=bool(body.get("multiple")),
+                    initial=body.get("initial"),
+                    fmt=body.get("format"))
+            except ApiFail as e:
+                _fail(e)
+            return result
+
+        # -- paths, log, readme -------------------------------------------
+
+        @app.post("/api/path/open")
+        def api_path_open():
+            body = bottle.request.json or {}
+            p = body.get("path") or ""
+            if not Path(p).exists():
+                _fail(ApiFail(400, "not_found", f"No such file: {p}"))
+            _open_path(p)
+            return {"ok": True}
+
+        @app.post("/api/path/reveal")
+        def api_path_reveal():
+            body = bottle.request.json or {}
+            p = body.get("path") or ""
+            if not Path(p).exists():
+                _fail(ApiFail(400, "not_found", f"No such file: {p}"))
+            _reveal_path(p)
+            return {"ok": True}
+
+        @app.get("/api/log")
+        def api_log():
+            bottle.response.content_type = "text/plain; charset=utf-8"
+            try:
+                lines = int(bottle.request.query.get("lines", "500"))
+            except ValueError:
+                lines = 500
+            try:
+                text = _log_file_path().read_text(errors="replace")
+            except OSError:
+                return ""
+            return "\n".join(text.splitlines()[-lines:])
+
+        @app.post("/api/log/open")
+        def api_log_open():
+            body = bottle.request.json or {}
+            p = _log_file_path()
+            if not p.exists():
+                _fail(ApiFail(400, "not_found", "No log file yet."))
+            if body.get("reveal"):
+                _reveal_path(str(p))
+            else:
+                _open_path(str(p))
+            return {"ok": True}
+
+        @app.get("/api/readme")
+        def api_readme():
+            p = _find_readme()
+            if p is None:
+                _fail(ApiFail(404, "not_found", "README not found."))
+            try:
+                return {"path": str(p), "text": p.read_text(
+                    encoding="utf-8", errors="replace")}
+            except OSError as e:
+                _fail(ApiFail(500, "read_failed", str(e)))
+
+        @app.post("/api/client-error")
+        def api_client_error():
+            body = bottle.request.json or {}
+            _log("web client error: "
+                 f"{body.get('message')}\n{body.get('stack', '')}")
+            return {"ok": True}
+
+        # -- recents -------------------------------------------------------
+
+        @app.get("/api/recents")
+        def api_recents():
+            return {"items": _recents_payload()}
+
+        @app.post("/api/recents/clear")
+        def api_recents_clear():
+            _recent_save([])
+            backend.broker.publish("recents", {})
+            return {"ok": True}
 
         # -- settings ----------------------------------------------------
 
@@ -7213,6 +7743,36 @@ class WebBackend:
 
         return app
 
+    # -- native dialogs ----------------------------------------------------
+
+    def pick_files(self, *, kind, multiple=False, initial=None, fmt=None):
+        """Show a native file dialog and return real filesystem paths.
+        Until the pywebview window exists (Phase 5) this falls back to a
+        one-shot tkinter dialog in a subprocess - development only."""
+        script = _PICK_SCRIPT
+        args = [sys.executable, "-c", script, kind,
+                "1" if multiple else "0", initial or "", fmt or ""]
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True,
+                                  timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise ApiFail(501, "no_dialog",
+                          f"No file dialog available: {e}")
+        if proc.returncode != 0:
+            raise ApiFail(501, "no_dialog",
+                          "No file dialog available in this mode "
+                          "(tkinter missing). Type the path instead.")
+        import json
+        try:
+            paths = json.loads(proc.stdout.strip() or "[]")
+        except ValueError:
+            paths = []
+        if not paths:
+            return {"cancelled": True}
+        if multiple:
+            return {"paths": paths}
+        return {"path": paths[0]}
+
     # -- plumbing ---------------------------------------------------------
 
     def serve(self, host="127.0.0.1", port=0):
@@ -7233,6 +7793,47 @@ class WebBackend:
                                   server_class=_Server,
                                   handler_class=_Handler)
         return self.server
+
+
+# One-shot native file dialog for --serve (browser) mode, executed as
+# `python -c` in a subprocess so no Tk root lingers in the server
+# process. argv: kind multiple initial format; prints a JSON list.
+_PICK_SCRIPT = r"""
+import json, sys
+import tkinter as tk
+from tkinter import filedialog
+
+kind, multiple, initial, fmt = sys.argv[1:5]
+root = tk.Tk()
+root.withdraw()
+root.attributes("-topmost", True)
+
+MEDIA = [("Audio/video", "*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus "
+                         "*.mp4 *.mov *.mkv *.avi *.webm"),
+         ("All files", "*.*")]
+TRANSCRIPT = [("Transcripts", "*.docx *.txt"), ("All files", "*.*")]
+
+paths = []
+if kind == "save-output":
+    ext = fmt or "docx"
+    p = filedialog.asksaveasfilename(
+        defaultextension=f".{ext}",
+        initialfile=initial or "",
+        filetypes=[(ext, f"*.{ext}"), ("All files", "*.*")])
+    if p:
+        paths = [p]
+else:
+    types = TRANSCRIPT if kind == "transcript" else MEDIA
+    if multiple == "1":
+        got = filedialog.askopenfilenames(filetypes=types)
+        paths = list(got or [])
+    else:
+        p = filedialog.askopenfilename(filetypes=types)
+        if p:
+            paths = [p]
+root.destroy()
+print(json.dumps(paths))
+"""
 
 
 # =====================================================================
@@ -7313,6 +7914,7 @@ def main_serve(args):
     _require_web_stack()
     token = args.dev_token or "dev"
     backend = WebBackend(token)
+    backend.start_pump()
     server = backend.serve(port=args.port if args.port is not None else 8737)
     url = f"http://127.0.0.1:{server.server_port}/?token={token}"
     _log(f"--serve listening on {server.server_port}")

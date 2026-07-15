@@ -34,6 +34,9 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
+    /** Extra machine-readable fields from the error payload
+     *  (e.g. `path`, `existing`, `total`). */
+    public extra: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -51,14 +54,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     let code = "http_error";
     let message = res.statusText;
+    let extra: Record<string, unknown> = {};
     try {
       const body = await res.json();
-      code = body?.error?.code ?? code;
-      message = body?.error?.message ?? message;
+      const { code: c, message: m, ...rest } = body?.error ?? {};
+      code = c ?? code;
+      message = m ?? message;
+      extra = rest;
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, code, message);
+    throw new ApiError(res.status, code, message, extra);
   }
   return res.json() as Promise<T>;
 }

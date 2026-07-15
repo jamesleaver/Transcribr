@@ -404,6 +404,187 @@ class TestModelAutosave(unittest.TestCase):
 
 
 # =====================================================================
+# RunController (stub worker; no Whisper involved)
+# =====================================================================
+
+class TestRunController(unittest.TestCase):
+    _ENGINES = [("whisper", "OpenAI Whisper (reference)")]
+
+    def setUp(self):
+        self._saved_engines = T.AVAILABLE_ENGINES
+        T.AVAILABLE_ENGINES = list(self._ENGINES)
+        self.settings = T.default_settings()
+        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-run-")
+        self.addCleanup(self.tmp.cleanup)
+
+    def tearDown(self):
+        T.AVAILABLE_ENGINES = self._saved_engines
+
+    def _media(self, name):
+        p = Path(self.tmp.name) / name
+        p.write_bytes(b"\x00")
+        return str(p)
+
+    def _controller(self, worker_fn):
+        broker = T.EventBroker()
+        events_q, _ = broker.subscribe()
+        c = T.RunController(broker, worker_fn=worker_fn)
+        return c, events_q
+
+    @staticmethod
+    def _drain(c, *, until_phases=("done", "error", "cancelled"),
+               timeout=5.0):
+        """Feed worker-queue messages through the controller until it
+        reaches a terminal phase (the pump thread's job, done
+        synchronously here)."""
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while c.phase not in until_phases:
+            try:
+                kind, data = c.queue.get(timeout=0.2)
+            except Exception:
+                if _time.monotonic() > deadline:
+                    raise AssertionError(
+                        f"controller stuck in phase {c.phase!r}")
+                continue
+            c.handle_message(kind, data)
+
+    @staticmethod
+    def _events(events_q):
+        out = []
+        while True:
+            try:
+                seq, event, payload = events_q.get_nowait()
+            except Exception:
+                return out
+            out.append(event)
+
+    def test_single_run_reaches_done(self):
+        def worker(params, q, cancel):
+            q.put(("log", "working...\n"))
+            q.put(("done", params["output"]))
+
+        c, events_q = self._controller(worker)
+        in_path = self._media("a.mp3")
+        run_id = c.start_single(in_path, "", self.settings)
+        self.assertEqual(run_id, 1)
+        self.assertEqual(c.phase, "running")
+        self._drain(c)
+        self.assertEqual(c.phase, "done")
+        self.assertTrue(c.last_output.endswith("a.transcript.docx"))
+        self.assertIn("run_state", self._events(events_q))
+
+    def test_single_run_error_reports_first_line(self):
+        def worker(params, q, cancel):
+            q.put(("error", "Boom happened\ndetails follow"))
+
+        c, events_q = self._controller(worker)
+        c.start_single(self._media("a.mp3"), "", self.settings)
+        self._drain(c)
+        self.assertEqual(c.phase, "error")
+        self.assertIn("Boom happened", "".join(c.log_lines))
+
+    def test_validations(self):
+        c, _ = self._controller(lambda p, q, e: q.put(("done", None)))
+        with self.assertRaises(T.ApiFail) as cm:
+            c.start_single("", "", self.settings)
+        self.assertEqual(cm.exception.code, "missing_input")
+        with self.assertRaises(T.ApiFail) as cm:
+            c.start_single(str(Path(self.tmp.name) / "ghost.mp3"), "",
+                           self.settings)
+        self.assertEqual(cm.exception.code, "input_not_found")
+
+    def test_overwrite_needs_force(self):
+        in_path = self._media("a.mp3")
+        out = Path(in_path).with_suffix(".transcript.docx")
+        out.write_text("existing")
+
+        done = []
+
+        def worker(params, q, cancel):
+            done.append(params["output"])
+            q.put(("done", params["output"]))
+
+        c, _ = self._controller(worker)
+        with self.assertRaises(T.ApiFail) as cm:
+            c.start_single(in_path, "", self.settings)
+        self.assertEqual(cm.exception.code, "output_exists")
+        c.start_single(in_path, "", self.settings, force=True)
+        self._drain(c)
+        self.assertEqual(len(done), 1)
+
+    def test_no_engine_maps_to_apifail(self):
+        T.AVAILABLE_ENGINES = []
+        c, _ = self._controller(lambda p, q, e: None)
+        with self.assertRaises(T.ApiFail) as cm:
+            c.start_single(self._media("a.mp3"), "", self.settings)
+        self.assertEqual(cm.exception.code, "no_engine")
+
+    def test_busy_rejected_while_running(self):
+        import threading as _threading
+        release = _threading.Event()
+
+        def worker(params, q, cancel):
+            release.wait(5)
+            q.put(("done", params["output"]))
+
+        c, _ = self._controller(worker)
+        c.start_single(self._media("a.mp3"), "", self.settings)
+        with self.assertRaises(T.ApiFail) as cm:
+            c.start_single(self._media("b.mp3"), "", self.settings)
+        self.assertEqual(cm.exception.code, "busy")
+        release.set()
+        self._drain(c)
+
+    def test_batch_sequences_and_collects_failures(self):
+        def worker(params, q, cancel):
+            if "bad" in params["input"]:
+                q.put(("error", "codec exploded\ntrace"))
+            else:
+                Path(params["output"]).write_text("t")
+                q.put(("done", params["output"]))
+
+        c, events_q = self._controller(worker)
+        files = [self._media("one.mp3"), self._media("bad.mp3"),
+                 self._media("three.mp3")]
+        c.start_batch(files, self.settings)
+        self._drain(c)
+        self.assertEqual(c.phase, "done")
+        self.assertIn("batch_done", self._events(events_q))
+        # State captured via the last batch summary in the log.
+        log = "".join(c.log_lines)
+        self.assertIn("Transcribed: 2", log)
+        self.assertIn("Failed: 1", log)
+        self.assertIn("bad.mp3: codec exploded", log)
+
+    def test_batch_missing_inputs_rejected(self):
+        c, _ = self._controller(lambda p, q, e: None)
+        with self.assertRaises(T.ApiFail) as cm:
+            c.start_batch([self._media("ok.mp3"),
+                           str(Path(self.tmp.name) / "gone.mp3")],
+                          self.settings)
+        self.assertEqual(cm.exception.code, "missing_inputs")
+        self.assertEqual(len(cm.exception.extra["missing"]), 1)
+
+    def test_batch_stop_ends_after_current_file(self):
+        def worker(params, q, cancel):
+            q.put(("done", params["output"]))
+
+        c, _ = self._controller(worker)
+        c.start_batch([self._media("one.mp3"), self._media("two.mp3")],
+                      self.settings)
+        # Stop lands between files ("even if we're momentarily between
+        # files" - the Tk comment); the batch must not advance.
+        c.stop()
+        self._drain(c)
+        self.assertEqual(c.phase, "cancelled")
+        log = "".join(c.log_lines)
+        self.assertIn("Batch stopped", log)
+        self.assertNotIn("two.mp3", log.split("Batch stopped")[0]
+                         .split("---")[-1])
+
+
+# =====================================================================
 # build_worker_params
 # =====================================================================
 

@@ -71,8 +71,48 @@ export interface RecentItem {
   exists: boolean;
 }
 
+export type RunPhase =
+  | "idle"
+  | "running"
+  | "stopping"
+  | "done"
+  | "error"
+  | "cancelled";
+
+export interface Progress {
+  pct: number;
+  status_text: string;
+}
+
+export interface RunState {
+  phase: RunPhase;
+  file: string | null;
+  run_id: number;
+  batch: { index: number; total: number } | null;
+  out_path: string | null;
+  progress?: Progress | null;
+  /** Log tail, present only in /api/state resync snapshots. */
+  log?: string;
+  /** Present on run_state SSE events for phase "error". */
+  message?: string;
+  first_line?: string;
+}
+
+export interface BatchDone {
+  stopped: boolean;
+  succeeded: string[];
+  failed: [string, string][];
+}
+
+export interface InspectedFile {
+  path: string;
+  name: string;
+  exists: boolean;
+  derived_output: string;
+}
+
 export interface StateSnapshot {
-  run: unknown | null;
+  run: RunState | null;
   review: unknown | null;
   autosave_pending: boolean;
   recents: RecentItem[];
