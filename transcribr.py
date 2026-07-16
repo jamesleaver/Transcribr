@@ -2470,9 +2470,12 @@ def build_worker_params(settings, in_path, out_path, *,
     extra_formats = [fmt for fmt in ("json", "srt", "vtt", "tsv")
                      if settings.get(f"extra_{fmt}")]
 
-    # The same text is fed to Whisper as initial_prompt (helps with
-    # proper-noun accuracy) and used as the document title.
-    description = (settings.get("prompt") or "").strip()
+    # Title and prompt are separate: the document title is never fed to
+    # the engine, and the optional prompt (a vocabulary hint) is fed as
+    # initial_prompt. Prompting is opt-in because it can backfire - it can
+    # bleed into the transcript or trigger hallucinations on unclear audio.
+    prompt = (settings.get("prompt") or "").strip()
+    doc_title = (settings.get("title") or "").strip()
 
     engine_key = next(
         (k for k, n in AVAILABLE_ENGINES if n == settings["engine"]),
@@ -2498,11 +2501,11 @@ def build_worker_params(settings, in_path, out_path, *,
         word_timestamps=(settings["word_timestamps"]
                          or settings["highlight_confidence"]),
         highlight_confidence=settings["highlight_confidence"],
-        initial_prompt=description or None,
-        # With no description, title the document after the source file
-        # (the filename is NOT fed to Whisper as a prompt - recorder
-        # names like REC_0042 would only mislead it).
-        title=description or Path(in_path).name,
+        initial_prompt=prompt or None,
+        # With no title, name the document after the source file. (The
+        # filename is never fed to the engine - recorder names like
+        # REC_0042 would only mislead it.)
+        title=doc_title or Path(in_path).name,
         gap=settings["gap"],
         extra_formats=extra_formats,
         output_format=settings["output_format"],
@@ -2559,6 +2562,7 @@ def default_settings():
         "language": "English",
         "task": "transcribe",
         "output_format": "docx",
+        "title": "",
         "prompt": "",
         "gap": 1.5,
         "show_timestamp": True,
@@ -2593,15 +2597,26 @@ def validate_settings(raw, base=None):
         merged.update(base)
     if not isinstance(raw, dict):
         return merged
+    raw = dict(raw)
+    # One-time migration: the old single "Description of file" field was
+    # both the Whisper prompt and the document title. They are separate
+    # now. A pre-split settings.json has no "title" key - move its text
+    # into the title (the benign use) and clear the prompt, so upgrading
+    # doesn't keep silently priming the engine. Only at load time
+    # (base is None), never on a partial PUT from the current UI.
+    if base is None and "title" not in raw and raw.get("prompt"):
+        raw["title"] = str(raw["prompt"])
+        raw["prompt"] = ""
     for key, allowed in _settings_choices().items():
         v = raw.get(key)
         if key == "model" and isinstance(v, str):
             v = _canonical_model(v)   # legacy "large"/"turbo" -> canonical
         if isinstance(v, str) and v in allowed:
             merged[key] = v
-    v = raw.get("prompt")
-    if isinstance(v, str):
-        merged["prompt"] = v
+    for key in ("title", "prompt"):
+        v = raw.get(key)
+        if isinstance(v, str):
+            merged[key] = v
     for key in _SETTINGS_NUMBER_KEYS:
         v = raw.get(key)
         if (isinstance(v, (int, float)) and not isinstance(v, bool)

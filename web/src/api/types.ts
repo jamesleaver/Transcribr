@@ -44,6 +44,9 @@ export interface Settings {
   language: string;
   task: "transcribe" | "translate";
   output_format: "txt" | "docx" | "pdf";
+  /** Document title (heading). Never sent to the engine. */
+  title: string;
+  /** Optional initial_prompt / vocabulary hint. Opt-in; can backfire. */
   prompt: string;
   gap: number;
   show_timestamp: boolean;

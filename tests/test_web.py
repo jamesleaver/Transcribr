@@ -1569,15 +1569,31 @@ class TestBuildWorkerParams(unittest.TestCase):
             self._params(engine="Something Else")["engine"], "whisper")
 
     def test_title_falls_back_to_filename(self):
-        p = self._params(prompt="")
+        p = self._params(title="", prompt="")
         self.assertEqual(p["title"], "interview.mp3")
         self.assertIsNone(p["initial_prompt"])
 
-    def test_prompt_is_both_initial_prompt_and_title(self):
-        p = self._params(prompt="  Smith v Jones directions hearing ")
-        self.assertEqual(p["initial_prompt"],
-                         "Smith v Jones directions hearing")
+    def test_title_and_prompt_are_independent(self):
+        # Title only: titles the doc, but nothing is fed to the engine.
+        p = self._params(title="  Smith v Jones directions hearing ",
+                         prompt="")
         self.assertEqual(p["title"], "Smith v Jones directions hearing")
+        self.assertIsNone(p["initial_prompt"])
+        # Prompt only: primes the engine, title falls back to the filename.
+        p = self._params(title="", prompt="  Macklebum, Bloggs, DVEC ")
+        self.assertEqual(p["initial_prompt"], "Macklebum, Bloggs, DVEC")
+        self.assertEqual(p["title"], "interview.mp3")
+
+    def test_legacy_prompt_migrates_to_title(self):
+        # A pre-split settings.json (no "title" key) moves its prompt into
+        # the title and stops priming the engine.
+        s = T.validate_settings({"prompt": "Smith v Jones"})
+        self.assertEqual(s["title"], "Smith v Jones")
+        self.assertEqual(s["prompt"], "")
+        # Post-split settings (a "title" key present) are left as-is.
+        s2 = T.validate_settings({"title": "Doc", "prompt": "keywords"})
+        self.assertEqual(s2["title"], "Doc")
+        self.assertEqual(s2["prompt"], "keywords")
 
     def test_confidence_forces_word_timestamps(self):
         p = self._params(word_timestamps=False, highlight_confidence=True)

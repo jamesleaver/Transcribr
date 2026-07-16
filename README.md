@@ -175,20 +175,25 @@ the input or the format. Override it if you want it somewhere else.
   (PDFs can't be re-opened for labelling later; use `.docx` or `.txt`
   if you'll want to revisit the speaker labels.)
 
-**Description of file.** Free text that primes Whisper with context
-*and* becomes the document title (left empty, the document is titled
-after the source file's name instead). This is one of the
-highest-leverage settings for accuracy on names and jargon. Whisper
-does not "know" the names of the people in your recording; tell it
-ahead of time:
+**Document title.** The heading placed at the top of the transcript.
+It is **not** sent to the engine — it only labels the document. Left
+blank, the transcript is titled after the source file's name instead.
 
-> *DVEC interview between Constable Macklebum and Joannah Bloggs at
-> Mount Druitt Police Station.*
+**Context / vocabulary hint** *(optional)*. Free text fed to the engine
+as its `initial_prompt` to prime it with names and jargon it may not
+know. It can help accuracy on proper nouns — but **priming is opt-in
+and can backfire**: the prompt may bleed into the transcript or trigger
+hallucinations, especially on unclear audio or long silences. Leave it
+blank unless you need it, and when you do, keep it to **keywords rather
+than sentences** — a prose description is the most likely to leak in:
 
-Worth including: names of speakers and people referred to, ambiguous
-place names, acronyms (DVEC, AVO, ICAC), and a short note on the
-format ("interview", "phone call", "court hearing"). Keep it under
-about 200 words; longer prompts get truncated.
+> *Macklebum, Bloggs, Mount Druitt, AVO, ICAC, DVEC*
+
+is safer than a full narrative sentence. Worth including: speaker and
+referenced names, ambiguous place names, and acronyms. Keep it under
+about 200 words; longer prompts get truncated. If a run comes out
+garbled, try clearing this field, or turn off **Condition on previous
+text** (Advanced decoding) so an early mistake can't propagate.
 
 **Batch queue.** Add several files to transcribe them one after
 another in a single unattended run. Each transcript is saved next to

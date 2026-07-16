@@ -157,20 +157,43 @@ function BatchList() {
 }
 
 function PromptCard() {
+  const title = useApp((s) => s.settings?.title ?? "");
   const prompt = useApp((s) => s.settings?.prompt ?? "");
   return (
-    <label className="block rounded-xl border border-edge bg-surface p-4">
-      <span className="mb-1.5 block text-xs font-medium text-muted">
-        Description of file — helps with proper nouns, jargon, names; also
-        becomes the document title
-      </span>
-      <textarea
-        className={`${inputCls} min-h-[38px] w-full resize-y`}
-        rows={1}
-        value={prompt}
-        onChange={(e) => useApp.getState().updateSettings({ prompt: e.target.value })}
-      />
-    </label>
+    <div className="flex flex-col gap-4 rounded-xl border border-edge bg-surface p-4">
+      <label className="block">
+        <span className="mb-1.5 block text-xs font-medium text-muted">
+          Document title — heading at the top of the transcript. Not sent to
+          the engine. Left blank, the file name is used.
+        </span>
+        <textarea
+          className={`${inputCls} min-h-[38px] w-full resize-y`}
+          rows={1}
+          value={title}
+          onChange={(e) => useApp.getState().updateSettings({ title: e.target.value })}
+        />
+      </label>
+
+      <label className="block">
+        <span className="mb-1.5 block text-xs font-medium text-muted">
+          Context / vocabulary hint (optional) — primes the engine with
+          names, acronyms and place names it may not know.
+        </span>
+        <textarea
+          className={`${inputCls} min-h-[38px] w-full resize-y`}
+          rows={1}
+          value={prompt}
+          placeholder="e.g. Macklebum, Bloggs, Mount Druitt, AVO, ICAC, DVEC"
+          onChange={(e) => useApp.getState().updateSettings({ prompt: e.target.value })}
+        />
+        <span className="mt-1.5 block text-xs text-amber-600 dark:text-amber-500">
+          ⚠ Priming can backfire. A prompt may bleed into the transcript or
+          trigger hallucinations, especially on unclear audio or long
+          silences. Leave it blank unless you need help with specific
+          terms, and keep it to keywords rather than sentences.
+        </span>
+      </label>
+    </div>
   );
 }
 
