@@ -3216,15 +3216,25 @@ _INSTALLABLE_ENGINES = {
 
 
 def _engine_install_args(key):
-    """pip-install arguments for an installable engine, including the
-    Intel-macOS torch/numpy/numba pins openai-whisper needs (PyTorch
-    stopped shipping x86_64 macOS wheels after 2.2.2)."""
+    """pip-install arguments for an installable engine. openai-whisper
+    needs numpy kept in a range its numba can import; Intel macOS needs
+    the whole torch chain pinned back on top of that."""
     spec = _INSTALLABLE_ENGINES[key]
     pkgs = list(spec["packages"])
-    if key == "whisper" and sys.platform == "darwin":
+    if key == "whisper":
         import platform as _plat
-        if _plat.machine() == "x86_64":
+        if sys.platform == "darwin" and _plat.machine() == "x86_64":
+            # Intel macOS: PyTorch stopped shipping x86_64 wheels after
+            # 2.2.2 (which predates numpy 2.0), so pin the whole chain.
             pkgs += ["torch==2.2.2", "numpy<2", "numba<0.60"]
+        else:
+            # openai-whisper pulls in numba, which lags numpy and refuses
+            # to import under a too-new numpy ("Numba needs NumPy 2.4 or
+            # less. Got NumPy 2.5."). faster-whisper may already have
+            # pulled a newer numpy into the shared venv, so cap it to a
+            # numba-compatible version (pip will downgrade if needed).
+            # Bump this ceiling when numba gains newer-numpy support.
+            pkgs += ["numpy<2.5"]
     return ["--upgrade", "--prefer-binary", *pkgs]
 
 

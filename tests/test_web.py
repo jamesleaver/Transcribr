@@ -836,9 +836,24 @@ class TestModelStore(unittest.TestCase):
         self.assertTrue(wh["removable"])
 
     def test_engine_install_args_base(self):
-        args = T._engine_install_args("whisper")
+        from unittest import mock
+        # Non-Intel-mac (this test host): openai-whisper plus a numpy cap
+        # to keep numba importable.
+        with mock.patch.object(T.sys, "platform", "linux"):
+            args = T._engine_install_args("whisper")
         self.assertIn("openai-whisper>=20250625", args)
         self.assertIn("--prefer-binary", args)
+        self.assertTrue(any(a.startswith("numpy<") for a in args),
+                        f"expected a numpy ceiling in {args}")
+
+    def test_engine_install_args_intel_mac_pins_chain(self):
+        from unittest import mock
+        with mock.patch.object(T.sys, "platform", "darwin"), \
+             mock.patch("platform.machine", return_value="x86_64"):
+            args = T._engine_install_args("whisper")
+        self.assertIn("torch==2.2.2", args)
+        self.assertIn("numpy<2", args)
+        self.assertIn("numba<0.60", args)
 
     def test_uninstall_openai_deletes_file(self):
         self._pt("small.en.pt", 777)
