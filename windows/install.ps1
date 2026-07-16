@@ -157,11 +157,60 @@ function Get-PythonArch($exe) {
 $pyDirX64 = "$env:LOCALAPPDATA\Programs\Python\Python312"
 $pyExeX64 = "$pyDirX64\python.exe"
 
-$python312 = $null
-$archX64 = Get-PythonArch $pyExeX64
-if ($archX64 -eq "AMD64") {
-    Ok "Python 3.12 (x64) already installed"
-    $python312 = $pyExeX64
+function Test-Python312X64($exe) {
+    # A usable interpreter is a real x64 python.exe that actually runs and
+    # reports version 3.12. Running it (rather than just Test-Path) rejects
+    # broken or half-removed installs.
+    if (-not $exe) { return $false }
+    if (-not (Test-Path $exe)) { return $false }
+    if ((Get-PythonArch $exe) -ne "AMD64") { return $false }
+    try {
+        $v = (& $exe --version 2>&1)
+        return ($LASTEXITCODE -eq 0 -and ("$v" -match '3\.12\.'))
+    } catch {
+        return $false
+    }
+}
+
+function Find-Python312X64 {
+    # Look wherever a python.org (or Microsoft Store) Python 3.12 may have
+    # landed - the fixed per-user dir, the registry install paths, and the
+    # py launcher - not just TargetDir. The python.org installer IGNORES
+    # TargetDir and repairs in place when a same-version install is already
+    # registered, so the fixed path alone is not reliable.
+    $cands = New-Object System.Collections.Generic.List[string]
+    $cands.Add($pyExeX64)
+    foreach ($root in @('HKCU:', 'HKLM:')) {
+        foreach ($tag in @('3.12', '3.12-64')) {
+            $key = "$root\Software\Python\PythonCore\$tag\InstallPath"
+            try {
+                $rk = Get-Item -LiteralPath $key -ErrorAction Stop
+                $exe = $rk.GetValue('ExecutablePath')
+                if (-not $exe) {
+                    $dir = $rk.GetValue('')
+                    if ($dir) { $exe = Join-Path $dir 'python.exe' }
+                }
+                if ($exe) { $cands.Add($exe) }
+            } catch { }
+        }
+    }
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        try {
+            $exe = (& py -3.12-64 -c "import sys;print(sys.executable)" 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $exe) {
+                $cands.Add((("$exe" -split "`r?`n")[0]).Trim())
+            }
+        } catch { }
+    }
+    foreach ($c in $cands) {
+        if (Test-Python312X64 $c) { return $c }
+    }
+    return $null
+}
+
+$python312 = Find-Python312X64
+if ($python312) {
+    Ok "Python 3.12 (x64) already installed: $python312"
 }
 
 if (-not $python312) {
@@ -199,19 +248,30 @@ if (-not $python312) {
         "TargetDir=$pyDirX64"
     )
     Start-Process -FilePath $pyTmp -ArgumentList $pyArgs -Wait
-    if (-not (Test-Path $pyExeX64)) {
-        Fail "Python install completed but python.exe not found at $pyExeX64"
-    }
     Remove-Item -Force $pyTmp -ErrorAction SilentlyContinue
 
-    # Verify it really is x64.
-    $archCheck = Get-PythonArch $pyExeX64
-    if ($archCheck -ne "AMD64") {
-        Fail "Installed Python reports machine='$archCheck', expected 'AMD64'."
+    # The installer honours TargetDir for a genuinely fresh install, but
+    # repairs an existing same-version install in place (ignoring
+    # TargetDir), so scan broadly for where python.exe actually landed.
+    $python312 = Find-Python312X64
+    if (-not $python312) {
+        Fail ("Python 3.12 was installed but no working 64-bit python.exe " +
+              "could be found.`n`n" +
+              "This usually means another Python 3.12 - often a partial " +
+              "install, or the Microsoft Store version - is already " +
+              "registered, so the installer repaired that one in place " +
+              "instead of installing a fresh copy.`n`n" +
+              "To fix it:`n" +
+              "  1. Open Settings > Apps > Installed apps.`n" +
+              "  2. Uninstall every 'Python 3.12' entry (including any " +
+              "'Python (Microsoft Store)' and 'Python Launcher').`n" +
+              "  3. Re-run this installer.`n`n" +
+              "Alternatively, install Python 3.12 (64-bit) from python.org " +
+              "yourself, then re-run this installer - it will detect and " +
+              "use it.")
     }
 
-    Ok "Python $pyVer (x64) installed at $pyDirX64"
-    $python312 = $pyExeX64
+    Ok "Python 3.12 (x64) ready: $python312"
 }
 
 Info "Using: $python312"
