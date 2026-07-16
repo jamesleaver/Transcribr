@@ -747,30 +747,36 @@ class TestModelStore(unittest.TestCase):
     def _pt(self, name, size):
         (Path(self.tmp.name) / name).write_bytes(b"\0" * size)
 
-    def test_openai_presence_and_alias_dedup(self):
-        # large and large-v3 share large-v3.pt; collapse into one row and
-        # count the file once.
+    def test_openai_models_no_alias_duplicates(self):
         self._pt("large-v3.pt", 2000)
         self._pt("small.en.pt", 500)
         T._hf_repo_sizes = lambda: {}
         store = T.ModelStore(engines=[("whisper", "OpenAI Whisper")])
         eng = store.payload()["engines"][0]
         by = {m["model"]: m for m in eng["models"]}
-        # The alias names collapse into the descriptive canonical row.
+        # The "large"/"turbo" aliases are gone from the list entirely; only
+        # the canonical names remain.
         self.assertIn("large-v3", by)
-        self.assertNotIn("large", by)
-        self.assertIn("large", by["large-v3"]["aliases"])
         self.assertIn("large-v3-turbo", by)
+        self.assertNotIn("large", by)
         self.assertNotIn("turbo", by)
-        self.assertIn("turbo", by["large-v3-turbo"]["aliases"])
         self.assertTrue(by["large-v3"]["installed"])
         self.assertFalse(by["tiny"]["installed"])
         self.assertEqual(by["large-v3"]["size"], 2000)
-        # 14 built-in names collapse to 12 rows.
         self.assertEqual(len(eng["models"]), 12)
-        # 2000 (shared once) + 500, NOT 2000+2000+500.
         self.assertEqual(eng["total"], 2500)
         self.assertFalse(eng["supports_custom"])
+
+    def test_model_alias_normalisation(self):
+        self.assertEqual(T._canonical_model("large"), "large-v3")
+        self.assertEqual(T._canonical_model("turbo"), "large-v3-turbo")
+        self.assertEqual(T._canonical_model("medium"), "medium")
+        # A stored legacy alias resolves to its canonical form, not the
+        # default, when settings load.
+        s = T.validate_settings({"model": "large"})
+        self.assertEqual(s["model"], "large-v3")
+        self.assertEqual(T.validate_settings({"model": "turbo"})["model"],
+                         "large-v3-turbo")
 
     def test_hf_engine_standard_and_custom(self):
         T._hf_repo_sizes = lambda: {

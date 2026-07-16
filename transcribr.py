@@ -908,12 +908,24 @@ def _parse_docx_transcript(path):
 # Whisper option metadata
 # =====================================================================
 
+# The canonical model choices shown in the UI. "large" and "turbo" are
+# omitted: they are just aliases of "large-v3" and "large-v3-turbo"
+# (identical weights), so listing them was a confusing duplicate. The
+# engines still accept the alias names, and _MODEL_ALIASES normalises any
+# stored/legacy value to its canonical form.
 WHISPER_MODELS = [
     "tiny.en", "base.en", "small.en", "medium.en",
     "tiny", "base", "small", "medium",
-    "large-v1", "large-v2", "large-v3", "large",
-    "turbo", "large-v3-turbo",
+    "large-v1", "large-v2", "large-v3", "large-v3-turbo",
 ]
+
+_MODEL_ALIASES = {"large": "large-v3", "turbo": "large-v3-turbo"}
+
+
+def _canonical_model(name):
+    """Map an alias model name to its canonical equivalent (identical
+    weights), leaving anything else untouched."""
+    return _MODEL_ALIASES.get(name, name)
 
 
 # ---- Engine detection ---------------------------------------------------
@@ -2583,6 +2595,8 @@ def validate_settings(raw, base=None):
         return merged
     for key, allowed in _settings_choices().items():
         v = raw.get(key)
+        if key == "model" and isinstance(v, str):
+            v = _canonical_model(v)   # legacy "large"/"turbo" -> canonical
         if isinstance(v, str) and v in allowed:
             merged[key] = v
     v = raw.get("prompt")
@@ -3193,6 +3207,9 @@ _INSTALLABLE_ENGINES = {
         # For a clean uninstall we also drop torch, which nothing else in
         # this app uses - that's where the space actually goes.
         "uninstall": ["openai-whisper", "torch"],
+        # Verified after install: a torch/numpy mismatch can leave the
+        # package importable-by-metadata but broken at run time.
+        "verify_import": "whisper",
         "approx_mb": 2200,
     },
 }
@@ -3227,20 +3244,22 @@ def _redetect_engines():
     return AVAILABLE_ENGINES
 
 
-def _run_engine_op(action, key, on_line, should_cancel):
-    """Run `pip install`/`pip uninstall` for an engine in a subprocess,
-    forwarding each output line to on_line and honouring should_cancel().
-    Raises _CancelledByUser on cancel, RuntimeError on a non-zero exit."""
+def _pip_stream(args, on_line, should_cancel):
+    """Run `python -m pip <args>` in a subprocess, forwarding each output
+    line to on_line and honouring should_cancel(). Raises _CancelledByUser
+    on cancel, RuntimeError on a non-zero exit."""
     import subprocess
     import queue as _queue
-    if action == "install":
-        args = ["install", *_engine_install_args(key)]
-    else:
-        args = ["uninstall", "-y", *_engine_uninstall_pkgs(key)]
+    env = dict(os.environ)
+    if sys.platform == "darwin":
+        # Match the installer: a well-formed deployment target keeps
+        # Apple's clang from rejecting the build and nudges pip toward
+        # pre-built wheels rather than source builds.
+        env.setdefault("MACOSX_DEPLOYMENT_TARGET", "11.0")
     proc = subprocess.Popen(
         [sys.executable, "-m", "pip", *args],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        bufsize=1)
+        bufsize=1, env=env)
     lines = _queue.Queue()
 
     def _reader():
@@ -3268,7 +3287,39 @@ def _run_engine_op(action, key, on_line, should_cancel):
             break
     rc = proc.wait()
     if rc != 0:
-        raise RuntimeError(f"pip {action} failed (exit code {rc})")
+        raise RuntimeError(f"pip exited with code {rc}")
+
+
+def _run_engine_op(action, key, on_line, should_cancel):
+    """Install or uninstall an engine's packages with pip, then (for an
+    install) verify the engine actually imports. A torch/numpy mismatch
+    can leave the package importable-by-metadata but broken at run time -
+    verifying here turns that into a clear failure, and we roll the broken
+    packages back so the app doesn't offer an engine that crashes."""
+    if action == "install":
+        _pip_stream(["install", *_engine_install_args(key)],
+                    on_line, should_cancel)
+        mod = _INSTALLABLE_ENGINES[key].get("verify_import")
+        if mod:
+            import subprocess
+            on_line(f"Verifying {mod} imports cleanly...")
+            check = subprocess.run([sys.executable, "-c", f"import {mod}"],
+                                   capture_output=True, text=True)
+            if check.returncode != 0:
+                tail = (check.stderr or check.stdout or "").strip()
+                last = tail.splitlines()[-1] if tail else "import failed"
+                on_line("Import check failed; rolling back...")
+                try:
+                    _pip_stream(["uninstall", "-y",
+                                 *_engine_uninstall_pkgs(key)],
+                                lambda _l: None, lambda: False)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"{key} was installed but fails to import: {last}")
+    else:
+        _pip_stream(["uninstall", "-y", *_engine_uninstall_pkgs(key)],
+                    on_line, should_cancel)
 
 
 def _dedupe_alias_models(raw):

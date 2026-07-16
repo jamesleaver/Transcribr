@@ -221,8 +221,8 @@ actually installed appear (install more from the **Models** tab):
 | `base.en`, `base` | ~150 MB | fast | Acceptable for clear, simple speech |
 | `small.en`, `small` | ~500 MB | moderate | Good balance for casual jobs |
 | `medium.en`, `medium` | ~1.5 GB | slow | Recommended for legal / interview / DVEC work |
-| `large-v1`, `large-v2`, `large-v3`, `large` | ~3 GB | very slow | Best raw accuracy; runtime can be painful on a CPU |
-| `turbo`, `large-v3-turbo` | ~1.6 GB | fast (despite the size) | Faster than `large-v3` with similar accuracy. No `.en` variant |
+| `large-v1`, `large-v2`, `large-v3` | ~3 GB | very slow | Best raw accuracy; runtime can be painful on a CPU |
+| `large-v3-turbo` | ~1.6 GB | fast (despite the size) | Faster than `large-v3` with similar accuracy. No `.en` variant |
 
 Models download once on first use and are cached locally
 (faster-whisper and mlx-whisper under `~/.cache/huggingface/`;
@@ -291,10 +291,11 @@ engine and lets you:
   appears in the Transcribe **Engine** dropdown. You can **Remove
   engine** later to reclaim the space.
 
-Aliased models (`large` / `large-v3`, `turbo` / `large-v3-turbo`) that
-share the same weights are shown as a single entry. Downloading,
-installing and removing are paused while a transcription is running,
-and a transcription won't start while one of those is in progress. The
+The `large` and `turbo` aliases (identical weights to `large-v3` and
+`large-v3-turbo`) aren't listed separately — only the canonical names
+appear. Downloading, installing and removing are paused while a
+transcription is running, and a transcription won't start while one of
+those is in progress. The
 cache locations are shown at the bottom of the view.
 
 ### Run / Stop and progress
