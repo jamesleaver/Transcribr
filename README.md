@@ -34,26 +34,30 @@ words are being transcribed into multiple paragraphs, then adjust the same
 setting up.
 
 When a particular model is run for the first time, that model will be
-downloaded to your computer and stored locally. The  `large-v3-turbo`
-models are recommended.
+downloaded to your computer and stored locally. The 'small.en' and 'medium.en'
+models may perform adequately on clear, crisp audio. On trickier audio, the
+`large-v3-turbo` model may do better, but it will be slower.
 
 Use at your own risk.
 
 Questions: [jleaver@sgchambers.com.au](mailto:jleaver@sgchambers.com.au)
 
+## Screenshots
+
 Main pane:
 
-<img width="1273" height="1007" alt="1  Main pane" src="https://github.com/user-attachments/assets/59f8afb8-9eb3-45d9-8000-9463b05ea4a1" />
+<img width="1312" height="912" alt="Screenshot 2026-07-16 at 2 28 28 pm" src="https://github.com/user-attachments/assets/c91c6f47-ba0c-4806-b54c-36510e1f786e" />
 
 
 Review pane:
 
-<img width="1273" height="1007" alt="2  Review pane" src="https://github.com/user-attachments/assets/0c5d41af-e3cb-4571-8562-c906325cdb9a" />
+<img width="1312" height="912" alt="Screenshot 2026-07-16 at 2 33 29 pm" src="https://github.com/user-attachments/assets/9900d430-8574-4682-8788-8feb9f2abab2" />
 
 
 Result:
 
-<img width="632" height="889" alt="3  Docx output" src="https://github.com/user-attachments/assets/0d9931ac-b6f1-468f-b2f9-26120c61db32" />
+<img width="781" height="1101" alt="Screenshot 2026-07-16 at 2 34 14 pm" src="https://github.com/user-attachments/assets/1e5c4b31-a93b-4e28-8e78-747da2b2605b" />
+
 
 ## What this folder contains
 
