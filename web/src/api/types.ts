@@ -49,6 +49,8 @@ export interface Meta {
   pyav: boolean;
   diarize_available: boolean;
   diarize_models: { id: string; label: string; note: string; size: string }[];
+  /** True when the backend was started with --annotate (dev builds). */
+  annotate: boolean;
   readme_available: boolean;
 }
 

@@ -1387,6 +1387,39 @@ class TestHttpApi(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "no_audio")
 
+    def test_annotations_roundtrip(self):
+        T.annotations_clear()
+        self.addCleanup(T.annotations_clear)
+        # Off by default; the routes exist regardless.
+        _, meta = self._req("GET", "/api/meta")
+        self.assertFalse(meta["annotate"])
+        status, rec = self._req(
+            "POST", "/api/annotations",
+            {"view": "transcribe", "selector": "button.x",
+             "element_text": "Run", "html": "<button>x</button>",
+             "rect": "{}", "note": "make it green"})
+        self.assertEqual(status, 200)
+        self.assertEqual(rec["id"], 1)
+        self.assertEqual(rec["app_version"], T.__version__)
+        # An empty note is refused.
+        status, err = self._req("POST", "/api/annotations", {"note": " "})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "empty_note")
+        # Oversized fields are capped, not rejected.
+        status, rec2 = self._req("POST", "/api/annotations",
+                                 {"note": "n", "html": "x" * 9000})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(rec2["html"]), 4000)
+        status, res = self._req("GET", "/api/annotations")
+        self.assertEqual([a["id"] for a in res["items"]], [1, 2])
+        status, _ = self._req("POST", "/api/annotations/delete", {"id": 1})
+        self.assertEqual(status, 200)
+        _, res = self._req("GET", "/api/annotations")
+        self.assertEqual([a["id"] for a in res["items"]], [2])
+        self._req("POST", "/api/annotations/clear")
+        _, res = self._req("GET", "/api/annotations")
+        self.assertEqual(res["items"], [])
+
     def _write_transcript(self):
         p = Path(self.tmp.name) / "doc.transcript.txt"
         T.write_paragraphs_to_file(

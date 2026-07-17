@@ -372,6 +372,80 @@ def _settings_save(settings):
         _log(f"Could not write settings.json: {e}")
 
 
+# ---- Developer annotations ------------------------------------------------
+#
+# A development aid ported from the Chambers Availability tool: with
+# `--annotate` (or TRANSCRIBR_ANNOTATE=1) a pencil overlay appears in
+# the UI; clicking any element captures where it is (selector path,
+# text, markup, geometry) and pins a note to it. Notes land in
+# annotations.json under the config dir, ready to be pasted into a
+# development session. The overlay is invisible to normal users.
+
+ANNOTATE_MODE = False
+
+_annotations_lock = threading.Lock()
+
+# Field -> stored size cap. Keeps a runaway page from bloating the file.
+_ANNOTATION_FIELDS = {
+    "view": 100, "selector": 500, "element_text": 500,
+    "html": 4000, "rect": 300, "note": 4000,
+}
+
+
+def _annotations_file():
+    return _config_dir() / "annotations.json"
+
+
+def _annotations_load():
+    try:
+        import json
+        with open(_annotations_file(), encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
+
+def _annotations_save(items):
+    import json
+    with open(_annotations_file(), "w", encoding="utf-8") as fh:
+        json.dump(items, fh, indent=2, ensure_ascii=False)
+
+
+def annotation_add(body):
+    """Validate + append one annotation; returns the stored record."""
+    record = {}
+    for key, cap in _ANNOTATION_FIELDS.items():
+        record[key] = str(body.get(key) or "")[:cap]
+    if not record["note"].strip():
+        raise ApiFail(400, "empty_note", "The note is empty.")
+    with _annotations_lock:
+        items = _annotations_load()
+        record["id"] = (max((a.get("id", 0) for a in items), default=0)
+                        + 1)
+        record["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        record["app_version"] = __version__
+        items.append(record)
+        _annotations_save(items)
+    return record
+
+
+def annotation_delete(ann_id):
+    with _annotations_lock:
+        items = _annotations_load()
+        kept = [a for a in items if a.get("id") != ann_id]
+        if len(kept) == len(items):
+            raise ApiFail(404, "not_found", f"No annotation #{ann_id}.")
+        _annotations_save(kept)
+
+
+def annotations_clear():
+    with _annotations_lock:
+        _annotations_save([])
+
+
 # ---- Review auto-save (crash recovery) -----------------------------------
 #
 # While the review pane is open, the labelled-but-unsaved state is
@@ -5255,6 +5329,7 @@ class WebBackend:
                     {"id": m["id"], "label": m["label"],
                      "note": m["note"], "size": m["size"]}
                     for m in DIARIZE_VOICE_MODELS],
+                "annotate": ANNOTATE_MODE,
                 "readme_available": _find_readme() is not None,
             }
 
@@ -5595,6 +5670,35 @@ class WebBackend:
             backend.broker.publish("recents", {})
             return {"ok": True}
 
+        # -- developer annotations ----------------------------------------
+
+        @app.get("/api/annotations")
+        def api_annotations():
+            return {"items": _annotations_load(),
+                    "file": str(_annotations_file())}
+
+        @app.post("/api/annotations")
+        def api_annotations_add():
+            body = bottle.request.json or {}
+            try:
+                return annotation_add(body)
+            except ApiFail as e:
+                _fail(e)
+
+        @app.post("/api/annotations/delete")
+        def api_annotations_delete():
+            body = bottle.request.json or {}
+            try:
+                annotation_delete(int(body.get("id", -1)))
+            except ApiFail as e:
+                _fail(e)
+            return {"ok": True}
+
+        @app.post("/api/annotations/clear")
+        def api_annotations_clear():
+            annotations_clear()
+            return {"ok": True}
+
         # -- settings ----------------------------------------------------
 
         @app.get("/api/settings")
@@ -5813,11 +5917,19 @@ def _parse_args(argv):
                    help="port for --serve (default 8737)")
     p.add_argument("--dev-token", default=None,
                    help="fixed API token for --serve (default 'dev')")
+    p.add_argument("--annotate", action="store_true",
+                   help="show the developer annotation overlay (pin "
+                        "notes to UI elements; saved to annotations.json "
+                        "in the config dir). Also: TRANSCRIBR_ANNOTATE=1")
     return p.parse_args(argv)
 
 
 def main(argv=None):
+    global ANNOTATE_MODE
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    ANNOTATE_MODE = bool(
+        args.annotate
+        or os.environ.get("TRANSCRIBR_ANNOTATE", "").strip() == "1")
     if args.serve:
         return main_serve(args)
     if os.environ.get("TRANSCRIBR_UI", "").strip().lower() == "tk":

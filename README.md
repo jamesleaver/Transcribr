@@ -533,6 +533,14 @@ open the Vite URL. If the repository lives in Dropbox, mark
 `web/node_modules` as ignored so it doesn't sync:
 `xattr -w com.dropbox.ignored 1 web/node_modules` (macOS).
 
+**Annotation overlay.** Launching with `--annotate` (or
+`TRANSCRIBR_ANNOTATE=1`) adds a developer-only ✎ button: click any
+element in the UI to pin a note to it (selector path, text, markup and
+geometry are captured automatically). The 📋 button reviews the saved
+notes, deletes them, or copies the lot as markdown for a development
+session; they live in `annotations.json` in the config dir. Normal
+users never see any of this.
+
 ## What this does NOT install
 
 The Whisper model weights themselves. The first time you run a

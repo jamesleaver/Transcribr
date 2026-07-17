@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import AnnotateOverlay from "./components/AnnotateOverlay";
 import DialogHost from "./components/DialogHost";
 import Sidebar from "./components/Sidebar";
 import LibraryView from "./views/LibraryView";
@@ -88,6 +89,7 @@ export default function App() {
         {view === "models" && <ModelsView />}
       </main>
       <DialogHost />
+      {meta.annotate && <AnnotateOverlay />}
     </div>
   );
 }
