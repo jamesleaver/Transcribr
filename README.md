@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.8.0.
+(c) James Leaver, 2026. Version 0.8.1.
 
 An experimental GUI for transcribing audio and video files on macOS and
 Windows. A Whisper engine (openai-whisper, faster-whisper, or

@@ -18,7 +18,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
