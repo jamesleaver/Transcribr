@@ -5,10 +5,12 @@
 #
 # What this installs:
 #   - Python 3.12 (x64) from python.org
-#   - ffmpeg (via winget, Gyan.FFmpeg)
 #   - A Python venv at %LOCALAPPDATA%\Transcribr\venv
 #   - faster-whisper inside that venv (CTranslate2; the default engine,
-#     ~4x faster on CPU than the reference engine, no PyTorch)
+#     ~4x faster on CPU than the reference engine, no PyTorch. Its PyAV
+#     dependency bundles FFmpeg's libraries, so no separate ffmpeg
+#     install is needed either)
+#   - sherpa-onnx inside that venv (the "detect speakers" feature)
 #   - Desktop and Start Menu shortcuts to the app
 #
 # The reference openai-whisper engine (PyTorch, ~2 GB) is NOT installed up
@@ -64,8 +66,8 @@ $arch = if ([Environment]::Is64BitOperatingSystem) { '64-bit' } else { '32-bit' 
 Info "Windows: $([Environment]::OSVersion.Version) ($arch)"
 Write-Host ""
 Info "This installer will download Python 3.12 (x64) from python.org,"
-Info "install ffmpeg via winget, create a Python environment containing"
-Info "Whisper, and add Desktop and Start Menu shortcuts."
+Info "create a Python environment containing Whisper, and add Desktop"
+Info "and Start Menu shortcuts."
 Write-Host ""
 Info "It is safe to re-run."
 Write-Host ""
@@ -85,7 +87,8 @@ if (-not (Test-Path $iconFile)) {
     Fail "Missing file: $iconName (expected next to install.bat)"
 }
 
-# winget is needed for ffmpeg (we install Python directly from python.org).
+# winget is used to install the WebView2 runtime when it is missing
+# (we install Python directly from python.org).
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
     Fail "winget is not available. Install 'App Installer' from the Microsoft Store, or update Windows."
 }
@@ -99,7 +102,7 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 
 # ---------- step 1: Python --------------------------------------------------
 
-Step 1 6 "Python 3.12 (x64)"
+Step 1 5 "Python 3.12 (x64)"
 
 # We always install x64 Python, even on ARM64 Windows. Native ARM64 Python
 # works for many things, but several packages in the ML/audio stack
@@ -276,46 +279,19 @@ if (-not $python312) {
 
 Info "Using: $python312"
 
-# ---------- step 2: ffmpeg --------------------------------------------------
+# (ffmpeg is no longer installed: audio decoding and playback go
+# through the PyAV package, whose wheel bundles FFmpeg's libraries. A
+# pre-existing Gyan.FFmpeg from an earlier Transcribr install is
+# untouched and still found on PATH as a fallback.)
 
-Step 2 6 "ffmpeg"
-
-$ffmpegId = "Gyan.FFmpeg"
-$ffmpegPresent = (winget list -e --id $ffmpegId 2>$null | Select-String $ffmpegId) -ne $null
-if ($ffmpegPresent) {
-    Ok "ffmpeg already installed"
-} else {
-    Info "Installing ffmpeg via winget..."
-    winget install -e --id $ffmpegId --silent --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { Fail "ffmpeg install failed (exit $LASTEXITCODE)" }
-    Ok "ffmpeg installed"
-}
-
-# Locate ffmpeg's bin directory. winget unpacks Gyan.FFmpeg to
-#   %LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_<source>\ffmpeg-<ver>\bin
-# (the version directory changes over time; we glob it).
-$ffmpegBin = Get-ChildItem `
-    -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg*" `
-    -Filter "bin" -Recurse -Directory -ErrorAction SilentlyContinue |
-    Where-Object { Test-Path (Join-Path $_.FullName "ffmpeg.exe") } |
-    Select-Object -First 1
-
-if ($ffmpegBin) {
-    $ffmpegDir = $ffmpegBin.FullName
-    Info "ffmpeg location: $ffmpegDir"
-} else {
-    Warn "Could not auto-locate ffmpeg.exe. The launcher will rely on PATH instead."
-    $ffmpegDir = $null
-}
-
-# ---------- step 3: WebView2 runtime ----------------------------------------
+# ---------- step 2: WebView2 runtime ----------------------------------------
 #
 # The 0.7.0 interface renders in a WebView2 window. Windows 11 and most
 # up-to-date Windows 10 machines already have the Evergreen runtime; on
 # the rest we install it via winget, falling back to Microsoft's
 # bootstrapper.
 
-Step 3 6 "Microsoft Edge WebView2 runtime"
+Step 2 5 "Microsoft Edge WebView2 runtime"
 
 function Test-WebView2 {
     $keys = @(
@@ -354,7 +330,7 @@ if ($wv2) {
 
 # ---------- step 4: venv ----------------------------------------------------
 
-Step 4 6 "Python virtual environment"
+Step 3 5 "Python virtual environment"
 
 if (-not (Test-Path $appDir)) {
     New-Item -ItemType Directory -Path $appDir | Out-Null
@@ -386,7 +362,7 @@ Ok "venv ready"
 
 # ---------- step 4: app libraries + faster-whisper --------------------------
 
-Step 5 6 "App libraries and the faster-whisper engine"
+Step 4 5 "App libraries and the faster-whisper engine"
 
 Info "Upgrading pip..."
 & "$venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
@@ -397,9 +373,11 @@ if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed" }
 # GPU is present. The heavier reference OpenAI engine (PyTorch, ~2 GB) is
 # optional and can be installed later from the app's Models tab, so it's
 # no longer downloaded up front.
+# sherpa-onnx powers "Detect speakers automatically" (~20 MB; its two
+# small voice models download on first use from inside the app).
 Info "Installing app libraries + faster-whisper..."
 & "$venv\Scripts\python.exe" -m pip install --upgrade `
-    faster-whisper python-docx reportlab `
+    faster-whisper sherpa-onnx python-docx reportlab `
     pywebview bottle
 if ($LASTEXITCODE -ne 0) { Fail "core install failed (faster-whisper / python-docx / reportlab / pywebview / bottle)" }
 
@@ -408,16 +386,23 @@ if ($LASTEXITCODE -ne 0) { Fail "core install failed (faster-whisper / python-do
 if ($LASTEXITCODE -ne 0) { Fail "pywebview / bottle import test failed" }
 Ok "pywebview + bottle installed"
 
-& "$venv\Scripts\python.exe" -c "import faster_whisper" 2>$null
+& "$venv\Scripts\python.exe" -c "import faster_whisper, av" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Fail "faster-whisper import check failed - no engine would be available."
 } else {
-    Ok "faster-whisper installed"
+    Ok "faster-whisper installed (PyAV handles audio decoding)"
+}
+
+& "$venv\Scripts\python.exe" -c "import sherpa_onnx" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Warn "sherpa-onnx import check failed - the app will run, but 'Detect speakers automatically' will be unavailable."
+} else {
+    Ok "sherpa-onnx installed (speaker detection available)"
 }
 
 # ---------- step 5: Application files, launcher, shortcuts ------------------
 
-Step 6 6 "Application files and shortcuts"
+Step 5 5 "Application files and shortcuts"
 
 Copy-Item $sharedScript "$appDir\$scriptName" -Force
 Copy-Item $iconFile     "$appDir\$iconName"   -Force
@@ -450,7 +435,9 @@ if (Test-Path $sharedReadme) {
 Ok "Copied app files to $appDir"
 
 # launch.bat - sets PATH, runs pythonw, captures errors to log.
-$pathLine = if ($ffmpegDir) { "set `"PATH=$ffmpegDir;%PATH%`"" } else { "" }
+# (An ffmpeg PATH entry is no longer needed - PyAV bundles the
+# decoding libraries.)
+$pathLine = ""
 $launchBat = @"
 @echo off
 REM Transcribr launcher (generated by installer)

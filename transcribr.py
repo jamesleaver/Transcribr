@@ -4,34 +4,37 @@ Transcribr - GUI for transcribing audio/video files with Whisper,
 grouping the result into paragraphs, and reviewing/labelling speakers.
 
 (c) James Leaver, 2026. This software is experimental. Everything runs
-locally on your computer: a Whisper engine (openai-whisper,
-faster-whisper, or mlx-whisper) transcribes the audio, the result is
-grouped into paragraphs, and a review pane lets you label speakers,
-edit text, and listen back to the source audio before saving as .docx,
-.pdf, or .txt. Several files can be queued and transcribed in one
-unattended batch. When a particular model is run for the first time it
-is downloaded and stored locally; 'medium.en' or 'large-v3-turbo' are
-recommended. Use at your own risk.
+locally on your computer: a Whisper engine (faster-whisper by default;
+openai-whisper and mlx-whisper are used when installed) transcribes
+the audio, an optional speaker-detection pass works out who is
+speaking, the result is grouped into paragraphs, and a review pane
+lets you check the speaker labels, edit text, and listen back to the
+source audio before saving as .docx, .pdf, or .txt. Several files can
+be queued and transcribed in one unattended batch. When a particular
+model is run for the first time it is downloaded and stored locally;
+'large-v3-turbo' (the Standard choice) is recommended. Use at your own
+risk.
 Questions: jleaver@sgchambers.com.au.
 
 Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
     "(c) James Leaver, 2026.\n\n"
-    "Transcribr transcribes audio and video with Whisper, groups the "
-    "result into paragraphs, and gives you a review pane to label "
-    "speakers, edit text, and listen back to the source audio before "
-    "saving as Word (.docx), PDF, or plain text. Several files can be "
-    "queued and transcribed in one unattended batch. Everything runs "
-    "locally on your computer - nothing is uploaded.\n\n"
+    "Transcribr transcribes audio and video with Whisper, can work out "
+    "who is speaking, groups the result into paragraphs, and gives you "
+    "a review pane to check speaker labels, edit text, and listen back "
+    "to the source audio before saving as Word (.docx), PDF, or plain "
+    "text. Several files can be queued and transcribed in one "
+    "unattended batch. Everything runs locally on your computer - "
+    "nothing is uploaded.\n\n"
     "When a particular model is run for the first time, that model will "
-    "be downloaded to your computer and stored locally. The 'medium.en' "
-    "or 'large-v3-turbo' models are recommended.\n\n"
+    "be downloaded to your computer and stored locally. The Standard "
+    "model (large-v3-turbo) is recommended.\n\n"
     "This software is experimental. Use at your own risk.\n\n"
     "Questions: jleaver@sgchambers.com.au"
 )
@@ -456,12 +459,77 @@ def _format_duration(seconds: float) -> str:
     return f"{h}h {m:02d}m"
 
 
-def get_audio_duration(path):
-    """Return the duration of an audio/video file in seconds, or None on failure.
+# ---- Audio decoding (PyAV first, ffmpeg binary as fallback) ----------
+#
+# PyAV ships FFmpeg's libraries inside its wheel (it is already a hard
+# dependency of faster-whisper), so with it installed Transcribr needs
+# no ffmpeg/ffprobe binaries at all: duration probing, decoding for the
+# engines and the speaker detector, and playback extraction all go
+# through it. The subprocess fallbacks remain for environments that
+# only have the binaries (e.g. an openai-whisper-only install).
 
-    Uses ffprobe (shipped with ffmpeg, which is already a hard requirement
-    for whisper). We pass quiet flags so the subprocess doesn't pollute
-    stdout/stderr on the GUI side.
+def _have_pyav():
+    import importlib.util
+    return importlib.util.find_spec("av") is not None
+
+
+AUDIO_SAMPLE_RATE = 16000
+
+
+def decode_audio_16k(path):
+    """Decode any audio/video file to mono float32 at 16 kHz via PyAV -
+    the input format Whisper and the speaker detector both expect.
+    Returns a numpy array, or None when PyAV is unavailable or decoding
+    fails (callers then fall back to handing the engine the file
+    path)."""
+    try:
+        import av
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        frames = []
+        with av.open(str(path)) as container:
+            if not container.streams.audio:
+                return None
+            stream = container.streams.audio[0]
+            resampler = av.AudioResampler(
+                format="s16", layout="mono", rate=AUDIO_SAMPLE_RATE)
+            for frame in container.decode(stream):
+                for rf in resampler.resample(frame):
+                    frames.append(rf.to_ndarray())
+            for rf in resampler.resample(None):     # flush
+                frames.append(rf.to_ndarray())
+        if not frames:
+            return None
+        pcm = np.concatenate([f.reshape(-1) for f in frames])
+        return pcm.astype(np.float32) / 32768.0
+    except Exception:
+        _log(f"PyAV decode failed for {path}:\n{traceback.format_exc()}")
+        return None
+
+
+def _pyav_duration(path):
+    """Duration in seconds via PyAV container metadata, or None."""
+    try:
+        import av
+    except ImportError:
+        return None
+    try:
+        with av.open(str(path)) as container:
+            # container.duration is in AV_TIME_BASE units (microseconds).
+            if container.duration:
+                return float(container.duration) / 1_000_000
+            for s in container.streams.audio:
+                if s.duration and s.time_base:
+                    return float(s.duration * s.time_base)
+    except Exception:
+        return None
+    return None
+
+
+def _ffprobe_duration(path):
+    """Duration in seconds via the ffprobe binary, or None.
 
     On Windows we hide the console window that subprocess.run would
     otherwise briefly flash for the ffprobe process.
@@ -487,6 +555,15 @@ def get_audio_duration(path):
         return float(result.stdout.strip())
     except ValueError:
         return None
+
+
+def get_audio_duration(path):
+    """Return the duration of an audio/video file in seconds, or None on
+    failure. PyAV first; ffprobe when PyAV is missing or stumped."""
+    duration = _pyav_duration(path)
+    if duration is not None:
+        return duration
+    return _ffprobe_duration(path)
 
 
 def _is_short_response(text: str) -> bool:
@@ -550,6 +627,63 @@ def paragraphify(segments, gap_threshold: float):
     if current:
         paragraphs.append(current)
     return paragraphs
+
+
+def paragraphify_speakers(segments, gap_threshold: float, seg_speakers):
+    """Speaker-aware paragraphify: the same break rules as
+    paragraphify(), plus a hard break whenever the known speaker
+    changes - a paragraph never mixes two identified speakers.
+
+    `seg_speakers` is a list parallel to `segments` of diarizer speaker
+    ids (ints) or None for unattributed segments (None never forces a
+    break; such segments join whichever paragraph they fall in).
+
+    Returns (paragraphs, para_speakers, para_confidence): the speaker
+    id whose speech dominates each paragraph (or None), and the share
+    of the paragraph's duration that id was actually attributed - the
+    caller uses it to leave doubtful paragraphs unlabelled."""
+    paragraphs, para_speakers, para_conf = [], [], []
+    current, current_times, prev = [], {}, None
+    para_start = None
+    current_spk = None      # the one known speaker in `current`
+
+    def flush():
+        total = sum(current_times.values())
+        known = {k: v for k, v in current_times.items() if k is not None}
+        if total > 0 and known:
+            best = max(known, key=known.get)
+            share = known[best] / total
+        else:
+            best, share = None, 0.0
+        paragraphs.append(list(current))
+        para_speakers.append(best)
+        para_conf.append(share)
+
+    for seg, spk in zip(segments, seg_speakers):
+        if current:
+            forced_by_cap = (
+                para_start is not None
+                and seg[1] - para_start >= _PARAGRAPH_SECONDS_CAP)
+            speaker_changed = (spk is not None
+                               and current_spk is not None
+                               and spk != current_spk)
+            if (forced_by_cap or speaker_changed
+                    or _should_break(prev, seg, gap_threshold)):
+                flush()
+                current, current_times = [], {}
+                para_start = None
+                current_spk = None
+        if para_start is None:
+            para_start = seg[0]
+        current.append(seg)
+        current_times[spk] = (current_times.get(spk, 0.0)
+                              + max(0.0, seg[1] - seg[0]))
+        if spk is not None:
+            current_spk = spk
+        prev = seg
+    if current:
+        flush()
+    return paragraphs, para_speakers, para_conf
 
 
 def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str:
@@ -928,6 +1062,26 @@ def _canonical_model(name):
     return _MODEL_ALIASES.get(name, name)
 
 
+# The three choices most users should pick between, presented instead of
+# the raw twelve-model list (which stays available behind a "show all
+# models" toggle, and in full detail in the Models view). `model_en` is
+# substituted when the language is English - the .en variants are
+# slightly more accurate there. Sizes are the one-time download on
+# first use.
+MODEL_TIERS = [
+    {"id": "draft", "label": "Quick draft",
+     "model": "small", "model_en": "small.en", "size": "~500 MB",
+     "note": "Fast first pass. Fine for clear speech; expect mistakes."},
+    {"id": "standard", "label": "Standard", "recommended": True,
+     "model": "large-v3-turbo", "model_en": "large-v3-turbo",
+     "size": "~1.6 GB",
+     "note": "Accurate and reasonably quick — right for most work."},
+    {"id": "max", "label": "Maximum accuracy",
+     "model": "large-v3", "model_en": "large-v3", "size": "~3 GB",
+     "note": "Slowest. For difficult audio where every word matters."},
+]
+
+
 # ---- Engine detection ---------------------------------------------------
 #
 # Transcribr can drive three Whisper implementations. We probe each one's
@@ -971,6 +1125,27 @@ def _detect_engines():
 
 
 AVAILABLE_ENGINES = _detect_engines()
+
+# The "just do the right thing" engine choice, shown first in the
+# dropdown and used as the default. It resolves at run time so the same
+# settings file does the right thing when copied between machines.
+ENGINE_AUTO_NAME = "Automatic (recommended)"
+
+
+def resolve_engine_key(engine_name):
+    """Map a settings engine display name to a runner key. The Automatic
+    entry (and any stale/unknown name, e.g. after the engine it named
+    was uninstalled from the Models view) resolves to the best installed
+    engine: mlx-whisper on Apple Silicon, then faster-whisper, then the
+    reference implementation."""
+    for key, name in AVAILABLE_ENGINES:
+        if name == engine_name:
+            return key
+    keys = [key for key, _ in AVAILABLE_ENGINES]
+    for preferred in ("mlx", "faster", "whisper"):
+        if preferred in keys:
+            return preferred
+    return keys[0] if keys else "whisper"
 
 
 # mlx-whisper takes a HuggingFace repo path (since the runtime weights are
@@ -1024,6 +1199,350 @@ LANGUAGES = [
     ("Turkish", "tr"),
     ("Polish", "pl"),
 ]
+
+
+# =====================================================================
+# Speaker detection (diarization)
+# =====================================================================
+#
+# An optional post-pass that works out who is speaking: sherpa-onnx
+# runs a small segmentation model (pyannote segmentation-3.0) plus a
+# speaker-embedding model (WeSpeaker ResNet34-LM - the same embedding
+# family pyannote's own 3.1 pipeline uses) and clusters the voices.
+# Both models are ONNX and total ~33 MB, downloaded once on first use;
+# onnxruntime is already in the dependency tree via faster-whisper.
+#
+# The results are deliberately conservative: turns are mapped onto
+# Whisper's word timestamps, paragraphs break on speaker changes, and
+# any paragraph whose attribution is doubtful is left unlabelled for
+# the reviewer rather than guessed.
+
+_DIARIZE_MODELS = {
+    "segmentation": {
+        "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-segmentation-models/"
+                "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"),
+        "sha256": ("24615ee884c897d9d2ba09bb4d30da6b"
+                   "b1b15e685065962db5b02e76e4996488"),
+        "archive_member": "model.onnx",
+        "target": "pyannote-segmentation-3.0.onnx",
+        "label": "speaker segmentation model (~7 MB)",
+    },
+    "embedding": {
+        "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                "speaker-recongition-models/"      # (sic - upstream tag)
+                "wespeaker_en_voxceleb_resnet34_LM.onnx"),
+        "sha256": ("e9848563da86f263117134dfd7ad63c9"
+                   "2355b37de492b55e325400c9d9c39012"),
+        "archive_member": None,
+        "target": "wespeaker-voxceleb-resnet34-LM.onnx",
+        "label": "voice embedding model (~27 MB)",
+    },
+}
+
+# Words in a run shorter than this (both measures) are folded into the
+# neighbouring speaker run instead of forming their own split - guards
+# against one-word paragraph spam from attribution jitter.
+_DIARIZE_MIN_RUN_SECONDS = 0.8
+_DIARIZE_MIN_RUN_WORDS = 3
+# A word not inside any turn adopts the nearest turn within this many
+# seconds (else stays unattributed).
+_DIARIZE_NEAR_TURN_SECONDS = 0.75
+# Paragraphs whose majority speaker covers less than this share of the
+# paragraph stay unlabelled - wrong labels are worse than missing ones.
+_DIARIZE_MIN_LABELLED_SHARE = 0.5
+# Clustering distance threshold when the speaker count is unknown
+# (sherpa-onnx's documented default for these models).
+_DIARIZE_CLUSTER_THRESHOLD = 0.5
+
+
+class DiarizationUnavailable(Exception):
+    """Speaker detection can't run; the message says why and the run
+    continues without labels."""
+    pass
+
+
+def _diarize_models_dir():
+    return _config_dir() / "models" / "diarization"
+
+
+def diarize_models_ready():
+    d = _diarize_models_dir()
+    return all((d / m["target"]).exists()
+               for m in _DIARIZE_MODELS.values())
+
+
+def _download_one_model(spec, q, cancel_event):
+    """Fetch, verify (sha256) and install one model file atomically.
+    Progress goes to the run log."""
+    import hashlib
+    import tarfile
+    import tempfile
+    import urllib.request
+
+    target = _diarize_models_dir() / spec["target"]
+    if target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    q.put(("log", f"Downloading {spec['label']}...\n"))
+
+    with tempfile.TemporaryDirectory(dir=str(target.parent)) as tmpdir:
+        fetched = Path(tmpdir) / "download"
+        digest = hashlib.sha256()
+        last_decile = -1
+        req = urllib.request.Request(
+            spec["url"], headers={"User-Agent": f"Transcribr/{__version__}"})
+        with urllib.request.urlopen(req, timeout=60) as resp, \
+                open(fetched, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _CancelledByUser()
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+                done += len(chunk)
+                if total:
+                    decile = int(done * 10 / total)
+                    if decile > last_decile:
+                        last_decile = decile
+                        q.put(("log", f"  ... {min(100, decile * 10)}%\n"))
+
+        if digest.hexdigest() != spec["sha256"]:
+            raise DiarizationUnavailable(
+                f"The downloaded {spec['label']} failed its integrity "
+                "check. Please try again; if it keeps failing, the "
+                "upstream file may have changed.")
+
+        if spec["archive_member"]:
+            with tarfile.open(fetched, "r:bz2") as tar:
+                member = next(
+                    (m for m in tar.getmembers()
+                     if m.isfile() and Path(m.name).name
+                     == spec["archive_member"]),
+                    None)
+                if member is None:
+                    raise DiarizationUnavailable(
+                        f"{spec['archive_member']} missing from the "
+                        "downloaded archive.")
+                src = tar.extractfile(member)
+                extracted = Path(tmpdir) / "extracted"
+                with open(extracted, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                os.replace(extracted, target)
+        else:
+            os.replace(fetched, target)
+
+
+def ensure_diarize_models(q, cancel_event=None):
+    """Download any missing diarization models. Raises
+    DiarizationUnavailable (network trouble etc.) or _CancelledByUser."""
+    import urllib.error
+    for spec in _DIARIZE_MODELS.values():
+        try:
+            _download_one_model(spec, q, cancel_event)
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            raise DiarizationUnavailable(
+                f"Could not download the {spec['label']}:\n  {e}\n"
+                "Check your internet connection and run again - the "
+                "download is only needed once.")
+
+
+def _run_diarization(audio, num_speakers, q, cancel_event=None):
+    """Run sherpa-onnx speaker diarization over mono 16 kHz float32
+    samples. Returns [(start_seconds, end_seconds, speaker_int)] sorted
+    by start time. `num_speakers` <= 0 means detect automatically."""
+    try:
+        import sherpa_onnx
+    except ImportError:
+        raise DiarizationUnavailable(
+            "Speaker detection needs the 'sherpa-onnx' package, which "
+            "is not installed in this Python.\nInstall it with:\n"
+            "  pip install sherpa-onnx")
+
+    d = _diarize_models_dir()
+    config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+        segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+            pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
+                model=str(d / _DIARIZE_MODELS["segmentation"]["target"])),
+        ),
+        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+            model=str(d / _DIARIZE_MODELS["embedding"]["target"])),
+        clustering=sherpa_onnx.FastClusteringConfig(
+            num_clusters=(int(num_speakers) if num_speakers
+                          and num_speakers > 0 else -1),
+            threshold=_DIARIZE_CLUSTER_THRESHOLD),
+        min_duration_on=0.3,
+        min_duration_off=0.5,
+    )
+    sd = sherpa_onnx.OfflineSpeakerDiarization(config)
+
+    last_decile = [-1]
+
+    def progress(num_processed_chunks, num_total_chunks):
+        if num_total_chunks:
+            decile = int(num_processed_chunks * 10 / num_total_chunks)
+            if decile > last_decile[0]:
+                last_decile[0] = decile
+                q.put(("log",
+                       f"  ... listening for voices "
+                       f"{min(100, decile * 10)}%\n"))
+        return 0
+
+    t0 = time.time()
+    result = sd.process(audio, callback=progress).sort_by_start_time()
+    turns = [(float(r.start), float(r.end), int(r.speaker))
+             for r in result]
+    n = len({spk for _, _, spk in turns})
+    q.put(("log",
+           f"  found {n} speaker(s) in {time.time() - t0:.1f}s\n"))
+    return turns
+
+
+# ---- Mapping diarized turns onto Whisper output -----------------------
+
+def assign_word_speakers(words, turns):
+    """For each (start, end, text, prob) word, the speaker id of the
+    turn it overlaps most, or the nearest turn within
+    _DIARIZE_NEAR_TURN_SECONDS, else None. Returns a parallel list."""
+    out = []
+    for w_start, w_end, _text, _prob in words:
+        best_spk, best_overlap = None, 0.0
+        best_gap, near_spk = None, None
+        for t_start, t_end, spk in turns:
+            overlap = min(w_end, t_end) - max(w_start, t_start)
+            if overlap > best_overlap:
+                best_overlap, best_spk = overlap, spk
+            elif overlap <= 0:
+                gap = (t_start - w_end if t_start >= w_end
+                       else w_start - t_end)
+                if gap >= 0 and (best_gap is None or gap < best_gap):
+                    best_gap, near_spk = gap, spk
+        if best_spk is None and best_gap is not None \
+                and best_gap <= _DIARIZE_NEAR_TURN_SECONDS:
+            best_spk = near_spk
+        out.append(best_spk)
+    return out
+
+
+def _overlap_speaker(seg, turns):
+    """Majority speaker for a whole segment by time overlap, or None."""
+    times = {}
+    s_start, s_end = seg[0], seg[1]
+    for t_start, t_end, spk in turns:
+        overlap = min(s_end, t_end) - max(s_start, t_start)
+        if overlap > 0:
+            times[spk] = times.get(spk, 0.0) + overlap
+    if not times:
+        return None
+    return max(times, key=times.get)
+
+
+def split_segments_by_speaker(segments, words, word_speakers):
+    """Split Whisper segments at speaker changes using word timings.
+
+    Returns (new_segments, seg_speakers) - parallel lists. Segments
+    containing a single speaker (or no word data) pass through
+    unchanged with their engine punctuation intact; only genuinely
+    mixed segments are rebuilt from their words. Speaker runs shorter
+    than the jitter guards merge into the preceding run."""
+    new_segments, seg_speakers = [], []
+    wi = 0
+    n_words = len(words)
+    for seg in segments:
+        s_start, s_end, _text = seg
+        # Words belonging to this segment (both lists are time-ordered).
+        start_wi = wi
+        while wi < n_words and words[wi][0] < s_end - 0.01:
+            wi += 1
+        seg_words = words[start_wi:wi]
+        seg_word_spks = word_speakers[start_wi:wi]
+
+        if not seg_words:
+            new_segments.append(seg)
+            seg_speakers.append(None)
+            continue
+
+        # Consecutive same-speaker runs; None words join the open run.
+        runs = []      # [ [speaker, [(word tuple), ...]], ... ]
+        for w, spk in zip(seg_words, seg_word_spks):
+            if runs and (spk is None or runs[-1][0] is None
+                         or spk == runs[-1][0]):
+                if runs[-1][0] is None:
+                    runs[-1][0] = spk
+                runs[-1][1].append(w)
+            else:
+                runs.append([spk, [w]])
+
+        # Fold jitter runs into their predecessor, and re-coalesce
+        # adjacent runs that end up with the same speaker (an A-jitter-A
+        # sandwich must collapse back to a single A run).
+        merged = []
+        for spk, run_words in runs:
+            duration = run_words[-1][1] - run_words[0][0]
+            is_jitter = (len(run_words) < _DIARIZE_MIN_RUN_WORDS
+                         and duration < _DIARIZE_MIN_RUN_SECONDS)
+            if merged and (spk == merged[-1][0] or is_jitter):
+                merged[-1][1].extend(run_words)
+            else:
+                merged.append([spk, list(run_words)])
+
+        if len(merged) == 1:
+            new_segments.append(seg)
+            seg_speakers.append(merged[0][0])
+            continue
+
+        for spk, run_words in merged:
+            text = "".join(w[2] for w in run_words).strip()
+            if not text:
+                continue
+            new_segments.append(
+                (float(run_words[0][0]), float(run_words[-1][1]), text))
+            seg_speakers.append(spk)
+    return new_segments, seg_speakers
+
+
+def build_speaker_paragraphs(segments, words, turns, gap_threshold):
+    """The full mapping pipeline: turns + Whisper output -> paragraphs
+    with per-paragraph review-slot letters ("1".."9" or None)."""
+    if words:
+        word_spks = assign_word_speakers(words, turns)
+        segments, seg_speakers = split_segments_by_speaker(
+            segments, words, word_spks)
+    else:
+        seg_speakers = [_overlap_speaker(seg, turns) for seg in segments]
+
+    paragraphs, para_spk, para_conf = paragraphify_speakers(
+        segments, gap_threshold, seg_speakers)
+
+    # Review slots are "1".."9": rank speakers by total speech time,
+    # keep the busiest nine, and number them in order of first
+    # appearance (the first voice heard becomes Speaker 1).
+    totals = {}
+    for i, spk in enumerate(para_spk):
+        if spk is None:
+            continue
+        para = paragraphs[i]
+        totals[spk] = (totals.get(spk, 0.0)
+                       + max(0.0, para[-1][1] - para[0][0]))
+    keep = set(sorted(totals, key=totals.get, reverse=True)
+               [:TranscriptModel.MAX_SPEAKERS])
+    letters = {}
+    for spk in (s for s in para_spk if s is not None and s in keep):
+        if spk not in letters:
+            letters[spk] = str(len(letters) + 1)
+
+    para_letters = []
+    for spk, conf in zip(para_spk, para_conf):
+        if spk is None or spk not in letters \
+                or conf < _DIARIZE_MIN_LABELLED_SHARE:
+            para_letters.append(None)
+        else:
+            para_letters.append(letters[spk])
+    return paragraphs, para_letters
 
 
 # =====================================================================
@@ -1282,14 +1801,26 @@ def _extract_word_conf(result):
 
 def transcribe_worker(params, q, cancel_event):
     """Background-thread entry point. Dispatches to the chosen engine's
-    runner, then handles the common post-processing: paragraphify, review-
-    or-direct-save, extra output formats."""
+    runner, then handles the common post-processing: speaker detection,
+    paragraphify, review-or-direct-save, extra output formats."""
     engine = params.get("engine", "whisper")
     runner = {
         "whisper": _run_openai_whisper,
         "faster": _run_faster_whisper,
         "mlx": _run_mlx_whisper,
     }.get(engine, _run_openai_whisper)
+
+    # Decode once up front (PyAV). Every engine accepts the raw samples,
+    # which removes their need for an ffmpeg binary, and the speaker
+    # detector reuses the same array. On failure the runners receive the
+    # file path and decode with whatever their engine ships.
+    audio = decode_audio_16k(params["input"])
+    if audio is not None:
+        params["_audio"] = audio
+        duration = len(audio) / AUDIO_SAMPLE_RATE
+        q.put(("log", f"Decoded audio: {_format_duration(duration)}\n"))
+        if not params.get("audio_duration"):
+            params["audio_duration"] = duration
 
     try:
         segments, result, used_partial = runner(params, q, cancel_event)
@@ -1314,7 +1845,8 @@ def transcribe_worker(params, q, cancel_event):
             q.put(("error", "No speech was detected in the file."))
         return
 
-    paragraphs = paragraphify(segments, params["gap"])
+    paragraphs, para_letters = _paragraphs_with_speakers(
+        segments, result, params, q, cancel_event)
     out_path = Path(params["output"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1334,17 +1866,25 @@ def transcribe_worker(params, q, cancel_event):
                 "extra_formats": params.get("extra_formats") or [],
                 "word_conf": word_conf,
                 "audio_path": params["input"],
+                "preset_speakers": para_letters,
+                "diarized": para_letters is not None,
             },
         ))
         return
 
+    # Unattended save: detected speakers go in as generic names the
+    # user can refine later from the Library's review pane.
+    speaker_names = None
+    if para_letters is not None:
+        speaker_names = [f"Speaker {L}" if L else None
+                         for L in para_letters]
     try:
         write_paragraphs_to_file(
             paragraphs, out_path,
             show_timestamp=params.get("show_timestamp", True),
             title=params.get("title"),
             output_format=params.get("output_format", "txt"),
-            speakers=None,
+            speakers=speaker_names,
         )
     except ImportError as e:
         q.put(("error", str(e)))
@@ -1361,6 +1901,49 @@ def transcribe_worker(params, q, cancel_event):
         _write_extra_formats(result, out_path, extra_formats, q)
 
     q.put(("done", str(out_path)))
+
+
+def _paragraphs_with_speakers(segments, result, params, q, cancel_event):
+    """Group segments into paragraphs, running the speaker-detection
+    post-pass first when the run asked for it. Returns (paragraphs,
+    para_letters) where para_letters is None when no detection ran -
+    any failure downgrades to plain paragraphify with a logged warning
+    rather than failing a finished transcription."""
+    gap = params["gap"]
+    if not params.get("diarize"):
+        return paragraphify(segments, gap), None
+    try:
+        audio = params.get("_audio")
+        if audio is None:
+            audio = decode_audio_16k(params["input"])
+        if audio is None:
+            raise DiarizationUnavailable(
+                "the audio could not be decoded for speaker detection "
+                "(the 'av' package is required).")
+        if not diarize_models_ready():
+            ensure_diarize_models(q, cancel_event)
+        q.put(("log", "\nIdentifying speakers...\n"))
+        turns = _run_diarization(
+            audio, params.get("num_speakers") or 0, q, cancel_event)
+        words = _extract_word_conf(result) if result else []
+        paragraphs, para_letters = build_speaker_paragraphs(
+            segments, words, turns, gap)
+        labelled = sum(1 for L in para_letters if L)
+        q.put(("log",
+               f"  labelled {labelled} of {len(paragraphs)} "
+               "paragraphs (uncertain ones are left for review)\n"))
+        return paragraphs, para_letters
+    except _CancelledByUser:
+        q.put(("log", "\n[Speaker detection skipped - stopped by "
+                      "user]\n"))
+    except DiarizationUnavailable as e:
+        q.put(("log", f"\nSpeaker detection skipped: {e}\n"))
+    except Exception as e:
+        _log("diarization failed:\n" + traceback.format_exc())
+        q.put(("log",
+               f"\nSpeaker detection failed - continuing without it.\n"
+               f"  {type(e).__name__}: {e}\n"))
+    return paragraphify(segments, gap), None
 
 
 def _run_openai_whisper(params, q, cancel_event):
@@ -1430,12 +2013,16 @@ def _run_openai_whisper(params, q, cancel_event):
             raise _CancelledByUser()
         return original_update(self_, n)
 
+    audio_input = params.get("_audio")
+    if audio_input is None:
+        audio_input = params["input"]
+
     tqdm.tqdm.update = cancelling_update
     try:
         with contextlib.redirect_stdout(writer), \
              contextlib.redirect_stderr(writer):
             try:
-                result = model.transcribe(params["input"], **kwargs)
+                result = model.transcribe(audio_input, **kwargs)
             except _CancelledByUser:
                 used_partial = True
                 result = {"segments": []}
@@ -1519,7 +2106,10 @@ def _run_faster_whisper(params, q, cancel_event):
     seg_dicts = []
     used_partial = False
 
-    segments_iter, info = model.transcribe(params["input"], **kwargs)
+    audio_input = params.get("_audio")
+    if audio_input is None:
+        audio_input = params["input"]
+    segments_iter, info = model.transcribe(audio_input, **kwargs)
     if audio_duration is None and getattr(info, "duration", None):
         audio_duration = float(info.duration)
 
@@ -1630,6 +2220,10 @@ def _run_mlx_whisper(params, q, cancel_event):
     if params.get("initial_prompt"):
         kwargs["initial_prompt"] = params["initial_prompt"]
 
+    audio_input = params.get("_audio")
+    if audio_input is None:
+        audio_input = params["input"]
+
     q.put(("log", f"Transcribing {Path(params['input']).name}...\n"))
     q.put(("status", {"stage": "loading",
                       "text": f"Loading model '{params['model']}'..."}))
@@ -1645,7 +2239,7 @@ def _run_mlx_whisper(params, q, cancel_event):
             on_progress=lambda d: q.put(("download", d)),
             on_log=lambda t: q.put(("log", t))):
         with contextlib.redirect_stdout(writer):
-            result = mlx_whisper.transcribe(params["input"], **kwargs)
+            result = mlx_whisper.transcribe(audio_input, **kwargs)
     q.put(("log", f"\n  transcribed in {time.time() - t0:.1f}s\n\n"))
 
     captured = [
@@ -2477,9 +3071,7 @@ def build_worker_params(settings, in_path, out_path, *,
     prompt = (settings.get("prompt") or "").strip()
     doc_title = (settings.get("title") or "").strip()
 
-    engine_key = next(
-        (k for k, n in AVAILABLE_ENGINES if n == settings["engine"]),
-        "whisper")
+    engine_key = resolve_engine_key(settings["engine"])
 
     return dict(
         input=in_path,
@@ -2496,10 +3088,11 @@ def build_worker_params(settings, in_path, out_path, *,
         logprob_threshold=settings["logprob_threshold"],
         no_speech_threshold=settings["no_speech_threshold"],
         condition_on_previous_text=settings["condition_on_previous_text"],
-        # Confidence highlighting requires word timestamps, so enable
-        # them whenever either option is on.
+        # Confidence highlighting and speaker detection both need word
+        # timestamps, so enable them whenever any of the three is on.
         word_timestamps=(settings["word_timestamps"]
-                         or settings["highlight_confidence"]),
+                         or settings["highlight_confidence"]
+                         or bool(settings.get("diarize"))),
         highlight_confidence=settings["highlight_confidence"],
         initial_prompt=prompt or None,
         # With no title, name the document after the source file. (The
@@ -2512,6 +3105,8 @@ def build_worker_params(settings, in_path, out_path, *,
         show_timestamp=settings["show_timestamp"],
         audio_duration=get_audio_duration(in_path),
         review_before_save=review_before_save,
+        diarize=bool(settings.get("diarize")),
+        num_speakers=int(settings.get("num_speakers") or 0),
     )
 
 
@@ -2530,12 +3125,13 @@ _SETTINGS_BOOL_KEYS = (
     "show_timestamp", "review", "condition_on_previous_text",
     "word_timestamps", "extra_json", "extra_srt", "extra_vtt",
     "extra_tsv", "highlight_confidence", "show_details",
+    "diarize", "show_all_models",
 )
 
 _SETTINGS_NUMBER_KEYS = (
     "gap", "temperature", "beam_size", "best_of",
     "compression_ratio_threshold", "logprob_threshold",
-    "no_speech_threshold",
+    "no_speech_threshold", "num_speakers",
 )
 
 
@@ -2543,7 +3139,8 @@ def _settings_choices():
     """Allowed values for every enumerated setting, computed live so
     the engine list reflects what is actually installed."""
     return {
-        "engine": [name for _, name in AVAILABLE_ENGINES],
+        "engine": [ENGINE_AUTO_NAME] + [name for _, name in
+                                        AVAILABLE_ENGINES],
         "model": list(WHISPER_MODELS),
         "language": [n for n, _ in LANGUAGES],
         "task": ["transcribe", "translate"],
@@ -2555,9 +3152,8 @@ def _settings_choices():
 def default_settings():
     """The out-of-the-box settings - the same values the Tk widgets
     start with."""
-    engines = [name for _, name in AVAILABLE_ENGINES]
     return {
-        "engine": engines[0] if engines else "",
+        "engine": ENGINE_AUTO_NAME,
         "model": "large-v3-turbo",
         "language": "English",
         "task": "transcribe",
@@ -2582,6 +3178,9 @@ def default_settings():
         "highlight_confidence": False,
         "theme": "auto",
         "show_details": False,
+        "diarize": False,
+        "num_speakers": 0,
+        "show_all_models": False,
     }
 
 
@@ -3811,6 +4410,16 @@ def _audio_cache_key(path):
 
 def _source_audio_codec(path):
     """The first audio stream's codec name, or None."""
+    try:
+        import av
+        with av.open(str(path)) as container:
+            if container.streams.audio:
+                return container.streams.audio[0].codec_context.name
+            return None
+    except ImportError:
+        pass
+    except Exception:
+        return None
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         return None
@@ -3824,6 +4433,55 @@ def _source_audio_codec(path):
         return codec or None
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _extract_audio_m4a_pyav(src, target):
+    """Extract the first audio stream of `src` into an AAC .m4a at
+    `target` using PyAV. Remuxes without re-encoding when the source
+    audio is already AAC. Raises on any failure (including PyAV being
+    absent) - the caller falls back to the ffmpeg binary."""
+    import av
+
+    with av.open(str(src)) as in_container:
+        if not in_container.streams.audio:
+            raise ValueError("No audio stream in file.")
+        in_stream = in_container.streams.audio[0]
+        codec = in_stream.codec_context.name
+
+        with av.open(str(target), mode="w", format="mp4") as out_container:
+            if codec == "aac":
+                # Remux: copy packets straight across.
+                out_stream = out_container.add_stream(template=in_stream)
+                for packet in in_container.demux(in_stream):
+                    if packet.dts is None:
+                        continue
+                    packet.stream = out_stream
+                    out_container.mux(packet)
+                return
+
+            # Transcode to AAC at the source rate; collapse >2 channels
+            # to stereo (review playback doesn't need surround).
+            rate = in_stream.codec_context.sample_rate or 44100
+            channels = getattr(in_stream.codec_context, "channels", None)
+            if channels is None:
+                layout = getattr(in_stream.codec_context, "layout", None)
+                channels = getattr(layout, "nb_channels", 2)
+            layout = "mono" if channels == 1 else "stereo"
+            out_stream = out_container.add_stream("aac", rate=rate)
+            out_stream.bit_rate = 128_000
+            resampler = av.AudioResampler(
+                format="fltp", layout=layout, rate=rate)
+
+            def encode_frames(frame):
+                for rf in resampler.resample(frame):
+                    for pkt in out_stream.encode(rf):
+                        out_container.mux(pkt)
+
+            for frame in in_container.decode(in_stream):
+                encode_frames(frame)
+            encode_frames(None)                      # flush resampler
+            for pkt in out_stream.encode(None):      # flush encoder
+                out_container.mux(pkt)
 
 
 class AudioPrep:
@@ -3867,32 +4525,43 @@ class AudioPrep:
                 self.serve_path = str(src)
                 self._set("ready")
                 return
-            ffmpeg = shutil.which("ffmpeg")
-            if not ffmpeg:
-                self._set("unavailable",
-                          "ffmpeg is needed to play this file type.")
-                return
             target = _audio_cache_dir() / f"{_audio_cache_key(src)}.m4a"
             if target.exists():
                 self.serve_path = str(target)
                 self._set("ready")
                 return
             self._set("extracting")
-            codec_args = (["-c:a", "copy"]
-                          if _source_audio_codec(src) == "aac"
-                          else ["-c:a", "aac", "-b:a", "128k"])
             tmp = target.with_suffix(".part.m4a")
-            cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                   "-i", str(src), "-vn", "-map", "0:a:0",
-                   *codec_args, str(tmp)]
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=1800)
-            if proc.returncode != 0 or not tmp.exists():
-                detail = (proc.stderr or "").strip().splitlines()
-                self._set("unavailable",
-                          detail[-1] if detail else "Extraction failed.")
+
+            # PyAV first (no external binary needed), the ffmpeg binary
+            # as fallback, and a clear message when neither works.
+            try:
+                _extract_audio_m4a_pyav(src, tmp)
+            except Exception:
+                _log("PyAV playback extraction failed, trying ffmpeg:\n"
+                     + traceback.format_exc())
                 tmp.unlink(missing_ok=True)
-                return
+                ffmpeg = shutil.which("ffmpeg")
+                if not ffmpeg:
+                    self._set("unavailable",
+                              "Playing this file type needs the 'av' "
+                              "package or an ffmpeg install.")
+                    return
+                codec_args = (["-c:a", "copy"]
+                              if _source_audio_codec(src) == "aac"
+                              else ["-c:a", "aac", "-b:a", "128k"])
+                cmd = [ffmpeg, "-hide_banner", "-loglevel", "error",
+                       "-y", "-i", str(src), "-vn", "-map", "0:a:0",
+                       *codec_args, str(tmp)]
+                proc = subprocess.run(cmd, capture_output=True,
+                                      text=True, timeout=1800)
+                if proc.returncode != 0 or not tmp.exists():
+                    detail = (proc.stderr or "").strip().splitlines()
+                    self._set("unavailable",
+                              detail[-1] if detail
+                              else "Extraction failed.")
+                    tmp.unlink(missing_ok=True)
+                    return
             os.replace(tmp, target)
             _sweep_audio_cache()
             self.serve_path = str(target)
@@ -3974,6 +4643,7 @@ def autosave_restore_info(data):
         "result": None,
         "extra_formats": [],
         "loaded": bool(data.get("loaded")),
+        "diarized": bool(data.get("diarized")),
         "audio_path": data.get("audio_path"),
         "preset_speakers": data.get("speakers") or [],
         "preset_speaker_names": data.get("speaker_names") or {},
@@ -3998,6 +4668,7 @@ class ReviewSession:
         self.audio_path = info.get("audio_path")
         self.result = info.get("result")
         self.extra_formats = info.get("extra_formats") or []
+        self.diarized = bool(info.get("diarized"))
         self._log_line = log or (lambda text: None)
         self.lock = threading.RLock()
         self.closed = False
@@ -4085,6 +4756,7 @@ class ReviewSession:
                 "can_undo": m.can_undo(),
                 "can_redo": m.can_redo(),
                 "has_word_conf": bool(m.word_conf),
+                "diarized": self.diarized,
                 "paragraphs": paragraphs,
             }
 
@@ -4170,6 +4842,7 @@ class ReviewSession:
             "title": self.title,
             "output_format": self.output_format,
             "loaded": self.loaded,
+            "diarized": self.diarized,
             "audio_path": self.audio_path,
             "paragraphs": [[list(seg) for seg in para]
                            for para in paragraphs],
@@ -4385,18 +5058,24 @@ class WebBackend:
 
         @app.get("/api/meta")
         def api_meta():
+            import importlib.util as _ilu
             return {
                 "version": __version__,
                 "about_text": ABOUT_TEXT,
                 "platform": sys.platform,
                 "reveal_label": _REVEAL_LABEL,
                 "ui_mode": "webview" if backend.has_window else "browser",
-                "engines": [{"key": k, "name": n}
-                            for k, n in AVAILABLE_ENGINES],
+                "engines": ([{"key": "auto", "name": ENGINE_AUTO_NAME}]
+                            + [{"key": k, "name": n}
+                               for k, n in AVAILABLE_ENGINES]),
                 "models": list(WHISPER_MODELS),
+                "model_tiers": MODEL_TIERS,
                 "languages": [[n, c] for n, c in LANGUAGES],
                 "palettes": _PALETTES,
                 "ffmpeg": bool(shutil.which("ffmpeg")),
+                "pyav": _have_pyav(),
+                "diarize_available": (
+                    _ilu.find_spec("sherpa_onnx") is not None),
                 "readme_available": _find_readme() is not None,
             }
 

@@ -29,3 +29,4 @@ web/dist/
 # Logs & temp
 *.log
 *.tmp
+.claude/launch.json

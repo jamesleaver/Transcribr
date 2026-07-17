@@ -1185,8 +1185,9 @@ class TestReviewSession(unittest.TestCase):
         self.assertEqual(
             set(data.keys()),
             {"out_path", "show_timestamp", "title", "output_format",
-             "loaded", "audio_path", "paragraphs", "speakers",
-             "speaker_names", "saved_at"})   # exact v0.6.0 schema
+             "loaded", "diarized", "audio_path", "paragraphs",
+             "speakers", "speaker_names",
+             "saved_at"})   # v0.6.0 schema + 0.9.0's "diarized" flag
         self.assertEqual(data["speakers"][0], "3")
         self.assertEqual(data["speaker_names"], {"3": "Q C"})
         restored = T.autosave_restore_info(data)
@@ -1487,7 +1488,13 @@ class TestHttpApi(unittest.TestCase):
 
         golden["out_path"] = out
         golden["saved_at"] = produced["saved_at"]
+        golden["diarized"] = False    # intentional 0.9.0 addition
         self.assertEqual(produced, golden)
+
+        # A pre-0.9.0 autosave (no "diarized" key) must still restore.
+        del golden["diarized"]
+        restored = T.autosave_restore_info(golden)
+        self.assertFalse(restored["diarized"])
         session.model.close()
 
 
@@ -1587,9 +1594,27 @@ class TestBuildWorkerParams(unittest.TestCase):
     def test_engine_display_name_maps_to_key(self):
         self.assertEqual(self._params()["engine"], "faster")
 
-    def test_unknown_engine_falls_back_to_whisper(self):
+    def test_unknown_engine_resolves_to_best_installed(self):
+        # Stale/unknown names resolve like the Automatic entry: prefer
+        # mlx, then faster, then the reference engine.
         self.assertEqual(
-            self._params(engine="Something Else")["engine"], "whisper")
+            self._params(engine="Something Else")["engine"], "faster")
+
+    def test_automatic_engine_prefers_mlx_when_installed(self):
+        T.AVAILABLE_ENGINES = list(self._ENGINES) + [
+            ("mlx", "mlx-whisper (Apple Silicon)")]
+        self.assertEqual(
+            self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "mlx")
+
+    def test_automatic_engine_falls_back_to_faster(self):
+        self.assertEqual(
+            self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "faster")
+
+    def test_diarize_forces_word_timestamps(self):
+        p = self._params(word_timestamps=False, highlight_confidence=False,
+                         diarize=True)
+        self.assertTrue(p["word_timestamps"])
+        self.assertTrue(p["diarize"])
 
     def test_title_falls_back_to_filename(self):
         p = self._params(title="", prompt="")

@@ -1,14 +1,16 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.8.1.
+(c) James Leaver, 2026. Version 0.9.0.
 
 An experimental GUI for transcribing audio and video files on macOS and
-Windows. A Whisper engine (openai-whisper, faster-whisper, or
-mlx-whisper) does the transcription, the result is grouped into likely
-paragraphs, and a built-in review pane lets you label speakers, edit
-text, search and replace, and specifically play each paragraph from 
-the source audio before saving as Word (`.docx`), PDF, or plain text.
-Several files can be queued and transcribed in one unattended batch.
+Windows. A Whisper engine (faster-whisper by default; mlx-whisper and
+openai-whisper where installed) does the transcription, an optional
+speaker-detection pass works out who is speaking, the result is grouped
+into likely paragraphs, and a built-in review pane lets you check and
+label speakers, edit text, search and replace, and specifically play
+each paragraph from the source audio before saving as Word (`.docx`),
+PDF, or plain text. Several files can be queued and transcribed in one
+unattended batch.
 
 **Everything runs locally on your computer — no audio, video, or
 transcripts are uploaded to the internet.** This may be particularly
@@ -22,16 +24,19 @@ prohibition upon publication).
 The quality of the transcription will depend on the quality of the audio
 fed into it, as well as various settings that can be configured by the
 user. Good quality audio will usually produce good quality transcript.
-**Advanced decoding** can be adjusted that will improve the quality of poor
-transcripts (any even nonsense ones). It can be worth playing around 
+**Accuracy tuning** settings can be adjusted that will improve the quality
+of poor transcripts (any even nonsense ones). It can be worth playing around 
 with them to work out what might work best for paticular types of
-recordings. See the heading **Decoding options** below for a further
+recordings. See the heading **Accuracy tuning** below for a further
 description of what various settings do.
 
 If words from different speakers are being transcribed into the same
 paragraph, adjust the **paragraph gap** setting down. If the same speaker's
 words are being transcribed into multiple paragraphs, then adjust the same
-setting up.
+setting up. Better still, turn on **Detect speakers automatically** —
+it listens for different voices, breaks paragraphs where the speaker
+changes, and pre-fills the speaker labels for you to check in Review
+(see **Detecting speakers automatically** below).
 
 The **Review pane** is designed to allow easy editing of the transcription
 created by the software. You can navigate between paragraphs of text with
@@ -45,9 +50,12 @@ it, press the `M` key. To listen to the audio segment that relates to the
 paragraph that is in focus, press `P`.
 
 When a particular model is run for the first time, that model will be
-downloaded to your computer and stored locally. The `small.en` and `medium.en`
-models may perform adequately on clear, crisp audio. On trickier audio, the
-`large-v3-turbo` model may do better, but it will be slower.
+downloaded to your computer and stored locally. The model picker offers
+three tiers: **Quick draft** (`small.en`) may perform adequately on
+clear, crisp audio; **Standard** (`large-v3-turbo`, recommended) does
+markedly better on trickier audio; **Maximum accuracy** (`large-v3`)
+is the slow, last-resort option. Tick *Show all Whisper models* to
+choose from the full list instead.
 
 Use at your own risk.
 
@@ -93,20 +101,21 @@ Transcribr-Installer/
 
 **macOS:**
 - macOS 11 (Big Sur) or later
-- ~5 GB free disk space
+- ~3 GB free disk space (mostly for the Whisper models)
 - An admin password (Homebrew may need it during install)
 
 **Windows:**
 - Windows 10 (1809+) or Windows 11
-- ~5 GB free disk space
+- ~3 GB free disk space (mostly for the Whisper models)
 - `winget` (built into modern Windows; install "App Installer" from the
   Microsoft Store if missing)
-- The Microsoft Edge WebView2 runtime, for the 0.7.0 interface —
-  already present on Windows 11 and most Windows 10 machines; the
-  installer checks and installs it if missing
+- The Microsoft Edge WebView2 runtime — already present on Windows 11
+  and most Windows 10 machines; the installer checks and installs it
+  if missing
 
 You do **not** need Python, ffmpeg, or Whisper pre-installed.
-The installer handles all of that.
+The installer handles all of that (and since 0.9.0 no separate ffmpeg
+is needed at all — the PyAV package bundles the decoding libraries).
 
 ## How to install
 
@@ -119,11 +128,12 @@ The installer handles all of that.
    "unidentified developer" warning. After that, double-click works.)
 4. Read what it tells you and confirm prompts. It will:
    - Ask before installing Homebrew (only if missing)
-   - Install Python 3.12 and ffmpeg via Homebrew
+   - Install Python 3.12 via Homebrew
    - Create a venv at `~/Library/Application Support/Transcribr/`
-   - Install the faster-whisper engine, plus mlx-whisper on Apple
-     Silicon (macOS 13.5+), along with python-docx, reportlab, pywebview
-     and bottle (a few hundred MB — no PyTorch)
+   - Install the faster-whisper engine and sherpa-onnx (speaker
+     detection), plus mlx-whisper on Apple Silicon (macOS 13.5+),
+     along with python-docx, reportlab, pywebview and bottle (a few
+     hundred MB — no PyTorch, no separate ffmpeg)
    - Create `/Applications/Transcribr.app`
 5. Launch from Spotlight, Launchpad, or the Applications folder.
 
@@ -139,10 +149,11 @@ The installer handles all of that.
    - If Windows SmartScreen warns, click "More info" -> "Run anyway".
    - The installer runs in a console window; PowerShell does the work.
 4. Read what it tells you and confirm prompts. It will:
-   - Use winget to install Python 3.12 and ffmpeg (Gyan.FFmpeg)
+   - Install Python 3.12 (x64) from python.org
    - Create a venv at `%LOCALAPPDATA%\Transcribr\venv`
-   - Install the faster-whisper engine plus python-docx, reportlab,
-     pywebview and bottle (a few hundred MB — no PyTorch)
+   - Install the faster-whisper engine and sherpa-onnx (speaker
+     detection) plus python-docx, reportlab, pywebview and bottle
+     (a few hundred MB — no PyTorch, no separate ffmpeg)
    - Place a Desktop shortcut and a Start Menu entry
 5. Launch from your Desktop or Start Menu (search "Transcribr").
 
@@ -208,7 +219,7 @@ is safer than a full narrative sentence. Worth including: speaker and
 referenced names, ambiguous place names, and acronyms. Keep it under
 about 200 words; longer prompts get truncated. If a run comes out
 garbled, try clearing this field, or turn off **Condition on previous
-text** (Advanced decoding) so an early mistake can't propagate.
+text** (Accuracy tuning) so an early mistake can't propagate.
 
 **Batch queue.** Add several files to transcribe them one after
 another in a single unattended run. Each transcript is saved next to
@@ -217,30 +228,28 @@ the run carries on, with a summary at the end. Open each result from
 the **Library** afterwards to label speakers. Stage a single file to
 use the normal flow instead (which *does* pause for review).
 
-### Engine and model
+### Model and language
 
-**Engine.** Which Whisper implementation does the work. Only engines
-actually installed appear (install more from the **Models** tab):
+**Model.** The main quality / speed trade-off, presented as three
+choices:
 
-- **faster-whisper** — CTranslate2-based; substantially faster on CPU
-  with essentially identical output. Installed by default; no PyTorch.
-- **mlx-whisper** — Apple-Silicon-only (macOS 13.5+), uses the Mac's
-  GPU via MLX. Fastest option on M-series machines. No mid-run Stop.
-  Installed by default on Apple Silicon.
-- **openai-whisper** — the reference implementation. Most thoroughly
-  tested, but pulls in PyTorch (~2 GB), so it's **optional**: install
-  it from the **Models** tab when you want it.
+| Choice | Model underneath | Download | Notes |
+|---|---|---|---|
+| **Quick draft** | `small.en` / `small` | ~500 MB | Fast first pass; fine for clear speech, expect mistakes |
+| **Standard** (recommended) | `large-v3-turbo` | ~1.6 GB | Accurate and reasonably quick — right for most work, including legal / interview / DVEC jobs |
+| **Maximum accuracy** | `large-v3` | ~3 GB | Slowest; for difficult audio where every word matters |
 
-**Model.** The main quality / speed trade-off. English-only models
-(`.en` suffix) are slightly more accurate on English and ignore the
-*Language* dropdown.
+When the language is English, the English-only variant (`.en`) is used
+automatically where one exists — it is slightly more accurate there.
+Tick **Show all Whisper models** to pick from the full historical list
+(`tiny` through `large-v3`) instead:
 
 | Model | Download | Speed (relative) | Notes |
 |---|---|---|---|
 | `tiny.en`, `tiny` | ~75 MB | very fast | Often inaccurate; useful for quick dry runs |
 | `base.en`, `base` | ~150 MB | fast | Acceptable for clear, simple speech |
 | `small.en`, `small` | ~500 MB | moderate | Good balance for casual jobs |
-| `medium.en`, `medium` | ~1.5 GB | slow | Recommended for legal / interview / DVEC work |
+| `medium.en`, `medium` | ~1.5 GB | slow | Superseded by `large-v3-turbo` for most work |
 | `large-v1`, `large-v2`, `large-v3` | ~3 GB | very slow | Best raw accuracy; runtime can be painful on a CPU |
 | `large-v3-turbo` | ~1.6 GB | fast (despite the size) | Faster than `large-v3` with similar accuracy. No `.en` variant |
 
@@ -251,19 +260,57 @@ what's downloaded, how much space it uses, and lets you pre-download or
 remove models — see [Models](#models) below.
 
 **Language / Task.** Set the language explicitly if you know it
-(auto-detect costs a little time and accuracy). *Translate* converts
-non-English audio to English output; *Transcribe* keeps the source
-language.
+(auto-detect costs a little time and accuracy). *Translate into
+English* converts non-English audio to English output; *Transcribe*
+keeps the source language.
 
-**Decoding options.** These usually do not need touching — the
-defaults are tuned by Whisper's authors. Briefly: **Temperature** 0 =
-deterministic; **Beam size / Best of** higher = better but slower;
-**Compression-ratio threshold** catches hallucination loops;
-**No-speech threshold** raises/lowers how readily silence is skipped;
-**Condition on previous text** improves consistency but can propagate
-an early mistake. **Highlight low-confidence words in review** records
-per-word confidence during transcription (slightly slower) so the
-review pane can shade words the engine was unsure about.
+### Detecting speakers automatically
+
+Tick **Detect speakers automatically** and Transcribr listens for
+different voices, breaks paragraphs where the speaker changes, and
+pre-fills the speaker labels for you to check in the review pane. Where
+attribution is doubtful (overlapping voices, very short interjections)
+the paragraph is deliberately left unlabelled — press `N` in review to
+jump straight to anything it left for you. If you know how many people
+are speaking, set **How many speakers?** — it noticeably improves the
+grouping; leave it at 0 to detect the count automatically.
+
+The first use downloads two small helper models (~33 MB total) — a
+voice-activity/segmentation model and a voice-embedding model — which
+are verified and cached under the app's data folder. Like everything
+else, speaker detection runs entirely on your computer. In batch runs
+(which never pause for review) detected speakers are written into the
+saved transcripts as "Speaker 1", "Speaker 2", … — open the file from
+the Library later to rename them.
+
+### Accuracy tuning (rarely needed)
+
+**Engine.** Which Whisper implementation does the work. **Automatic
+(recommended)** picks the fastest engine installed on this computer
+(mlx-whisper on Apple Silicon, otherwise faster-whisper) and is the
+right choice unless you are troubleshooting. Only engines actually
+installed appear (install more from the **Models** tab):
+
+- **faster-whisper** — CTranslate2-based; substantially faster on CPU
+  with essentially identical output. Installed by default; no PyTorch,
+  and its PyAV dependency handles all audio decoding (no ffmpeg).
+- **mlx-whisper** — Apple-Silicon-only (macOS 13.5+), uses the Mac's
+  GPU via MLX. Fastest option on M-series machines. No mid-run Stop.
+  Installed by default on Apple Silicon.
+- **openai-whisper** — the reference implementation. Most thoroughly
+  tested, but pulls in PyTorch (~2 GB), so it's **optional**: install
+  it from the **Models** tab when you want it.
+
+**The other options** usually do not need touching — the defaults are
+tuned by Whisper's authors, and each field explains itself in the
+interface. Briefly: **Temperature** 0 = deterministic; **Beam size /
+Best of** higher = better but slower; **Compression-ratio threshold**
+catches hallucination loops; **No-speech threshold** raises/lowers how
+readily silence is skipped; **Condition on previous text** improves
+consistency but can propagate an early mistake. **Highlight
+low-confidence words in review** records per-word confidence during
+transcription (slightly slower) so the review pane can shade words the
+engine was unsure about.
 
 ### Paragraphs and extra outputs
 
@@ -335,7 +382,10 @@ mid-run by mlx-whisper).
 After a transcription (or when opening an existing `.docx`/`.txt`
 transcript), the Review view shows the paragraphs in three columns —
 speaker, timestamp, text — with up to nine colour-coded speakers named
-in the panel on the right.
+in the panel on the right. If speaker detection was on, the labels
+arrive pre-filled ("speakers suggested automatically — please verify"
+appears in the header) and your job is to check them, name the
+speakers, and fill in whatever was left unlabelled.
 
 | Action | How |
 |---|---|
@@ -390,6 +440,7 @@ Both installers are safe to re-run. They will:
 | The web interface (pre-built) | `~/Library/Application Support/Transcribr/webdist/` |
 | The application | `/Applications/Transcribr.app` |
 | Settings / recent / autosave | `~/Library/Application Support/Transcribr/*.json` |
+| Speaker-detection models | `~/Library/Application Support/Transcribr/models/` |
 | Launch logs | `~/Library/Logs/Transcribr/launch.log` |
 | Whisper model cache | `~/.cache/whisper/` |
 
@@ -403,6 +454,7 @@ Both installers are safe to re-run. They will:
 | Desktop shortcut | `%USERPROFILE%\Desktop\Transcribr.lnk` |
 | Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk` |
 | Settings / recent / autosave | `%APPDATA%\Transcribr\*.json` |
+| Speaker-detection models | `%APPDATA%\Transcribr\models\` |
 | Launch logs | `%LOCALAPPDATA%\Transcribr\launch.log` |
 | Whisper model cache | `%USERPROFILE%\.cache\whisper\` |
 
@@ -423,6 +475,7 @@ In PowerShell:
 
 ```powershell
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Transcribr"
+Remove-Item -Recurse -Force "$env:APPDATA\Transcribr"          # settings + speaker models
 Remove-Item -Force "$env:USERPROFILE\Desktop\Transcribr.lnk"
 Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk"
 Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\whisper"  # optional
@@ -483,10 +536,12 @@ open the Vite URL. If the repository lives in Dropbox, mark
 ## What this does NOT install
 
 The Whisper model weights themselves. The first time you run a
-particular model from the GUI, the engine downloads it (~150 MB for
-small, ~1.5 GB for medium, ~3 GB for large-v3) and caches it locally.
-Subsequent runs use the cached version. You can also pre-download or
-remove models from the **Models** tab.
+particular model from the GUI, the engine downloads it (~500 MB for the
+Quick draft tier, ~1.6 GB for Standard, ~3 GB for Maximum accuracy) and
+caches it locally; the first use of **Detect speakers automatically**
+likewise downloads its two helper models (~33 MB total). Subsequent
+runs use the cached versions. You can also pre-download or remove
+Whisper models from the **Models** tab.
 
 The reference **openai-whisper** engine (and its ~2 GB PyTorch
 dependency) is also not installed by default — add it from the

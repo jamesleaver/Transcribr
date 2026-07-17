@@ -23,6 +23,17 @@ export interface Palette {
   drop_fg: string;
 }
 
+/** One entry of the simplified three-choice model picker. */
+export interface ModelTier {
+  id: string;
+  label: string;
+  model: string;
+  model_en: string;
+  size: string;
+  note: string;
+  recommended?: boolean;
+}
+
 export interface Meta {
   version: string;
   about_text: string;
@@ -31,9 +42,12 @@ export interface Meta {
   ui_mode: "webview" | "browser";
   engines: { key: string; name: string }[];
   models: string[];
+  model_tiers: ModelTier[];
   languages: [string, string | null][];
   palettes: { light: Palette; dark: Palette };
   ffmpeg: boolean;
+  pyav: boolean;
+  diarize_available: boolean;
   readme_available: boolean;
 }
 
@@ -66,6 +80,9 @@ export interface Settings {
   highlight_confidence: boolean;
   theme: ThemeSetting;
   show_details: boolean;
+  diarize: boolean;
+  num_speakers: number;
+  show_all_models: boolean;
 }
 
 export interface RecentItem {

@@ -6,11 +6,20 @@ export const inputCls =
   "rounded-lg border border-edge bg-surface px-3 py-2 text-sm text-fg " +
   "focus:border-accent focus:outline-none disabled:opacity-40";
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({
+  label,
+  note,
+  children,
+}: {
+  label: string;
+  note?: string;
+  children: ReactNode;
+}) {
   return (
     <label className="flex min-w-0 flex-col gap-1.5">
       <span className="text-xs font-medium tracking-wide text-muted">{label}</span>
       {children}
+      {note && <span className="text-xs text-muted">{note}</span>}
     </label>
   );
 }
@@ -20,14 +29,16 @@ export function SelectField({
   value,
   options,
   onChange,
+  note,
 }: {
   label: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (value: string) => void;
+  note?: string;
 }) {
   return (
-    <Field label={label}>
+    <Field label={label} note={note}>
       <select className={inputCls} value={value} onChange={(e) => onChange(e.target.value)}>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -46,6 +57,7 @@ export function NumberField({
   min,
   max,
   step,
+  note,
 }: {
   label: string;
   value: number;
@@ -53,9 +65,10 @@ export function NumberField({
   min?: number;
   max?: number;
   step?: number;
+  note?: string;
 }) {
   return (
-    <Field label={label}>
+    <Field label={label} note={note}>
       <input
         type="number"
         className={inputCls}

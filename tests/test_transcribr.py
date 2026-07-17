@@ -95,6 +95,274 @@ class TestParagraphify(unittest.TestCase):
         self.assertEqual(T.paragraphify([], 1.5), [])
 
 
+class TestParagraphifySpeakers(unittest.TestCase):
+    # Punctuation-free, non-short-response texts so nothing but the
+    # signal under test can force a break (same trick as above).
+    A = "and then we walked along"
+    B = "toward the river for a while"
+
+    def test_speaker_change_forces_break(self):
+        segs = [(0.0, 1.0, self.A), (1.1, 2.0, self.B)]
+        paras, spk, conf = T.paragraphify_speakers(segs, 5.0, [0, 1])
+        self.assertEqual(len(paras), 2)
+        self.assertEqual(spk, [0, 1])
+        self.assertEqual(conf, [1.0, 1.0])
+
+    def test_none_speaker_never_breaks(self):
+        segs = [(0.0, 1.0, self.A), (1.1, 2.0, self.B),
+                (2.1, 3.0, self.A)]
+        paras, spk, conf = T.paragraphify_speakers(
+            segs, 5.0, [0, None, 0])
+        self.assertEqual(len(paras), 1)
+        self.assertEqual(spk, [0])
+
+    def test_confidence_is_labelled_share(self):
+        # 1s of speaker 0 in a 2s paragraph -> share 0.5.
+        segs = [(0.0, 1.0, self.A), (1.1, 2.1, self.B)]
+        _, spk, conf = T.paragraphify_speakers(segs, 5.0, [0, None])
+        self.assertEqual(spk, [0])
+        self.assertAlmostEqual(conf[0], 0.5, places=3)
+
+    def test_all_unattributed(self):
+        segs = [(0.0, 1.0, self.A)]
+        paras, spk, conf = T.paragraphify_speakers(segs, 5.0, [None])
+        self.assertEqual(spk, [None])
+        self.assertEqual(conf, [0.0])
+
+    def test_same_break_rules_still_apply(self):
+        segs = [(0.0, 1.0, "It was finished."), (1.1, 2.0, self.B)]
+        paras, spk, _ = T.paragraphify_speakers(segs, 5.0, [0, 0])
+        self.assertEqual(len(paras), 2)
+
+
+class TestAssignWordSpeakers(unittest.TestCase):
+    TURNS = [(0.0, 5.0, 0), (5.5, 10.0, 1)]
+
+    def _word(self, start, end):
+        return (start, end, " word", None)
+
+    def test_inside_turn(self):
+        out = T.assign_word_speakers(
+            [self._word(1.0, 1.4), self._word(6.0, 6.4)], self.TURNS)
+        self.assertEqual(out, [0, 1])
+
+    def test_straddling_word_takes_larger_overlap(self):
+        out = T.assign_word_speakers([self._word(4.8, 5.9)], self.TURNS)
+        # 0.2s with speaker 0, 0.4s with speaker 1.
+        self.assertEqual(out, [1])
+
+    def test_word_near_turn_adopts_nearest(self):
+        # 0.1s after turn 0 ends vs 0.2s before turn 1 starts -> turn 0.
+        out = T.assign_word_speakers([self._word(5.1, 5.3)], self.TURNS)
+        self.assertEqual(out, [0])
+        # 0.35s after turn 0 vs 0.05s before turn 1 -> turn 1.
+        out = T.assign_word_speakers([self._word(5.35, 5.45)], self.TURNS)
+        self.assertEqual(out, [1])
+
+    def test_word_far_from_any_turn_is_none(self):
+        out = T.assign_word_speakers([self._word(20.0, 20.4)], self.TURNS)
+        self.assertEqual(out, [None])
+
+
+class TestSplitSegmentsBySpeaker(unittest.TestCase):
+    def test_single_speaker_segment_keeps_engine_text(self):
+        segs = [(0.0, 2.0, "Exactly as Whisper wrote it.")]
+        words = [(0.1, 0.5, " Exactly", None), (0.6, 1.0, " as", None),
+                 (1.1, 1.5, " Whisper", None), (1.6, 2.0, " wrote it.", None)]
+        out_segs, out_spk = T.split_segments_by_speaker(
+            segs, words, [0, 0, 0, 0])
+        self.assertEqual(out_segs, segs)
+        self.assertEqual(out_spk, [0])
+
+    def test_mixed_segment_splits_at_speaker_boundary(self):
+        segs = [(0.0, 4.0, "Hello there and welcome back everyone today")]
+        words = [(0.0, 0.5, " Hello", None), (0.5, 1.0, " there", None),
+                 (1.0, 1.5, " and", None),
+                 (2.0, 2.5, " welcome", None), (2.5, 3.0, " back", None),
+                 (3.0, 3.5, " everyone", None), (3.5, 4.0, " today", None)]
+        out_segs, out_spk = T.split_segments_by_speaker(
+            segs, words, [0, 0, 0, 1, 1, 1, 1])
+        self.assertEqual(len(out_segs), 2)
+        self.assertEqual(out_spk, [0, 1])
+        self.assertEqual(out_segs[0][2], "Hello there and")
+        self.assertEqual(out_segs[1][2], "welcome back everyone today")
+        self.assertAlmostEqual(out_segs[0][0], 0.0)
+        self.assertAlmostEqual(out_segs[1][0], 2.0)
+
+    def test_jitter_run_folds_into_predecessor(self):
+        # A lone quick word attributed to speaker 1 mid-flow should not
+        # split the segment.
+        segs = [(0.0, 3.0, "one two three four five six")]
+        words = [(i * 0.5, i * 0.5 + 0.4, f" w{i}", None)
+                 for i in range(6)]
+        out_segs, out_spk = T.split_segments_by_speaker(
+            segs, words, [0, 0, 1, 0, 0, 0])
+        self.assertEqual(len(out_segs), 1)
+        self.assertEqual(out_spk, [0])
+
+    def test_segment_without_words_passes_through(self):
+        segs = [(0.0, 2.0, "No word data here")]
+        out_segs, out_spk = T.split_segments_by_speaker(segs, [], [])
+        self.assertEqual(out_segs, segs)
+        self.assertEqual(out_spk, [None])
+
+
+class TestBuildSpeakerParagraphs(unittest.TestCase):
+    A = "and then we walked along"
+    B = "toward the river for a while"
+
+    def test_two_speaker_conversation_no_words(self):
+        # Segment-overlap fallback path (no word timestamps).
+        segs = [(0.0, 4.0, self.A), (4.2, 8.0, self.B),
+                (10.0, 14.0, self.A), (14.2, 18.0, self.B)]
+        turns = [(0.0, 8.0, 0), (10.0, 18.0, 1)]
+        paras, letters = T.build_speaker_paragraphs(segs, [], turns, 1.5)
+        self.assertEqual(len(paras), 2)
+        self.assertEqual(letters, ["1", "2"])
+
+    def test_first_voice_becomes_speaker_one(self):
+        segs = [(0.0, 4.0, self.A), (5.0, 9.0, self.B)]
+        # Diarizer ids in reverse order: id 7 speaks first.
+        turns = [(0.0, 4.0, 7), (5.0, 9.0, 2)]
+        _, letters = T.build_speaker_paragraphs(segs, [], turns, 1.5)
+        self.assertEqual(letters, ["1", "2"])
+
+    def test_low_confidence_left_unlabelled(self):
+        # Only the last fifth of the paragraph is attributed.
+        segs = [(0.0, 4.0, self.A), (4.1, 8.0, self.B),
+                (8.1, 10.0, self.A)]
+        turns = [(8.1, 10.0, 0)]
+        paras, letters = T.build_speaker_paragraphs(segs, [], turns, 5.0)
+        self.assertEqual(len(paras), 1)
+        self.assertEqual(letters, [None])
+
+    def test_more_than_nine_speakers_keeps_busiest(self):
+        # 10 speakers with decreasing airtime; the quietest one (the
+        # last) must be left unlabelled, the rest numbered 1..9.
+        segs, turns = [], []
+        t = 0.0
+        for spk in range(10):
+            dur = 10.0 - spk
+            segs.append((t, t + dur, "It stops here."))
+            turns.append((t, t + dur, spk))
+            t += dur + 3.0
+        paras, letters = T.build_speaker_paragraphs(segs, [], turns, 1.5)
+        self.assertEqual(len(paras), 10)
+        self.assertEqual(letters[:9],
+                         [str(i) for i in range(1, 10)])
+        self.assertIsNone(letters[9])
+
+
+class TestDiarizeModelDownload(unittest.TestCase):
+    def _spec(self, url, sha, member=None, target="model.onnx"):
+        return {"url": url, "sha256": sha, "archive_member": member,
+                "target": target, "label": "test model"}
+
+    def _sha(self, path):
+        import hashlib
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def test_plain_download_and_verify(self):
+        import queue
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "weights.bin"
+            src.write_bytes(b"onnx" * 1000)
+            spec = self._spec(src.as_uri(), self._sha(src),
+                              target="embed.onnx")
+            q = queue.Queue()
+            T._download_one_model(spec, q, None)
+            got = T._diarize_models_dir() / "embed.onnx"
+            self.assertTrue(got.exists())
+            self.assertEqual(got.read_bytes(), src.read_bytes())
+            got.unlink()
+
+    def test_bad_hash_rejected_and_not_installed(self):
+        import queue
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "weights.bin"
+            src.write_bytes(b"evil")
+            spec = self._spec(src.as_uri(), "0" * 64, target="bad.onnx")
+            with self.assertRaises(T.DiarizationUnavailable):
+                T._download_one_model(spec, queue.Queue(), None)
+            self.assertFalse(
+                (T._diarize_models_dir() / "bad.onnx").exists())
+
+    def test_tarball_member_extracted(self):
+        import queue
+        import tarfile
+        with tempfile.TemporaryDirectory() as d:
+            payload = Path(d) / "model.onnx"
+            payload.write_bytes(b"segmentation-weights")
+            tar_path = Path(d) / "pack.tar.bz2"
+            with tarfile.open(tar_path, "w:bz2") as tar:
+                tar.add(payload, arcname="pack/model.onnx")
+            spec = self._spec(tar_path.as_uri(), self._sha(tar_path),
+                              member="model.onnx", target="seg.onnx")
+            T._download_one_model(spec, queue.Queue(), None)
+            got = T._diarize_models_dir() / "seg.onnx"
+            self.assertEqual(got.read_bytes(), b"segmentation-weights")
+            got.unlink()
+
+    def test_existing_target_skips_download(self):
+        import queue
+        target = T._diarize_models_dir() / "have.onnx"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"already here")
+        spec = self._spec("file:///nonexistent/nowhere.onnx", "0" * 64,
+                          target="have.onnx")
+        T._download_one_model(spec, queue.Queue(), None)   # must not raise
+        self.assertEqual(target.read_bytes(), b"already here")
+        target.unlink()
+
+
+def _have_av():
+    try:
+        import av  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_have_av(), "needs the av (PyAV) package")
+class TestPyAvAudio(unittest.TestCase):
+    def _make_wav(self, path, seconds=1.0, rate=44100):
+        import math
+        import struct
+        import wave
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            n = int(seconds * rate)
+            frames = b"".join(
+                struct.pack("<h", int(12000 * math.sin(
+                    2 * math.pi * 440 * i / rate)))
+                for i in range(n))
+            w.writeframes(frames)
+
+    def test_decode_audio_16k(self):
+        with tempfile.TemporaryDirectory() as d:
+            wav = Path(d) / "tone.wav"
+            self._make_wav(wav, seconds=1.0)
+            audio = T.decode_audio_16k(wav)
+            self.assertIsNotNone(audio)
+            self.assertEqual(str(audio.dtype), "float32")
+            self.assertAlmostEqual(
+                len(audio) / T.AUDIO_SAMPLE_RATE, 1.0, delta=0.05)
+            self.assertLessEqual(float(abs(audio).max()), 1.0)
+
+    def test_get_audio_duration(self):
+        with tempfile.TemporaryDirectory() as d:
+            wav = Path(d) / "tone.wav"
+            self._make_wav(wav, seconds=2.0)
+            duration = T.get_audio_duration(str(wav))
+            self.assertIsNotNone(duration)
+            self.assertAlmostEqual(duration, 2.0, delta=0.1)
+
+    def test_decode_missing_file_returns_none(self):
+        self.assertIsNone(T.decode_audio_16k("/nonexistent/audio.mp3"))
+
+
 class TestRevisionPath(unittest.TestCase):
     def test_first_revision_and_rev_stripping(self):
         with tempfile.TemporaryDirectory() as d:

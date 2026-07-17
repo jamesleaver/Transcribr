@@ -40,6 +40,7 @@ export interface ReviewPayload {
   can_undo: boolean;
   can_redo: boolean;
   has_word_conf: boolean;
+  diarized: boolean;
   paragraphs: ReviewParagraph[];
   new_index?: number | null;
   count?: number;

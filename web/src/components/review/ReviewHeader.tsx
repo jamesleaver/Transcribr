@@ -23,6 +23,11 @@ export default function ReviewHeader() {
         </h1>
         <div className="text-xs text-muted">
           {doc.labelled} of {doc.total} paragraphs labelled
+          {doc.diarized && (
+            <span title="Labels were pre-filled by voice detection. Press N to jump to anything it left uncertain.">
+              {" "}· speakers suggested automatically — please verify
+            </span>
+          )}
         </div>
       </div>
 

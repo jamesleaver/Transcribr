@@ -7,11 +7,13 @@
 # What this installs:
 #   - Homebrew (if missing)
 #   - Python 3.12 (via Homebrew)
-#   - ffmpeg (via Homebrew)
 #   - A Python virtualenv at ~/Library/Application Support/Transcribr/venv
 #   - The default Whisper engine(s) inside that venv:
-#       * faster-whisper (CTranslate2-based; ~4x faster on CPU, no PyTorch)
+#       * faster-whisper (CTranslate2-based; ~4x faster on CPU, no
+#         PyTorch. Its PyAV dependency bundles FFmpeg's libraries, so
+#         no separate ffmpeg install is needed either)
 #       * mlx-whisper    (Apple Silicon only; uses the Mac's GPU/ANE)
+#       * sherpa-onnx    (the optional "detect speakers" feature)
 #   - /Applications/Transcribr.app (a thin launcher)
 #
 # The reference openai-whisper engine (which pulls in PyTorch, ~2 GB) is
@@ -66,8 +68,8 @@ info "Source: $INSTALLER_DIR"
 info "macOS:  $(sw_vers -productVersion 2>/dev/null || echo unknown)"
 info "Arch:   $(uname -m)"
 echo
-info "This installer will install Homebrew (if missing), Python 3.12,"
-info "ffmpeg, and create a Python environment containing Whisper. It will"
+info "This installer will install Homebrew (if missing) and Python 3.12,"
+info "and create a Python environment containing Whisper. It will"
 info "also create /Applications/Transcribr.app."
 info
 info "It is safe to re-run."
@@ -116,7 +118,7 @@ eval "$("$BREW_BIN" shellenv)"
 
 # ---------- Homebrew packages ---------------------------------------------
 
-step "Step 2/6: Python 3.12 and ffmpeg"
+step "Step 2/6: Python 3.12"
 
 install_brew_pkg() {
     local pkg="$1"
@@ -130,7 +132,8 @@ install_brew_pkg() {
 }
 
 install_brew_pkg python@3.12
-install_brew_pkg ffmpeg
+# (ffmpeg is no longer needed: audio decoding and playback go through
+# the PyAV package, whose wheel bundles FFmpeg's libraries.)
 
 
 # Resolve the actual python3.12 binary we just installed.
@@ -182,9 +185,11 @@ ARCH=$("$VENV/bin/python" -c "import platform; print(platform.machine())")
 # than the reference OpenAI engine with essentially identical output. The
 # heavier OpenAI engine is optional and installable later from the app's
 # Models tab, so we no longer download PyTorch (~2 GB) up front.
+# sherpa-onnx powers "Detect speakers automatically" (~20 MB; its two
+# small voice models download on first use from inside the app).
 info "Installing app libraries + faster-whisper..."
 "$VENV/bin/pip" install --upgrade --prefer-binary \
-    faster-whisper python-docx reportlab \
+    faster-whisper sherpa-onnx python-docx reportlab \
     pyobjc-framework-Cocoa pywebview bottle \
     || fail "core install failed (faster-whisper / python-docx / reportlab \
 / pywebview / bottle)"
@@ -195,10 +200,15 @@ info "Installing app libraries + faster-whisper..."
     || fail "pywebview / bottle import test failed"
 ok "pywebview + bottle installed"
 
-"$VENV/bin/python" -c "import faster_whisper" 2>/dev/null \
-    && ok "faster-whisper installed" \
+"$VENV/bin/python" -c "import faster_whisper, av" 2>/dev/null \
+    && ok "faster-whisper installed (PyAV handles audio decoding)" \
     || fail "faster-whisper import check failed - no engine would be \
 available."
+
+"$VENV/bin/python" -c "import sherpa_onnx" 2>/dev/null \
+    && ok "sherpa-onnx installed (speaker detection available)" \
+    || warn "sherpa-onnx import check failed - the app will run, but \
+'Detect speakers automatically' will be unavailable."
 
 # mlx-whisper - Apple's MLX framework. Apple Silicon only, requires
 # macOS 13.5+. The Python package depends on `mlx`, which is what
