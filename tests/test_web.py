@@ -1217,6 +1217,18 @@ class TestHttpApi(unittest.TestCase):
     def setUpClass(cls):
         import threading
         cls.backend = T.WebBackend(cls.TOKEN)
+        # Belt and braces: no test may ever reach the real model
+        # download or pip install/uninstall machinery, whatever the
+        # guards do. A regression that slips past a guard must fail
+        # loudly instead of fetching real weights or uninstalling
+        # packages from the developer's venv. (_uninstall stays real:
+        # its own not-installed guard is part of what the tests assert,
+        # and it only touches the cache dirs, which tests redirect.)
+        def _blocked(*_a, **_k):
+            raise AssertionError(
+                "real model download / pip operation invoked from a test")
+        cls.backend.models._prefetch = _blocked
+        cls.backend.models._engine_op = _blocked
         cls.server = cls.backend.serve(port=0)
         cls.thread = threading.Thread(target=cls.server.serve_forever,
                                       daemon=True)
@@ -1286,6 +1298,17 @@ class TestHttpApi(unittest.TestCase):
         T._hf_repo_sizes = lambda: {}
         self.addCleanup(lambda: setattr(T, "_whisper_cache_dir", saved_dir))
         self.addCleanup(lambda: setattr(T, "_hf_repo_sizes", saved_sizes))
+        # Pin the installed-engine list to empty so every "isn't
+        # installed" guard below holds on ANY machine. Without this, a
+        # dev box that has faster-whisper installed would accept the
+        # download request and spawn a real ~75MB fetch into the user's
+        # HF cache, and one with openai-whisper installed would let the
+        # engine-uninstall request pip-remove it from the real venv
+        # (both jobs also 409 unrelated tests while in flight).
+        saved_engines = T.AVAILABLE_ENGINES
+        T.AVAILABLE_ENGINES = []
+        self.addCleanup(lambda: setattr(T, "AVAILABLE_ENGINES",
+                                        saved_engines))
 
         status, payload = self._req("GET", "/api/models")
         self.assertEqual(status, 200)
