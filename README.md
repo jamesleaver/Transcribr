@@ -33,8 +33,19 @@ paragraph, adjust the **paragraph gap** setting down. If the same speaker's
 words are being transcribed into multiple paragraphs, then adjust the same
 setting up.
 
+The **Review pane** is designed to allow easy editing of the transcription
+created by the software. You can navigate between paragraphs of text with
+the up/down arrows on your keyboard. To edit the text in a paragraph, press
+the `enter` key (or `return` on a Mac). Press `enter` again to save the edit.
+When not in 'edit' mode, pressing a number (eg `1`, `2`, `3`, etc) will
+assign a speaker to the paragraph that is in focus. To split at paragraph at
+a particular word (which may be necessary if there is a change in the speaker),
+just `double-click` that word. To merge a paragraph with the paragraph above
+it, press the `M` key. To listen to the audio segment that relates to the
+paragraph that is in focus, press `P`.
+
 When a particular model is run for the first time, that model will be
-downloaded to your computer and stored locally. The 'small.en' and 'medium.en'
+downloaded to your computer and stored locally. The `small.en` and `medium.en`
 models may perform adequately on clear, crisp audio. On trickier audio, the
 `large-v3-turbo` model may do better, but it will be slower.
 
