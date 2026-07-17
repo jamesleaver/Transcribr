@@ -172,6 +172,20 @@ export default function OptionsPanel() {
                 onChange={(v) => update({ num_speakers: Math.max(0, Math.round(v)) })}
                 note="Leave at 0 to work it out from the audio. Setting it helps when you know."
               />
+              <SelectField
+                label="Voice-matching model"
+                value={settings.diarize_model}
+                options={meta.diarize_models.map((m) => ({
+                  value: m.id,
+                  label: `${m.label} (${m.size})`,
+                }))}
+                onChange={(v) => update({ diarize_model: v })}
+                note={
+                  meta.diarize_models.find((m) => m.id === settings.diarize_model)
+                    ?.note ??
+                  "If two people keep sharing one label, try a different model and run again."
+                }
+              />
             </div>
           )}
         </div>
@@ -245,6 +259,10 @@ export default function OptionsPanel() {
             value={settings.no_speech_threshold} min={0} max={1} step={0.05}
             onChange={(v) => update({ no_speech_threshold: v })}
             note="How readily quiet passages are skipped as silence." />
+          <NumberField label="Speaker separation threshold"
+            value={settings.diarize_threshold} min={0.2} max={0.9} step={0.05}
+            onChange={(v) => update({ diarize_threshold: v })}
+            note="Lower = readier to hear two similar voices as different people. Ignored when 'How many speakers?' is set." />
         </div>
         <div className="mt-4 flex flex-col gap-2.5">
           <CheckField label="Condition on previous text"

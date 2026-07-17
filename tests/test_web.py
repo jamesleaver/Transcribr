@@ -1363,6 +1363,25 @@ class TestHttpApi(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(err["error"]["code"], "input_not_found")
 
+    def test_run_refuses_output_over_recording(self):
+        # The output must never be the input, even with force - a
+        # transcript once destroyed a source recording this way.
+        src = Path(self.tmp.name) / "evidence.mp3"
+        src.write_bytes(b"\x00" * 64)
+        status, err = self._req(
+            "POST", "/api/run",
+            {"input": str(src), "output": str(src), "force": True})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "output_is_input")
+        # ...nor may it wear any audio/video extension.
+        status, err = self._req(
+            "POST", "/api/run",
+            {"input": str(src),
+             "output": str(Path(self.tmp.name) / "other.wav"),
+             "force": True})
+        self.assertEqual(status, 400)
+        self.assertEqual(err["error"]["code"], "output_looks_like_media")
+
     def test_audio_404_when_none(self):
         status, err = self._req("GET", "/audio/current")
         self.assertEqual(status, 404)
@@ -1572,6 +1591,36 @@ class TestAudioPrep(unittest.TestCase):
 # build_worker_params
 # =====================================================================
 
+class TestOutputSafety(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-safety-")
+        self.addCleanup(self.tmp.cleanup)
+        self.src = Path(self.tmp.name) / "recording.mp3"
+        self.src.write_bytes(b"\x00" * 64)
+
+    def test_identical_path_refused(self):
+        with self.assertRaises(T.ApiFail) as cm:
+            T.ensure_output_is_safe(str(self.src), str(self.src))
+        self.assertEqual(cm.exception.code, "output_is_input")
+
+    def test_differently_spelled_same_path_refused(self):
+        sneaky = Path(self.tmp.name) / "sub" / ".." / "recording.mp3"
+        with self.assertRaises(T.ApiFail) as cm:
+            T.ensure_output_is_safe(str(self.src), str(sneaky))
+        self.assertEqual(cm.exception.code, "output_is_input")
+
+    def test_media_extension_refused_even_for_other_files(self):
+        other = Path(self.tmp.name) / "different-name.m4a"
+        with self.assertRaises(T.ApiFail) as cm:
+            T.ensure_output_is_safe(str(self.src), str(other))
+        self.assertEqual(cm.exception.code, "output_looks_like_media")
+
+    def test_normal_outputs_pass(self):
+        for name in ("recording.transcript.docx", "out.txt", "x.pdf"):
+            T.ensure_output_is_safe(
+                str(self.src), str(Path(self.tmp.name) / name))
+
+
 class TestBuildWorkerParams(unittest.TestCase):
     _ENGINES = [("whisper", "OpenAI Whisper (reference)"),
                 ("faster", "faster-whisper (CTranslate2)")]
@@ -1615,6 +1664,12 @@ class TestBuildWorkerParams(unittest.TestCase):
                          diarize=True)
         self.assertTrue(p["word_timestamps"])
         self.assertTrue(p["diarize"])
+
+    def test_diarize_model_and_threshold_flow_through(self):
+        p = self._params(diarize=True, diarize_model="campplus",
+                         diarize_threshold=0.35)
+        self.assertEqual(p["diarize_model"], "campplus")
+        self.assertAlmostEqual(p["diarize_threshold"], 0.35)
 
     def test_title_falls_back_to_filename(self):
         p = self._params(title="", prompt="")

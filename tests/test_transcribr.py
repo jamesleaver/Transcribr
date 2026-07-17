@@ -253,6 +253,33 @@ class TestBuildSpeakerParagraphs(unittest.TestCase):
         self.assertIsNone(letters[9])
 
 
+class TestVoiceModelRegistry(unittest.TestCase):
+    def test_registry_is_sane(self):
+        ids = [m["id"] for m in T.DIARIZE_VOICE_MODELS]
+        targets = [m["target"] for m in T.DIARIZE_VOICE_MODELS]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate model ids")
+        self.assertEqual(len(targets), len(set(targets)),
+                         "two models would overwrite each other's file")
+        self.assertIn(T.DIARIZE_DEFAULT_VOICE_MODEL, ids)
+        self.assertNotIn(T._DIARIZE_SEGMENTATION["target"], targets)
+        for m in T.DIARIZE_VOICE_MODELS:
+            self.assertTrue(m["url"].startswith("https://"), m["id"])
+            self.assertEqual(len(m["sha256"]), 64, m["id"])
+            for key in ("label", "note", "size", "target"):
+                self.assertTrue(m.get(key), f"{m['id']} missing {key}")
+
+    def test_unknown_id_falls_back_to_default(self):
+        spec = T._voice_model_spec("nonexistent-model")
+        self.assertEqual(spec["id"], T.DIARIZE_DEFAULT_VOICE_MODEL)
+
+    def test_validate_settings_rejects_unknown_voice_model(self):
+        merged = T.validate_settings({"diarize_model": "bogus"})
+        self.assertEqual(merged["diarize_model"],
+                         T.DIARIZE_DEFAULT_VOICE_MODEL)
+        merged = T.validate_settings({"diarize_model": "campplus"})
+        self.assertEqual(merged["diarize_model"], "campplus")
+
+
 class TestDiarizeModelDownload(unittest.TestCase):
     def _spec(self, url, sha, member=None, target="model.onnx"):
         return {"url": url, "sha256": sha, "archive_member": member,

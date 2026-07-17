@@ -48,6 +48,7 @@ export interface Meta {
   ffmpeg: boolean;
   pyav: boolean;
   diarize_available: boolean;
+  diarize_models: { id: string; label: string; note: string; size: string }[];
   readme_available: boolean;
 }
 
@@ -82,6 +83,8 @@ export interface Settings {
   show_details: boolean;
   diarize: boolean;
   num_speakers: number;
+  diarize_model: string;
+  diarize_threshold: number;
   show_all_models: boolean;
 }
 

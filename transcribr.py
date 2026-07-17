@@ -1258,28 +1258,68 @@ LANGUAGES = [
 # any paragraph whose attribution is doubtful is left unlabelled for
 # the reviewer rather than guessed.
 
-_DIARIZE_MODELS = {
-    "segmentation": {
-        "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-                "speaker-segmentation-models/"
-                "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"),
-        "sha256": ("24615ee884c897d9d2ba09bb4d30da6b"
-                   "b1b15e685065962db5b02e76e4996488"),
-        "archive_member": "model.onnx",
-        "target": "pyannote-segmentation-3.0.onnx",
-        "label": "speaker segmentation model (~7 MB)",
-    },
-    "embedding": {
-        "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-                "speaker-recongition-models/"      # (sic - upstream tag)
-                "wespeaker_en_voxceleb_resnet34_LM.onnx"),
-        "sha256": ("e9848563da86f263117134dfd7ad63c9"
-                   "2355b37de492b55e325400c9d9c39012"),
-        "archive_member": None,
-        "target": "wespeaker-voxceleb-resnet34-LM.onnx",
-        "label": "voice embedding model (~27 MB)",
-    },
+_DIARIZE_SEGMENTATION = {
+    "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+            "speaker-segmentation-models/"
+            "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"),
+    "sha256": ("24615ee884c897d9d2ba09bb4d30da6b"
+               "b1b15e685065962db5b02e76e4996488"),
+    "archive_member": "model.onnx",
+    "target": "pyannote-segmentation-3.0.onnx",
+    "label": "speaker segmentation model (~7 MB)",
 }
+
+# The selectable voice-matching (speaker embedding) models. All run
+# through the identical sherpa-onnx pipeline; they differ in how they
+# "hear" voices, so when one merges two similar speakers another may
+# separate them. Each downloads once, on first use.
+DIARIZE_VOICE_MODELS = [
+    {"id": "wespeaker",
+     "label": "WeSpeaker ResNet34",
+     "note": "The default — the same voiceprint family pyannote's own "
+             "pipeline uses.",
+     "size": "~27 MB",
+     "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+             "speaker-recongition-models/"      # (sic - upstream tag)
+             "wespeaker_en_voxceleb_resnet34_LM.onnx"),
+     "sha256": ("e9848563da86f263117134dfd7ad63c9"
+                "2355b37de492b55e325400c9d9c39012"),
+     "archive_member": None,
+     "target": "wespeaker-voxceleb-resnet34-LM.onnx"},
+    {"id": "campplus",
+     "label": "CAM++ (3D-Speaker)",
+     "note": "A different architecture that is markedly faster and "
+             "sometimes separates similar voices the default merges.",
+     "size": "~30 MB",
+     "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+             "speaker-recongition-models/"
+             "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"),
+     "sha256": ("357a834f702b80161e5b981182c038e1"
+                "8553c1f2ca752ed6cec2052365d4129b"),
+     "archive_member": None,
+     "target": "campplus-voxceleb.onnx"},
+    {"id": "titanet",
+     "label": "TitaNet-S (NVIDIA)",
+     "note": "A third opinion — worth trying when the other two "
+             "disagree with what you hear.",
+     "size": "~38 MB",
+     "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+             "speaker-recongition-models/nemo_en_titanet_small.onnx"),
+     "sha256": ("ad4a1802485d8b34c722d2a9d0424966"
+                "2f2ece5d28a7a039063ca22f515a789e"),
+     "archive_member": None,
+     "target": "titanet-small.onnx"},
+]
+
+DIARIZE_DEFAULT_VOICE_MODEL = "wespeaker"
+
+
+def _voice_model_spec(voice_id):
+    for spec in DIARIZE_VOICE_MODELS:
+        if spec["id"] == voice_id:
+            return spec
+    return next(spec for spec in DIARIZE_VOICE_MODELS
+                if spec["id"] == DIARIZE_DEFAULT_VOICE_MODEL)
 
 # Words in a run shorter than this (both measures) are folded into the
 # neighbouring speaker run instead of forming their own split - guards
@@ -1307,10 +1347,10 @@ def _diarize_models_dir():
     return _config_dir() / "models" / "diarization"
 
 
-def diarize_models_ready():
+def diarize_models_ready(voice_id=DIARIZE_DEFAULT_VOICE_MODEL):
     d = _diarize_models_dir()
-    return all((d / m["target"]).exists()
-               for m in _DIARIZE_MODELS.values())
+    return ((d / _DIARIZE_SEGMENTATION["target"]).exists()
+            and (d / _voice_model_spec(voice_id)["target"]).exists())
 
 
 def _download_one_model(spec, q, cancel_event):
@@ -1378,11 +1418,16 @@ def _download_one_model(spec, q, cancel_event):
             os.replace(fetched, target)
 
 
-def ensure_diarize_models(q, cancel_event=None):
-    """Download any missing diarization models. Raises
+def ensure_diarize_models(q, cancel_event=None,
+                          voice_id=DIARIZE_DEFAULT_VOICE_MODEL):
+    """Download any missing diarization models for `voice_id`. Raises
     DiarizationUnavailable (network trouble etc.) or _CancelledByUser."""
     import urllib.error
-    for spec in _DIARIZE_MODELS.values():
+    voice = _voice_model_spec(voice_id)
+    for spec in (_DIARIZE_SEGMENTATION,
+                 {**voice,
+                  "label": f"voice-matching model "
+                           f"'{voice['label']}' ({voice['size']})"}):
         try:
             _download_one_model(spec, q, cancel_event)
         except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -1392,10 +1437,14 @@ def ensure_diarize_models(q, cancel_event=None):
                 "download is only needed once.")
 
 
-def _run_diarization(audio, num_speakers, q, cancel_event=None):
+def _run_diarization(audio, num_speakers, q, cancel_event=None,
+                     voice_id=DIARIZE_DEFAULT_VOICE_MODEL,
+                     threshold=None):
     """Run sherpa-onnx speaker diarization over mono 16 kHz float32
     samples. Returns [(start_seconds, end_seconds, speaker_int)] sorted
-    by start time. `num_speakers` <= 0 means detect automatically."""
+    by start time. `num_speakers` <= 0 means detect automatically using
+    `threshold` (smaller = readier to hear two similar voices as
+    different people)."""
     try:
         import sherpa_onnx
     except ImportError:
@@ -1404,18 +1453,23 @@ def _run_diarization(audio, num_speakers, q, cancel_event=None):
             "is not installed in this Python.\nInstall it with:\n"
             "  pip install sherpa-onnx")
 
+    if threshold is None:
+        threshold = _DIARIZE_CLUSTER_THRESHOLD
+    threshold = min(0.9, max(0.2, float(threshold)))
     d = _diarize_models_dir()
+    voice = _voice_model_spec(voice_id)
+    q.put(("log", f"  voice-matching model: {voice['label']}\n"))
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
-                model=str(d / _DIARIZE_MODELS["segmentation"]["target"])),
+                model=str(d / _DIARIZE_SEGMENTATION["target"])),
         ),
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
-            model=str(d / _DIARIZE_MODELS["embedding"]["target"])),
+            model=str(d / voice["target"])),
         clustering=sherpa_onnx.FastClusteringConfig(
             num_clusters=(int(num_speakers) if num_speakers
                           and num_speakers > 0 else -1),
-            threshold=_DIARIZE_CLUSTER_THRESHOLD),
+            threshold=threshold),
         min_duration_on=0.3,
         min_duration_off=0.5,
     )
@@ -1976,11 +2030,14 @@ def _paragraphs_with_speakers(segments, result, params, q, cancel_event):
             raise DiarizationUnavailable(
                 "the audio could not be decoded for speaker detection "
                 "(the 'av' package is required).")
-        if not diarize_models_ready():
-            ensure_diarize_models(q, cancel_event)
+        voice_id = params.get("diarize_model") or DIARIZE_DEFAULT_VOICE_MODEL
+        if not diarize_models_ready(voice_id):
+            ensure_diarize_models(q, cancel_event, voice_id)
         q.put(("log", "\nIdentifying speakers...\n"))
         turns = _run_diarization(
-            audio, params.get("num_speakers") or 0, q, cancel_event)
+            audio, params.get("num_speakers") or 0, q, cancel_event,
+            voice_id=voice_id,
+            threshold=params.get("diarize_threshold"))
         words = _extract_word_conf(result) if result else []
         paragraphs, para_letters = build_speaker_paragraphs(
             segments, words, turns, gap)
@@ -3163,6 +3220,10 @@ def build_worker_params(settings, in_path, out_path, *,
         review_before_save=review_before_save,
         diarize=bool(settings.get("diarize")),
         num_speakers=int(settings.get("num_speakers") or 0),
+        diarize_model=(settings.get("diarize_model")
+                       or DIARIZE_DEFAULT_VOICE_MODEL),
+        diarize_threshold=float(settings.get("diarize_threshold")
+                                or _DIARIZE_CLUSTER_THRESHOLD),
     )
 
 
@@ -3187,7 +3248,7 @@ _SETTINGS_BOOL_KEYS = (
 _SETTINGS_NUMBER_KEYS = (
     "gap", "temperature", "beam_size", "best_of",
     "compression_ratio_threshold", "logprob_threshold",
-    "no_speech_threshold", "num_speakers",
+    "no_speech_threshold", "num_speakers", "diarize_threshold",
 )
 
 
@@ -3198,6 +3259,7 @@ def _settings_choices():
         "engine": [ENGINE_AUTO_NAME] + [name for _, name in
                                         AVAILABLE_ENGINES],
         "model": list(WHISPER_MODELS),
+        "diarize_model": [m["id"] for m in DIARIZE_VOICE_MODELS],
         "language": [n for n, _ in LANGUAGES],
         "task": ["transcribe", "translate"],
         "output_format": ["txt", "docx", "pdf"],
@@ -3236,6 +3298,8 @@ def default_settings():
         "show_details": False,
         "diarize": False,
         "num_speakers": 0,
+        "diarize_model": DIARIZE_DEFAULT_VOICE_MODEL,
+        "diarize_threshold": _DIARIZE_CLUSTER_THRESHOLD,
         "show_all_models": False,
     }
 
@@ -3367,6 +3431,50 @@ _NO_ENGINE_HINT = (
     "  pip install mlx-whisper   (Apple Silicon only)")
 
 
+# Extensions that mark a file as a recording. A transcript must never
+# be written to a path that looks like one.
+_MEDIA_EXTENSIONS = {
+    ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".wma", ".amr", ".3gp",
+}
+
+
+def ensure_output_is_safe(in_path, out_path):
+    """Refuse output paths that could destroy a recording: the input
+    itself (however it is spelled or linked), or any path wearing an
+    audio/video extension. Raises ApiFail; there is deliberately no
+    force/overwrite override for these.
+
+    Born of a real incident: a save-dialog misclick set Output to the
+    source .mp3, the user confirmed the generic "already exists -
+    overwrite?" prompt, and the pre-review safety copy replaced a piece
+    of case audio with a Word document (recovered from Dropbox version
+    history)."""
+    src, dst = Path(in_path), Path(out_path)
+    try:
+        same = (os.path.normcase(str(src.resolve()))
+                == os.path.normcase(str(dst.resolve())))
+        if not same and dst.exists():
+            same = dst.samefile(src)
+    except OSError:
+        same = False
+    if same:
+        raise ApiFail(
+            400, "output_is_input",
+            "The output path is the input recording itself - saving "
+            "would destroy the recording.\n\nChoose a different output "
+            "file (leave the field empty to save next to the input as "
+            f"'{Path(in_path).stem}.transcript.<format>').")
+    if dst.suffix.lower() in _MEDIA_EXTENSIONS:
+        raise ApiFail(
+            400, "output_looks_like_media",
+            f"The output path ends in '{dst.suffix}', which is an "
+            "audio/video extension - transcripts save as .txt, .docx "
+            "or .pdf. This guard exists so a transcript can never "
+            "overwrite a recording.\n\nCheck the Output field: it may "
+            "be pointing at a recording by mistake.")
+
+
 class RunController:
     """Single-run and batch state machine - the module-level twin of
     WhisperGUI's run/batch/stop handlers. Mutating entry points raise
@@ -3472,6 +3580,7 @@ class RunController:
                 ext = settings["output_format"]
                 out_path = str(Path(in_path).with_suffix(
                     f".transcript.{ext}"))
+            ensure_output_is_safe(in_path, out_path)
             if Path(out_path).exists() and not force:
                 raise ApiFail(409, "output_exists",
                               f"The output file already exists:\n\n"
@@ -3511,8 +3620,10 @@ class RunController:
                 if not Path(in_path).exists():
                     missing.append(in_path)
                     continue
-                items.append((in_path, str(Path(in_path).with_suffix(
-                    f".transcript.{ext}"))))
+                batch_out = str(Path(in_path).with_suffix(
+                    f".transcript.{ext}"))
+                ensure_output_is_safe(in_path, batch_out)
+                items.append((in_path, batch_out))
             if missing:
                 raise ApiFail(400, "missing_inputs",
                               "These queued files no longer exist.",
@@ -4753,6 +4864,14 @@ class ReviewSession:
         session = cls(info, broker, log=log)
         if info.get("result") is not None:
             try:
+                # Defence in depth (the run validators already refuse
+                # this): never let the safety copy touch the recording.
+                audio = info.get("audio_path")
+                if audio and os.path.normcase(
+                        str(Path(audio).resolve())) == os.path.normcase(
+                        str(Path(info["out_path"]).resolve())):
+                    raise RuntimeError(
+                        "safety copy would overwrite the source audio")
                 write_paragraphs_to_file(
                     info["paragraphs"], Path(info["out_path"]),
                     show_timestamp=info.get("show_timestamp", True),
@@ -5132,6 +5251,10 @@ class WebBackend:
                 "pyav": _have_pyav(),
                 "diarize_available": (
                     _ilu.find_spec("sherpa_onnx") is not None),
+                "diarize_models": [
+                    {"id": m["id"], "label": m["label"],
+                     "note": m["note"], "size": m["size"]}
+                    for m in DIARIZE_VOICE_MODELS],
                 "readme_available": _find_readme() is not None,
             }
 
