@@ -101,7 +101,7 @@ The installer handles all of that.
 
 ### macOS
 
-1. Download and unzip the lastest release.
+1. Download and unzip the latest release.
 2. Open the `macos` folder.
 3. **Right-click `install.command`** -> Open -> Open.
    (Right-click is needed only the first time, to get past the
@@ -122,7 +122,7 @@ The installer handles all of that.
 
 ### Windows
 
-1. Download and unzip the lastest release.
+1. Download and unzip the latest release.
 2. Open the `windows` folder.
 3. **Double-click `install.bat`.**
    - If Windows SmartScreen warns, click "More info" -> "Run anyway".
