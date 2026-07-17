@@ -315,6 +315,48 @@ class TestDiarizeModelDownload(unittest.TestCase):
         target.unlink()
 
 
+class TestDescribeNonAudioFile(unittest.TestCase):
+    def _probe(self, data, suffix=".mp3"):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / f"fake{suffix}"
+            p.write_bytes(data)
+            return T.describe_non_audio_file(str(p))
+
+    def test_office_document_named_mp3(self):
+        reason = self._probe(b"PK\x03\x04" + b"\x00" * 64)
+        self.assertIn("Microsoft Office", reason)
+
+    def test_pdf_named_mp3(self):
+        reason = self._probe(b"%PDF-1.7\n" + b"\x00" * 64)
+        self.assertIn("PDF", reason)
+
+    def test_empty_file(self):
+        self.assertIn("empty", self._probe(b""))
+
+    def test_missing_file(self):
+        reason = T.describe_non_audio_file("/nonexistent/audio.mp3")
+        self.assertIn("could not be read", reason)
+
+    def test_real_audio_gets_no_complaint(self):
+        try:
+            import av  # noqa: F401
+        except ImportError:
+            self.skipTest("needs the av (PyAV) package")
+        import math
+        import struct
+        import wave
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "tone.wav"
+            with wave.open(str(p), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"".join(
+                    struct.pack("<h", int(8000 * math.sin(i / 20)))
+                    for i in range(16000)))
+            self.assertIsNone(T.describe_non_audio_file(str(p)))
+
+
 def _have_av():
     try:
         import av  # noqa: F401

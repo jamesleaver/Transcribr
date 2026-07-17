@@ -509,6 +509,47 @@ def decode_audio_16k(path):
         return None
 
 
+# File signatures that regularly turn up wearing an audio extension
+# (exports from evidence/records systems are the usual culprits). Used
+# to explain a decode failure in plain language instead of dumping an
+# ffmpeg traceback on the user.
+_NON_AUDIO_SIGNATURES = (
+    (b"PK\x03\x04", "a zip archive or Microsoft Office document"),
+    (b"%PDF", "a PDF document"),
+    (b"{\\rtf", "an RTF document"),
+    (b"<!DO", "a web page"),
+    (b"<htm", "a web page"),
+    (b"\xd0\xcf\x11\xe0", "a legacy Microsoft Office document"),
+)
+
+
+def describe_non_audio_file(path):
+    """Why `path` can't be decoded as audio, in plain language, or None
+    when it plausibly is audio (only consulted after a decode failed)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except OSError as e:
+        return f"it could not be read ({e.strerror or e})"
+    if not head:
+        return "it is empty (0 bytes)"
+    for magic, kind in _NON_AUDIO_SIGNATURES:
+        if head.startswith(magic):
+            return (f"it appears to be {kind} that has been given an "
+                    "audio file's name, not an actual recording")
+    try:
+        import av
+        with av.open(str(path)) as container:
+            if not container.streams.audio:
+                return "it contains no audio stream"
+        return None
+    except ImportError:
+        return None
+    except Exception as e:
+        detail = str(e).strip() or type(e).__name__
+        return f"it could not be read as audio ({detail})"
+
+
 def _pyav_duration(path):
     """Duration in seconds via PyAV container metadata, or None."""
     try:
@@ -1821,6 +1862,21 @@ def transcribe_worker(params, q, cancel_event):
         q.put(("log", f"Decoded audio: {_format_duration(duration)}\n"))
         if not params.get("audio_duration"):
             params["audio_duration"] = duration
+    elif _have_pyav():
+        # PyAV is present but couldn't decode the file. The engine's own
+        # loader would fail the same way with a raw ffmpeg traceback, so
+        # explain the actual problem instead - the usual cause is a
+        # non-audio file wearing an audio extension.
+        reason = describe_non_audio_file(params["input"])
+        if reason:
+            q.put(("error",
+                   f"Cannot transcribe {Path(params['input']).name}: "
+                   f"{reason}.\n\n"
+                   "Check that the file really is an audio or video "
+                   "recording - if it came out of an export or download, "
+                   "the export may have produced the wrong file. Opening "
+                   "it in a media player is a quick way to confirm."))
+            return
 
     try:
         segments, result, used_partial = runner(params, q, cancel_event)
