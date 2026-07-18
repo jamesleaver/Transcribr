@@ -33,10 +33,9 @@ description of what various settings do.
 If words from different speakers are being transcribed into the same
 paragraph, adjust the **paragraph gap** setting down. If the same speaker's
 words are being transcribed into multiple paragraphs, then adjust the same
-setting up. Better still, turn on **Detect speakers automatically** —
-it listens for different voices, breaks paragraphs where the speaker
-changes, and pre-fills the speaker labels for you to check in Review
-(see **Detecting speakers automatically** below).
+setting up. The experimental **Detect speakers automatically** option
+can also suggest a speaker label for each paragraph for you to check
+in Review (see **Detecting speakers automatically** below).
 
 The **Review pane** is designed to allow easy editing of the transcription
 created by the software. You can navigate between paragraphs of text with
@@ -264,16 +263,20 @@ remove models — see [Models](#models) below.
 English* converts non-English audio to English output; *Transcribe*
 keeps the source language.
 
-### Detecting speakers automatically
+### Detecting speakers automatically (experimental)
 
 Tick **Detect speakers automatically** and Transcribr listens for
-different voices, breaks paragraphs where the speaker changes, and
-pre-fills the speaker labels for you to check in the review pane. Where
-attribution is doubtful (overlapping voices, very short interjections)
-the paragraph is deliberately left unlabelled — press `N` in review to
-jump straight to anything it left for you. If you know how many people
-are speaking, set **How many speakers?** — it noticeably improves the
-grouping; leave it at 0 to detect the count automatically.
+different voices and suggests a speaker label for each paragraph, for
+you to check in the review pane. This feature is **experimental** and
+deliberately separate from paragraph grouping: the paragraph
+boundaries always come from the programmatic rules above, and voice
+detection only labels the finished paragraphs (by which voice speaks
+most of each one). Where attribution is doubtful (overlapping voices,
+mixed paragraphs, very short interjections) the paragraph is left
+unlabelled — press `N` in review to jump straight to anything it left
+for you. If you know how many people are speaking, set **How many
+speakers?** — it noticeably improves the grouping; leave it at 0 to
+detect the count automatically.
 
 The first use downloads two small helper models (~33 MB total) — a
 voice-activity/segmentation model and a voice-embedding model — which
@@ -316,9 +319,17 @@ engine was unsure about.
 
 **Paragraph grouping.** *Pause that triggers a new paragraph* (default
 1.5 s) controls how aggressively paragraphs break — lower for
-rapid-fire dialogue, higher for monologues. Breaks also occur at
-sentence-ending punctuation and short acknowledgments ("Yes", "Okay"),
-and a 60-second cap stops run-on paragraphs. *Show timestamps in
+rapid-fire dialogue, higher for monologues. The other cues are graded
+by strength: a question mark, an interruption/trail-off ending ("—",
+"..."), or a short acknowledgment ("Yes", "Okay") always breaks —
+those are dialogue turn signals — while an ordinary sentence ending
+breaks only when the speaker also paused (40% of the threshold), so a
+monologue read at speed stays one paragraph instead of splintering at
+every full stop. A segment opening with an acknowledgment ("Yeah, I
+did") breaks on the same condition, a 60-second cap stops run-on
+paragraphs, and when word-level timestamps were recorded the gaps are
+measured between the actual words rather than Whisper's padded
+segment edges. *Show timestamps in
 output* prefixes each paragraph with `[MM:SS]`. *Review and label
 speakers before saving* opens the review pane when transcription
 finishes (untick to save straight to disk).

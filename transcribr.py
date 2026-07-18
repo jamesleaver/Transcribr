@@ -691,28 +691,84 @@ def _is_short_response(text: str) -> bool:
     return len(words) <= 3 and all(w in SHORT_RESPONSES for w in words)
 
 
-def _should_break(prev, curr, gap_threshold: float) -> bool:
+# A sentence ending (". !") only breaks a paragraph when the speaker
+# also paused: this fraction of the user's gap threshold, floored so a
+# very low threshold doesn't turn every full stop into a paragraph.
+_SOFT_BREAK_FRACTION = 0.4
+_SOFT_BREAK_MIN_SECONDS = 0.35
+
+# Trailing marks Whisper emits when speech is cut off or trails away -
+# in dialogue that's a turn change almost every time.
+_INTERRUPTION_ENDINGS = ("--", "—", "–", "...", "…")
+
+
+def _leading_acknowledgment(text: str) -> bool:
+    """True when the segment OPENS with a yes/no/okay-style token
+    ("Yeah, I did") - a strong cue that a different person is now
+    answering, even mid-flow."""
+    cleaned = re.sub(r"[^\w\s'-]", " ", text or "").strip().lower()
+    first = cleaned.split(" ", 1)[0] if cleaned else ""
+    return first in SHORT_RESPONSES
+
+
+def _gaps_are_informative(segments) -> bool:
+    """Whether the segment times carry real silence information.
+
+    faster-whisper without word timestamps emits wall-to-wall segments
+    (each end equals the next start), hiding every actual pause. When
+    nearly every boundary is contiguous like that, gap-based rules
+    would never fire, so the soft cues must stand on their own."""
+    if len(segments) < 2:
+        return True
+    contiguous = sum(1 for a, b in zip(segments, segments[1:])
+                     if b[0] - a[1] < 0.05)
+    return contiguous / (len(segments) - 1) < 0.7
+
+
+def _should_break(prev, curr, gap_threshold: float,
+                  gaps_informative: bool = True) -> bool:
+    """The paragraph-boundary heuristics, graded by strength:
+
+    - a silence at least the user's threshold always breaks;
+    - a question mark, an interruption/trail-off ending, or a short
+      conversational response always breaks (dialogue turn cues);
+    - a sentence ending (". !") or an opening acknowledgment ("Yeah,
+      ...") breaks only when paired with a smaller "soft" pause - so
+      a monologue read at speed stays one paragraph instead of
+      splintering at every full stop, while real turn-taking (which
+      nearly always carries a beat of silence) still splits.
+
+    With `gaps_informative` False (the engine recorded no real pauses)
+    the soft cues break unconditionally - punctuation is the only
+    signal left."""
     if prev is None:
         return True
     _, prev_end, prev_text = prev
     curr_start, _, curr_text = curr
     prev_stripped = prev_text.rstrip()
+    gap = curr_start - prev_end
+    soft_gap = max(_SOFT_BREAK_MIN_SECONDS,
+                   gap_threshold * _SOFT_BREAK_FRACTION)
 
     # Hard silence beyond the user's pause threshold.
-    if curr_start - prev_end >= gap_threshold:
+    if gap >= gap_threshold:
         return True
-    # Sentence-ending punctuation at a segment boundary is a paragraph
-    # break. Whisper decides where to end its segments based on
-    # silence + linguistic cues, so when one of its segments ends with
-    # a full stop / exclamation / question mark, that's a natural
-    # paragraph boundary - we should honour it rather than join the
-    # next segment on. (Previously only "?" did this, which left long
-    # statement-style runs collapsed into a single paragraph.)
-    if prev_stripped.endswith((".", "!", "?")):
+    # A question hands the floor over; the answer is its own paragraph.
+    if prev_stripped.endswith("?"):
+        return True
+    # Cut-off / trailing-away speech is a turn change in dialogue.
+    if prev_stripped.endswith(_INTERRUPTION_ENDINGS):
         return True
     # Short conversational responses (yes/no/etc.) on either side.
     if _is_short_response(prev_text) or _is_short_response(curr_text):
         return True
+    # Weaker cues need a beat of silence to confirm them - unless no
+    # real silence was ever recorded.
+    if gap >= soft_gap or not gaps_informative:
+        if prev_stripped.endswith((".", "!")):
+            return True
+        if _leading_acknowledgment(curr_text):
+            return True
     return False
 
 
@@ -723,7 +779,51 @@ def _should_break(prev, curr, gap_threshold: float) -> bool:
 _PARAGRAPH_SECONDS_CAP = 60.0
 
 
-def paragraphify(segments, gap_threshold: float):
+def _refine_segment_times(segments, words):
+    """Snap each segment's start/end inward to its first/last word.
+
+    Whisper pads segment boundaries with the surrounding silence, so
+    the gap between two segments understates the actual pause between
+    the spoken words. When word timestamps were recorded, trimming each
+    segment to its words makes every gap-based paragraph decision (and
+    the printed timestamps) measure real silence. Inward-only, so
+    segment order and spans stay consistent; segments whose words can't
+    be found pass through untouched."""
+    if not words:
+        return segments
+    refined = []
+    wi, n_words = 0, len(words)
+    for seg in segments:
+        s_start, s_end, text = seg[0], seg[1], seg[2]
+        while wi < n_words and words[wi][1] <= s_start:
+            wi += 1
+        first_start, last_end = None, None
+        wj = wi
+        while wj < n_words and words[wj][0] < s_end:
+            if first_start is None:
+                first_start = words[wj][0]
+            last_end = words[wj][1]
+            wj += 1
+        wi = wj
+        new_start = (first_start
+                     if first_start is not None
+                     and s_start <= first_start < s_end else s_start)
+        new_end = (last_end
+                   if last_end is not None
+                   and s_start < last_end <= s_end else s_end)
+        if new_start < new_end:
+            refined.append((new_start, new_end, text))
+        else:
+            refined.append(seg)
+    return refined
+
+
+def paragraphify(segments, gap_threshold: float, words=None):
+    """Group segments into paragraphs on purely programmatic cues
+    (see _should_break). `words`, when word timestamps were recorded,
+    sharpens the gap measurements via _refine_segment_times."""
+    segments = _refine_segment_times(segments, words or [])
+    gaps_informative = _gaps_are_informative(segments)
     paragraphs, current, prev = [], [], None
     para_start = None
     for seg in segments:
@@ -731,7 +831,8 @@ def paragraphify(segments, gap_threshold: float):
             forced_by_cap = (
                 para_start is not None
                 and seg[1] - para_start >= _PARAGRAPH_SECONDS_CAP)
-            if forced_by_cap or _should_break(prev, seg, gap_threshold):
+            if forced_by_cap or _should_break(prev, seg, gap_threshold,
+                                              gaps_informative):
                 paragraphs.append(current)
                 current = []
                 para_start = None
@@ -742,63 +843,6 @@ def paragraphify(segments, gap_threshold: float):
     if current:
         paragraphs.append(current)
     return paragraphs
-
-
-def paragraphify_speakers(segments, gap_threshold: float, seg_speakers):
-    """Speaker-aware paragraphify: the same break rules as
-    paragraphify(), plus a hard break whenever the known speaker
-    changes - a paragraph never mixes two identified speakers.
-
-    `seg_speakers` is a list parallel to `segments` of diarizer speaker
-    ids (ints) or None for unattributed segments (None never forces a
-    break; such segments join whichever paragraph they fall in).
-
-    Returns (paragraphs, para_speakers, para_confidence): the speaker
-    id whose speech dominates each paragraph (or None), and the share
-    of the paragraph's duration that id was actually attributed - the
-    caller uses it to leave doubtful paragraphs unlabelled."""
-    paragraphs, para_speakers, para_conf = [], [], []
-    current, current_times, prev = [], {}, None
-    para_start = None
-    current_spk = None      # the one known speaker in `current`
-
-    def flush():
-        total = sum(current_times.values())
-        known = {k: v for k, v in current_times.items() if k is not None}
-        if total > 0 and known:
-            best = max(known, key=known.get)
-            share = known[best] / total
-        else:
-            best, share = None, 0.0
-        paragraphs.append(list(current))
-        para_speakers.append(best)
-        para_conf.append(share)
-
-    for seg, spk in zip(segments, seg_speakers):
-        if current:
-            forced_by_cap = (
-                para_start is not None
-                and seg[1] - para_start >= _PARAGRAPH_SECONDS_CAP)
-            speaker_changed = (spk is not None
-                               and current_spk is not None
-                               and spk != current_spk)
-            if (forced_by_cap or speaker_changed
-                    or _should_break(prev, seg, gap_threshold)):
-                flush()
-                current, current_times = [], {}
-                para_start = None
-                current_spk = None
-        if para_start is None:
-            para_start = seg[0]
-        current.append(seg)
-        current_times[spk] = (current_times.get(spk, 0.0)
-                              + max(0.0, seg[1] - seg[0]))
-        if spk is not None:
-            current_spk = spk
-        prev = seg
-    if current:
-        flush()
-    return paragraphs, para_speakers, para_conf
 
 
 def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str:
@@ -1327,10 +1371,12 @@ LANGUAGES = [
 # Both models are ONNX and total ~33 MB, downloaded once on first use;
 # onnxruntime is already in the dependency tree via faster-whisper.
 #
-# The results are deliberately conservative: turns are mapped onto
-# Whisper's word timestamps, paragraphs break on speaker changes, and
-# any paragraph whose attribution is doubtful is left unlabelled for
-# the reviewer rather than guessed.
+# EXPERIMENTAL, and deliberately decoupled from paragraphify: the
+# paragraph boundaries always come from the programmatic heuristics
+# alone, and diarization only SUGGESTS a speaker label for each
+# finished paragraph (majority voice by time overlap). Any paragraph
+# whose attribution is doubtful is left unlabelled for the reviewer
+# rather than guessed.
 
 _DIARIZE_SEGMENTATION = {
     "url": ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
@@ -1395,17 +1441,13 @@ def _voice_model_spec(voice_id):
     return next(spec for spec in DIARIZE_VOICE_MODELS
                 if spec["id"] == DIARIZE_DEFAULT_VOICE_MODEL)
 
-# Words in a run shorter than this (both measures) are folded into the
-# neighbouring speaker run instead of forming their own split - guards
-# against one-word paragraph spam from attribution jitter.
-_DIARIZE_MIN_RUN_SECONDS = 0.8
-_DIARIZE_MIN_RUN_WORDS = 3
-# A word not inside any turn adopts the nearest turn within this many
-# seconds (else stays unattributed).
-_DIARIZE_NEAR_TURN_SECONDS = 0.75
-# Paragraphs whose majority speaker covers less than this share of the
-# paragraph stay unlabelled - wrong labels are worse than missing ones.
-_DIARIZE_MIN_LABELLED_SHARE = 0.5
+# A paragraph is labelled only when its majority voice wins clearly
+# among the time the diarizer attributed (MIN_MAJORITY of it), AND the
+# diarizer attributed a meaningful share of the paragraph's span at all
+# (MIN_COVERAGE - deliberately low, because engines pad segment spans
+# with silence). Wrong labels are worse than missing ones.
+_DIARIZE_MIN_MAJORITY = 0.6
+_DIARIZE_MIN_COVERAGE = 0.3
 # Clustering distance threshold when the speaker count is unknown
 # (sherpa-onnx's documented default for these models).
 _DIARIZE_CLUSTER_THRESHOLD = 0.5
@@ -1571,147 +1613,58 @@ def _run_diarization(audio, num_speakers, q, cancel_event=None,
     return turns
 
 
-# ---- Mapping diarized turns onto Whisper output -----------------------
+# ---- Suggesting labels for finished paragraphs ------------------------
 
-def assign_word_speakers(words, turns):
-    """For each (start, end, text, prob) word, the speaker id of the
-    turn it overlaps most, or the nearest turn within
-    _DIARIZE_NEAR_TURN_SECONDS, else None. Returns a parallel list."""
-    out = []
-    for w_start, w_end, _text, _prob in words:
-        best_spk, best_overlap = None, 0.0
-        best_gap, near_spk = None, None
-        for t_start, t_end, spk in turns:
-            overlap = min(w_end, t_end) - max(w_start, t_start)
-            if overlap > best_overlap:
-                best_overlap, best_spk = overlap, spk
-            elif overlap <= 0:
-                gap = (t_start - w_end if t_start >= w_end
-                       else w_start - t_end)
-                if gap >= 0 and (best_gap is None or gap < best_gap):
-                    best_gap, near_spk = gap, spk
-        if best_spk is None and best_gap is not None \
-                and best_gap <= _DIARIZE_NEAR_TURN_SECONDS:
-            best_spk = near_spk
-        out.append(best_spk)
-    return out
+def label_paragraphs(paragraphs, turns):
+    """Suggest a review-slot letter ("1".."9" or None) for each
+    already-formed paragraph from the diarized turns - the paragraphs
+    themselves are never reshaped.
 
-
-def _overlap_speaker(seg, turns):
-    """Majority speaker for a whole segment by time overlap, or None."""
-    times = {}
-    s_start, s_end = seg[0], seg[1]
-    for t_start, t_end, spk in turns:
-        overlap = min(s_end, t_end) - max(s_start, t_start)
-        if overlap > 0:
-            times[spk] = times.get(spk, 0.0) + overlap
-    if not times:
-        return None
-    return max(times, key=times.get)
-
-
-def split_segments_by_speaker(segments, words, word_speakers):
-    """Split Whisper segments at speaker changes using word timings.
-
-    Returns (new_segments, seg_speakers) - parallel lists. Segments
-    containing a single speaker (or no word data) pass through
-    unchanged with their engine punctuation intact; only genuinely
-    mixed segments are rebuilt from their words. Speaker runs shorter
-    than the jitter guards merge into the preceding run."""
-    new_segments, seg_speakers = [], []
-    wi = 0
-    n_words = len(words)
-    for seg in segments:
-        s_start, s_end, _text = seg
-        # Words belonging to this segment (both lists are time-ordered).
-        start_wi = wi
-        while wi < n_words and words[wi][0] < s_end - 0.01:
-            wi += 1
-        seg_words = words[start_wi:wi]
-        seg_word_spks = word_speakers[start_wi:wi]
-
-        if not seg_words:
-            new_segments.append(seg)
-            seg_speakers.append(None)
+    Per paragraph, each speaker is credited with the time their turns
+    overlap the paragraph's spoken segments. The majority speaker gets
+    the label only when it clearly wins among the attributed time
+    (_DIARIZE_MIN_MAJORITY) and the diarizer attributed a meaningful
+    share of the paragraph at all (_DIARIZE_MIN_COVERAGE); anything
+    doubtful stays unlabelled for the reviewer. Surviving speakers are
+    ranked by credited time, the busiest nine keep slots, and
+    numbering follows order of first appearance - the first voice
+    heard becomes Speaker 1."""
+    eligible = []       # per paragraph: speaker id or None
+    for para in paragraphs:
+        times, span = {}, 0.0
+        for seg in para:
+            s_start, s_end = seg[0], seg[1]
+            span += max(0.0, s_end - s_start)
+            for t_start, t_end, spk in turns:
+                overlap = min(s_end, t_end) - max(s_start, t_start)
+                if overlap > 0:
+                    times[spk] = times.get(spk, 0.0) + overlap
+        attributed = sum(times.values())
+        if not times or span <= 0 \
+                or attributed / span < _DIARIZE_MIN_COVERAGE:
+            eligible.append(None)
             continue
-
-        # Consecutive same-speaker runs; None words join the open run.
-        runs = []      # [ [speaker, [(word tuple), ...]], ... ]
-        for w, spk in zip(seg_words, seg_word_spks):
-            if runs and (spk is None or runs[-1][0] is None
-                         or spk == runs[-1][0]):
-                if runs[-1][0] is None:
-                    runs[-1][0] = spk
-                runs[-1][1].append(w)
-            else:
-                runs.append([spk, [w]])
-
-        # Fold jitter runs into their predecessor, and re-coalesce
-        # adjacent runs that end up with the same speaker (an A-jitter-A
-        # sandwich must collapse back to a single A run).
-        merged = []
-        for spk, run_words in runs:
-            duration = run_words[-1][1] - run_words[0][0]
-            is_jitter = (len(run_words) < _DIARIZE_MIN_RUN_WORDS
-                         and duration < _DIARIZE_MIN_RUN_SECONDS)
-            if merged and (spk == merged[-1][0] or is_jitter):
-                merged[-1][1].extend(run_words)
-            else:
-                merged.append([spk, list(run_words)])
-
-        if len(merged) == 1:
-            new_segments.append(seg)
-            seg_speakers.append(merged[0][0])
+        best = max(times, key=times.get)
+        if times[best] / attributed < _DIARIZE_MIN_MAJORITY:
+            eligible.append(None)
             continue
+        eligible.append(best)
 
-        for spk, run_words in merged:
-            text = "".join(w[2] for w in run_words).strip()
-            if not text:
-                continue
-            new_segments.append(
-                (float(run_words[0][0]), float(run_words[-1][1]), text))
-            seg_speakers.append(spk)
-    return new_segments, seg_speakers
-
-
-def build_speaker_paragraphs(segments, words, turns, gap_threshold):
-    """The full mapping pipeline: turns + Whisper output -> paragraphs
-    with per-paragraph review-slot letters ("1".."9" or None)."""
-    if words:
-        word_spks = assign_word_speakers(words, turns)
-        segments, seg_speakers = split_segments_by_speaker(
-            segments, words, word_spks)
-    else:
-        seg_speakers = [_overlap_speaker(seg, turns) for seg in segments]
-
-    paragraphs, para_spk, para_conf = paragraphify_speakers(
-        segments, gap_threshold, seg_speakers)
-
-    # Review slots are "1".."9": rank speakers by total speech time,
-    # keep the busiest nine, and number them in order of first
-    # appearance (the first voice heard becomes Speaker 1).
     totals = {}
-    for i, spk in enumerate(para_spk):
+    for spk, para in zip(eligible, paragraphs):
         if spk is None:
             continue
-        para = paragraphs[i]
         totals[spk] = (totals.get(spk, 0.0)
                        + max(0.0, para[-1][1] - para[0][0]))
     keep = set(sorted(totals, key=totals.get, reverse=True)
                [:TranscriptModel.MAX_SPEAKERS])
     letters = {}
-    for spk in (s for s in para_spk if s is not None and s in keep):
+    for spk in (s for s in eligible if s is not None and s in keep):
         if spk not in letters:
             letters[spk] = str(len(letters) + 1)
 
-    para_letters = []
-    for spk, conf in zip(para_spk, para_conf):
-        if spk is None or spk not in letters \
-                or conf < _DIARIZE_MIN_LABELLED_SHARE:
-            para_letters.append(None)
-        else:
-            para_letters.append(letters[spk])
-    return paragraphs, para_letters
+    return [letters.get(spk) if spk is not None else None
+            for spk in eligible]
 
 
 # =====================================================================
@@ -2088,14 +2041,15 @@ def transcribe_worker(params, q, cancel_event):
 
 
 def _paragraphs_with_speakers(segments, result, params, q, cancel_event):
-    """Group segments into paragraphs, running the speaker-detection
-    post-pass first when the run asked for it. Returns (paragraphs,
-    para_letters) where para_letters is None when no detection ran -
-    any failure downgrades to plain paragraphify with a logged warning
-    rather than failing a finished transcription."""
-    gap = params["gap"]
+    """Group segments into paragraphs with the programmatic heuristics,
+    then - when the experimental speaker detection is on - suggest a
+    label for each paragraph. The paragraphs are identical either way:
+    detection only labels them, never reshapes them, and any failure
+    just leaves the labels off with a logged warning."""
+    words = _extract_word_conf(result) if result else []
+    paragraphs = paragraphify(segments, params["gap"], words=words)
     if not params.get("diarize"):
-        return paragraphify(segments, gap), None
+        return paragraphs, None
     try:
         audio = params.get("_audio")
         if audio is None:
@@ -2107,14 +2061,12 @@ def _paragraphs_with_speakers(segments, result, params, q, cancel_event):
         voice_id = params.get("diarize_model") or DIARIZE_DEFAULT_VOICE_MODEL
         if not diarize_models_ready(voice_id):
             ensure_diarize_models(q, cancel_event, voice_id)
-        q.put(("log", "\nIdentifying speakers...\n"))
+        q.put(("log", "\nIdentifying speakers (experimental)...\n"))
         turns = _run_diarization(
             audio, params.get("num_speakers") or 0, q, cancel_event,
             voice_id=voice_id,
             threshold=params.get("diarize_threshold"))
-        words = _extract_word_conf(result) if result else []
-        paragraphs, para_letters = build_speaker_paragraphs(
-            segments, words, turns, gap)
+        para_letters = label_paragraphs(paragraphs, turns)
         labelled = sum(1 for L in para_letters if L)
         q.put(("log",
                f"  labelled {labelled} of {len(paragraphs)} "
@@ -2130,7 +2082,7 @@ def _paragraphs_with_speakers(segments, result, params, q, cancel_event):
         q.put(("log",
                f"\nSpeaker detection failed - continuing without it.\n"
                f"  {type(e).__name__}: {e}\n"))
-    return paragraphify(segments, gap), None
+    return paragraphs, None
 
 
 def _run_openai_whisper(params, q, cancel_event):
@@ -3275,11 +3227,12 @@ def build_worker_params(settings, in_path, out_path, *,
         logprob_threshold=settings["logprob_threshold"],
         no_speech_threshold=settings["no_speech_threshold"],
         condition_on_previous_text=settings["condition_on_previous_text"],
-        # Confidence highlighting and speaker detection both need word
-        # timestamps, so enable them whenever any of the three is on.
+        # Confidence highlighting requires word timestamps, so enable
+        # them whenever either option is on. (Word timestamps also
+        # sharpen paragraph gaps and speaker labelling when present,
+        # but neither REQUIRES them.)
         word_timestamps=(settings["word_timestamps"]
-                         or settings["highlight_confidence"]
-                         or bool(settings.get("diarize"))),
+                         or settings["highlight_confidence"]),
         highlight_confidence=settings["highlight_confidence"],
         initial_prompt=prompt or None,
         # With no title, name the document after the source file. (The

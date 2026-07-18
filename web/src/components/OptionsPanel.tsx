@@ -150,15 +150,17 @@ export default function OptionsPanel() {
       <Card title="Speakers">
         <div className="flex flex-col gap-4">
           <CheckField
-            label="Detect speakers automatically"
+            label="Detect speakers automatically (experimental)"
             checked={settings.diarize && meta.diarize_available}
             disabled={!meta.diarize_available}
             onChange={(v) => update({ diarize: v })}
             note={
               meta.diarize_available
-                ? "Listens for different voices and pre-fills the speaker labels " +
-                  "for you to check in Review. Downloads a small helper model " +
-                  "(~33 MB) the first time; everything still runs on this computer."
+                ? "Experimental: listens for different voices and suggests a speaker " +
+                  "label for each paragraph, for you to check in Review. Paragraph " +
+                  "boundaries themselves always come from the paragraph settings " +
+                  "below. Downloads a small helper model (~33 MB) the first time; " +
+                  "everything still runs on this computer."
                 : "Needs the sherpa-onnx package — re-run the installer to add it."
             }
           />
@@ -201,7 +203,7 @@ export default function OptionsPanel() {
               max={10}
               step={0.1}
               onChange={(v) => update({ gap: v })}
-              note="Lower for rapid dialogue, higher for monologue."
+              note="Lower for rapid dialogue, higher for monologue. Sentence endings also break when followed by a pause of 40% of this."
             />
           </div>
           <div>
@@ -272,7 +274,7 @@ export default function OptionsPanel() {
           <CheckField label="Word-level timestamps"
             checked={settings.word_timestamps}
             onChange={(v) => update({ word_timestamps: v })}
-            note="Records a timestamp for every word. Turned on automatically when confidence highlighting or speaker detection needs it." />
+            note="Records a timestamp for every word — sharpens paragraph gap measurements too. Turned on automatically when confidence highlighting needs it." />
           <CheckField label="Highlight low-confidence words in review"
             checked={settings.highlight_confidence}
             onChange={(v) => update({ highlight_confidence: v })}

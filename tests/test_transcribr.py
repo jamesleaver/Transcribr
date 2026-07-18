@@ -75,9 +75,40 @@ class TestParagraphify(unittest.TestCase):
         segs = [(0.0, 1.0, self.A), (5.0, 6.0, self.B)]
         self.assertEqual(len(T.paragraphify(segs, 1.5)), 2)
 
-    def test_sentence_end_breaks(self):
-        segs = [(0.0, 1.0, "It was finished."), (1.1, 2.0, self.B)]
+    def test_sentence_end_with_pause_breaks(self):
+        # A full stop plus a beat of silence (>= 40% of the threshold)
+        # is a paragraph boundary...
+        segs = [(0.0, 1.0, "It was finished."), (1.8, 2.5, self.B)]
         self.assertEqual(len(T.paragraphify(segs, 1.5)), 2)
+
+    def test_sentence_end_without_pause_flows_on(self):
+        # ...but a full stop with no real pause is just a sentence: a
+        # monologue read at speed stays one paragraph.
+        segs = [(0.0, 1.0, "It was finished."), (1.1, 2.0, self.B)]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 1)
+
+    def test_monologue_of_sentences_stays_together(self):
+        segs = [(i * 2.0, i * 2.0 + 1.9, "It kept going on.")
+                for i in range(5)]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 1)
+
+    def test_question_always_breaks(self):
+        segs = [(0.0, 1.0, "What happened next?"), (1.05, 2.0, self.B)]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 2)
+
+    def test_interruption_ending_breaks(self):
+        for ending in ("I was going to—", "I was going to...",
+                       "I was going to--"):
+            segs = [(0.0, 1.0, ending), (1.05, 2.0, self.B)]
+            self.assertEqual(len(T.paragraphify(segs, 1.5)), 2, ending)
+
+    def test_leading_acknowledgment_needs_a_pause(self):
+        # "Yeah, ..." after a beat of silence marks an answer...
+        segs = [(0.0, 1.0, self.A), (1.8, 3.0, "Yeah I thought so too")]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 2)
+        # ...but with no pause it's the same speaker's flow.
+        segs = [(0.0, 1.0, self.A), (1.05, 3.0, "Yeah I thought so too")]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 1)
 
     def test_short_response_breaks(self):
         segs = [(0.0, 1.0, self.A), (1.1, 1.5, "Yes"), (1.6, 2.5, self.B)]
@@ -91,165 +122,130 @@ class TestParagraphify(unittest.TestCase):
         paras = T.paragraphify(segs, 100.0)
         self.assertEqual(len(paras), 3)
 
+    def test_wall_to_wall_segments_break_on_punctuation_alone(self):
+        # faster-whisper without word timestamps pads segments
+        # wall-to-wall (end == next start), so no pause is ever
+        # visible; sentence endings must then break unconditionally.
+        segs = [(0.0, 4.4, "A pencil writes best."),
+                (4.4, 9.4, "The lamp shone brightly."),
+                (9.4, 12.2, "Clothes are free to new men."),
+                (12.2, 14.6, "The glow deepened after dark.")]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 4)
+
     def test_empty(self):
         self.assertEqual(T.paragraphify([], 1.5), [])
 
 
-class TestParagraphifySpeakers(unittest.TestCase):
-    # Punctuation-free, non-short-response texts so nothing but the
-    # signal under test can force a break (same trick as above).
-    A = "and then we walked along"
-    B = "toward the river for a while"
-
-    def test_speaker_change_forces_break(self):
-        segs = [(0.0, 1.0, self.A), (1.1, 2.0, self.B)]
-        paras, spk, conf = T.paragraphify_speakers(segs, 5.0, [0, 1])
-        self.assertEqual(len(paras), 2)
-        self.assertEqual(spk, [0, 1])
-        self.assertEqual(conf, [1.0, 1.0])
-
-    def test_none_speaker_never_breaks(self):
-        segs = [(0.0, 1.0, self.A), (1.1, 2.0, self.B),
-                (2.1, 3.0, self.A)]
-        paras, spk, conf = T.paragraphify_speakers(
-            segs, 5.0, [0, None, 0])
-        self.assertEqual(len(paras), 1)
-        self.assertEqual(spk, [0])
-
-    def test_confidence_is_labelled_share(self):
-        # 1s of speaker 0 in a 2s paragraph -> share 0.5.
-        segs = [(0.0, 1.0, self.A), (1.1, 2.1, self.B)]
-        _, spk, conf = T.paragraphify_speakers(segs, 5.0, [0, None])
-        self.assertEqual(spk, [0])
-        self.assertAlmostEqual(conf[0], 0.5, places=3)
-
-    def test_all_unattributed(self):
-        segs = [(0.0, 1.0, self.A)]
-        paras, spk, conf = T.paragraphify_speakers(segs, 5.0, [None])
-        self.assertEqual(spk, [None])
-        self.assertEqual(conf, [0.0])
-
-    def test_same_break_rules_still_apply(self):
-        segs = [(0.0, 1.0, "It was finished."), (1.1, 2.0, self.B)]
-        paras, spk, _ = T.paragraphify_speakers(segs, 5.0, [0, 0])
-        self.assertEqual(len(paras), 2)
-
-
-class TestAssignWordSpeakers(unittest.TestCase):
-    TURNS = [(0.0, 5.0, 0), (5.5, 10.0, 1)]
-
-    def _word(self, start, end):
-        return (start, end, " word", None)
-
-    def test_inside_turn(self):
-        out = T.assign_word_speakers(
-            [self._word(1.0, 1.4), self._word(6.0, 6.4)], self.TURNS)
-        self.assertEqual(out, [0, 1])
-
-    def test_straddling_word_takes_larger_overlap(self):
-        out = T.assign_word_speakers([self._word(4.8, 5.9)], self.TURNS)
-        # 0.2s with speaker 0, 0.4s with speaker 1.
-        self.assertEqual(out, [1])
-
-    def test_word_near_turn_adopts_nearest(self):
-        # 0.1s after turn 0 ends vs 0.2s before turn 1 starts -> turn 0.
-        out = T.assign_word_speakers([self._word(5.1, 5.3)], self.TURNS)
-        self.assertEqual(out, [0])
-        # 0.35s after turn 0 vs 0.05s before turn 1 -> turn 1.
-        out = T.assign_word_speakers([self._word(5.35, 5.45)], self.TURNS)
-        self.assertEqual(out, [1])
-
-    def test_word_far_from_any_turn_is_none(self):
-        out = T.assign_word_speakers([self._word(20.0, 20.4)], self.TURNS)
-        self.assertEqual(out, [None])
-
-
-class TestSplitSegmentsBySpeaker(unittest.TestCase):
-    def test_single_speaker_segment_keeps_engine_text(self):
-        segs = [(0.0, 2.0, "Exactly as Whisper wrote it.")]
-        words = [(0.1, 0.5, " Exactly", None), (0.6, 1.0, " as", None),
-                 (1.1, 1.5, " Whisper", None), (1.6, 2.0, " wrote it.", None)]
-        out_segs, out_spk = T.split_segments_by_speaker(
-            segs, words, [0, 0, 0, 0])
-        self.assertEqual(out_segs, segs)
-        self.assertEqual(out_spk, [0])
-
-    def test_mixed_segment_splits_at_speaker_boundary(self):
-        segs = [(0.0, 4.0, "Hello there and welcome back everyone today")]
-        words = [(0.0, 0.5, " Hello", None), (0.5, 1.0, " there", None),
-                 (1.0, 1.5, " and", None),
-                 (2.0, 2.5, " welcome", None), (2.5, 3.0, " back", None),
-                 (3.0, 3.5, " everyone", None), (3.5, 4.0, " today", None)]
-        out_segs, out_spk = T.split_segments_by_speaker(
-            segs, words, [0, 0, 0, 1, 1, 1, 1])
-        self.assertEqual(len(out_segs), 2)
-        self.assertEqual(out_spk, [0, 1])
-        self.assertEqual(out_segs[0][2], "Hello there and")
-        self.assertEqual(out_segs[1][2], "welcome back everyone today")
-        self.assertAlmostEqual(out_segs[0][0], 0.0)
-        self.assertAlmostEqual(out_segs[1][0], 2.0)
-
-    def test_jitter_run_folds_into_predecessor(self):
-        # A lone quick word attributed to speaker 1 mid-flow should not
-        # split the segment.
-        segs = [(0.0, 3.0, "one two three four five six")]
-        words = [(i * 0.5, i * 0.5 + 0.4, f" w{i}", None)
-                 for i in range(6)]
-        out_segs, out_spk = T.split_segments_by_speaker(
-            segs, words, [0, 0, 1, 0, 0, 0])
-        self.assertEqual(len(out_segs), 1)
-        self.assertEqual(out_spk, [0])
+class TestRefineSegmentTimes(unittest.TestCase):
+    def test_padding_trimmed_to_words(self):
+        # Whisper padded the segment out to 0.0-4.0 but speech spans
+        # 0.8-3.1; the gap measurements should see the real silence.
+        segs = [(0.0, 4.0, "hello there"), (4.0, 8.0, "and welcome")]
+        words = [(0.8, 1.5, " hello", None), (1.6, 3.1, " there", None),
+                 (4.9, 5.5, " and", None), (5.6, 7.2, " welcome", None)]
+        out = T._refine_segment_times(segs, words)
+        self.assertEqual(out[0][:2], (0.8, 3.1))
+        self.assertEqual(out[1][:2], (4.9, 7.2))
+        self.assertEqual(out[0][2], "hello there")
 
     def test_segment_without_words_passes_through(self):
-        segs = [(0.0, 2.0, "No word data here")]
-        out_segs, out_spk = T.split_segments_by_speaker(segs, [], [])
-        self.assertEqual(out_segs, segs)
-        self.assertEqual(out_spk, [None])
+        segs = [(0.0, 2.0, "no words"), (2.0, 4.0, "has words")]
+        words = [(2.2, 3.8, " has words", None)]
+        out = T._refine_segment_times(segs, words)
+        self.assertEqual(out[0], segs[0])
+        self.assertEqual(out[1][:2], (2.2, 3.8))
+
+    def test_only_snaps_inward(self):
+        # A word timestamp that strays outside its segment is ignored.
+        segs = [(1.0, 2.0, "x")]
+        words = [(0.5, 2.5, " x", None)]
+        self.assertEqual(T._refine_segment_times(segs, words), segs)
+
+    def test_no_words_is_identity(self):
+        segs = [(0.0, 1.0, "a")]
+        self.assertEqual(T._refine_segment_times(segs, []), segs)
 
 
-class TestBuildSpeakerParagraphs(unittest.TestCase):
+class TestLabelParagraphs(unittest.TestCase):
     A = "and then we walked along"
     B = "toward the river for a while"
 
-    def test_two_speaker_conversation_no_words(self):
-        # Segment-overlap fallback path (no word timestamps).
-        segs = [(0.0, 4.0, self.A), (4.2, 8.0, self.B),
-                (10.0, 14.0, self.A), (14.2, 18.0, self.B)]
+    def _para(self, start, end, text):
+        return [(start, end, text)]
+
+    def test_two_speaker_conversation(self):
+        paragraphs = [self._para(0.0, 8.0, self.A),
+                      self._para(10.0, 18.0, self.B)]
         turns = [(0.0, 8.0, 0), (10.0, 18.0, 1)]
-        paras, letters = T.build_speaker_paragraphs(segs, [], turns, 1.5)
-        self.assertEqual(len(paras), 2)
-        self.assertEqual(letters, ["1", "2"])
+        self.assertEqual(T.label_paragraphs(paragraphs, turns),
+                         ["1", "2"])
 
     def test_first_voice_becomes_speaker_one(self):
-        segs = [(0.0, 4.0, self.A), (5.0, 9.0, self.B)]
+        paragraphs = [self._para(0.0, 4.0, self.A),
+                      self._para(5.0, 9.0, self.B)]
         # Diarizer ids in reverse order: id 7 speaks first.
         turns = [(0.0, 4.0, 7), (5.0, 9.0, 2)]
-        _, letters = T.build_speaker_paragraphs(segs, [], turns, 1.5)
-        self.assertEqual(letters, ["1", "2"])
+        self.assertEqual(T.label_paragraphs(paragraphs, turns),
+                         ["1", "2"])
 
     def test_low_confidence_left_unlabelled(self):
-        # Only the last fifth of the paragraph is attributed.
-        segs = [(0.0, 4.0, self.A), (4.1, 8.0, self.B),
-                (8.1, 10.0, self.A)]
-        turns = [(8.1, 10.0, 0)]
-        paras, letters = T.build_speaker_paragraphs(segs, [], turns, 5.0)
-        self.assertEqual(len(paras), 1)
-        self.assertEqual(letters, [None])
+        # The turn covers only the last fifth of the paragraph.
+        paragraphs = [self._para(0.0, 10.0, self.A)]
+        turns = [(8.0, 10.0, 0)]
+        self.assertEqual(T.label_paragraphs(paragraphs, turns), [None])
+
+    def test_majority_speaker_wins_a_mixed_paragraph(self):
+        # 70% speaker 0 / 30% speaker 1 -> clear majority, labelled.
+        paragraphs = [self._para(0.0, 10.0, self.A)]
+        turns = [(0.0, 7.0, 0), (7.0, 10.0, 1)]
+        self.assertEqual(T.label_paragraphs(paragraphs, turns), ["1"])
+
+    def test_close_call_between_voices_left_unlabelled(self):
+        # 55/45 between two voices is not a clear majority.
+        paragraphs = [self._para(0.0, 10.0, self.A)]
+        turns = [(0.0, 5.5, 0), (5.5, 10.0, 1)]
+        self.assertEqual(T.label_paragraphs(paragraphs, turns), [None])
+
+    def test_padded_paragraph_still_labels_its_one_voice(self):
+        # Engines pad spans with silence: only 40% of the paragraph is
+        # attributed, but it is all one voice - label it.
+        paragraphs = [self._para(0.0, 10.0, self.A)]
+        turns = [(3.0, 7.0, 0)]
+        self.assertEqual(T.label_paragraphs(paragraphs, turns), ["1"])
+
+    def test_numbering_counts_only_labelled_paragraphs(self):
+        # A gated-out paragraph must not consume slot 1: the first
+        # LABELLED voice becomes Speaker 1.
+        paragraphs = [self._para(0.0, 10.0, self.A),
+                      self._para(11.0, 15.0, self.B)]
+        turns = [(9.0, 10.0, 0),       # 10% coverage -> gated out
+                 (11.0, 15.0, 5)]
+        self.assertEqual(T.label_paragraphs(paragraphs, turns),
+                         [None, "1"])
+
+    def test_no_turns_no_labels(self):
+        paragraphs = [self._para(0.0, 4.0, self.A)]
+        self.assertEqual(T.label_paragraphs(paragraphs, []), [None])
+
+    def test_paragraph_boundaries_never_change(self):
+        # label_paragraphs takes finished paragraphs and only labels
+        # them - callers rely on the list being untouched.
+        paragraphs = [self._para(0.0, 4.0, self.A),
+                      self._para(5.0, 9.0, self.B)]
+        snapshot = [list(p) for p in paragraphs]
+        T.label_paragraphs(paragraphs, [(0.0, 9.0, 3)])
+        self.assertEqual(paragraphs, snapshot)
 
     def test_more_than_nine_speakers_keeps_busiest(self):
-        # 10 speakers with decreasing airtime; the quietest one (the
-        # last) must be left unlabelled, the rest numbered 1..9.
-        segs, turns = [], []
+        paragraphs, turns = [], []
         t = 0.0
         for spk in range(10):
             dur = 10.0 - spk
-            segs.append((t, t + dur, "It stops here."))
+            paragraphs.append(self._para(t, t + dur, "It stops here."))
             turns.append((t, t + dur, spk))
             t += dur + 3.0
-        paras, letters = T.build_speaker_paragraphs(segs, [], turns, 1.5)
-        self.assertEqual(len(paras), 10)
-        self.assertEqual(letters[:9],
-                         [str(i) for i in range(1, 10)])
+        letters = T.label_paragraphs(paragraphs, turns)
+        self.assertEqual(letters[:9], [str(i) for i in range(1, 10)])
         self.assertIsNone(letters[9])
 
 

@@ -1692,10 +1692,12 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(
             self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "faster")
 
-    def test_diarize_forces_word_timestamps(self):
+    def test_diarize_no_longer_forces_word_timestamps(self):
+        # Speaker detection labels finished paragraphs by time overlap,
+        # so it needs no word timestamps (decoupled in 0.9.0).
         p = self._params(word_timestamps=False, highlight_confidence=False,
                          diarize=True)
-        self.assertTrue(p["word_timestamps"])
+        self.assertFalse(p["word_timestamps"])
         self.assertTrue(p["diarize"])
 
     def test_diarize_model_and_threshold_flow_through(self):
