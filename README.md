@@ -311,9 +311,10 @@ Best of** higher = better but slower; **Compression-ratio threshold**
 catches hallucination loops; **No-speech threshold** raises/lowers how
 readily silence is skipped; **Condition on previous text** improves
 consistency but can propagate an early mistake. **Highlight
-low-confidence words in review** records per-word confidence during
-transcription (slightly slower) so the review pane can shade words the
-engine was unsure about.
+low-confidence words in review** shades the words the engine was
+unsure about so you know where to listen. (Word-level timestamps are
+always recorded since 0.9.0 — they make paragraph gaps measure real
+silence, sharpen playback spans, and feed the confidence shading.)
 
 ### Paragraphs and extra outputs
 
@@ -545,7 +546,10 @@ open the Vite URL. If the repository lives in Dropbox, mark
 `xattr -w com.dropbox.ignored 1 web/node_modules` (macOS).
 
 **Annotation overlay.** Launching with `--annotate` (or
-`TRANSCRIBR_ANNOTATE=1`) adds a developer-only ✎ button: click any
+`TRANSCRIBR_ANNOTATE=1`), or creating a marker file in the config dir
+(`touch "~/Library/Application Support/Transcribr/annotate.on"` on
+macOS — delete it to hide the overlay again; checked live, no restart
+needed), adds a developer-only ✎ button: click any
 element in the UI to pin a note to it (selector path, text, markup and
 geometry are captured automatically). The 📋 button reviews the saved
 notes, deletes them, or copies the lot as markdown for a development

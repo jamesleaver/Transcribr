@@ -34,6 +34,7 @@ LOG="$LOG_DIR/launch.log"
 
 {
     echo "==== $(date) ===="
-    "$VENV/bin/python" "$SCRIPT"
+    # "$@" lets `open -a Transcribr --args --annotate` reach the app.
+    "$VENV/bin/python" "$SCRIPT" "$@"
     echo "GUI exited with status $?"
 } >> "$LOG" 2>&1

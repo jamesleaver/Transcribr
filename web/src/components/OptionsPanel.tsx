@@ -271,14 +271,10 @@ export default function OptionsPanel() {
             checked={settings.condition_on_previous_text}
             onChange={(v) => update({ condition_on_previous_text: v })}
             note="Feeds each chunk the text before it: more consistent style, but an early mistake can propagate." />
-          <CheckField label="Word-level timestamps"
-            checked={settings.word_timestamps}
-            onChange={(v) => update({ word_timestamps: v })}
-            note="Records a timestamp for every word — sharpens paragraph gap measurements too. Turned on automatically when confidence highlighting needs it." />
           <CheckField label="Highlight low-confidence words in review"
             checked={settings.highlight_confidence}
             onChange={(v) => update({ highlight_confidence: v })}
-            note="Shades words the engine was unsure about so you know where to listen." />
+            note="Shades words the engine was unsure about so you know where to listen. (Word-level timestamps are always recorded — they also sharpen paragraph breaks.)" />
         </div>
       </Disclosure>
     </div>

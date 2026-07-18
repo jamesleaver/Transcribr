@@ -383,6 +383,23 @@ def _settings_save(settings):
 
 ANNOTATE_MODE = False
 
+
+def annotate_enabled():
+    """Whether the annotation overlay should show. Checked live so the
+    marker file works without a restart: the --annotate flag, the
+    TRANSCRIBR_ANNOTATE=1 environment variable, or an `annotate.on`
+    file in the config dir (`touch` it to enable the overlay for the
+    double-clicked app; delete it to hide again)."""
+    if ANNOTATE_MODE:
+        return True
+    if os.environ.get("TRANSCRIBR_ANNOTATE", "").strip() == "1":
+        return True
+    try:
+        return (_config_dir() / "annotate.on").exists()
+    except OSError:
+        return False
+
+
 _annotations_lock = threading.Lock()
 
 # Field -> stored size cap. Keeps a runaway page from bloating the file.
@@ -3227,12 +3244,12 @@ def build_worker_params(settings, in_path, out_path, *,
         logprob_threshold=settings["logprob_threshold"],
         no_speech_threshold=settings["no_speech_threshold"],
         condition_on_previous_text=settings["condition_on_previous_text"],
-        # Confidence highlighting requires word timestamps, so enable
-        # them whenever either option is on. (Word timestamps also
-        # sharpen paragraph gaps and speaker labelling when present,
-        # but neither REQUIRES them.)
-        word_timestamps=(settings["word_timestamps"]
-                         or settings["highlight_confidence"]),
+        # Always on since 0.9.0: word timings let paragraph gaps
+        # measure real silence instead of Whisper's padded segment
+        # edges, sharpen speaker labelling and playback spans, and
+        # feed confidence shading. The modest speed cost buys a
+        # noticeably better transcript.
+        word_timestamps=True,
         highlight_confidence=settings["highlight_confidence"],
         initial_prompt=prompt or None,
         # With no title, name the document after the source file. (The
@@ -3265,9 +3282,11 @@ def build_worker_params(settings, in_path, out_path, *,
 # and missing ones fall back to the defaults, so a stale or corrupt
 # file can't wedge the app.
 
+# ("word_timestamps" was a stored setting until 0.9.0; it is now always
+# on for the run, and any stale key in settings.json is simply dropped.)
 _SETTINGS_BOOL_KEYS = (
     "show_timestamp", "review", "condition_on_previous_text",
-    "word_timestamps", "extra_json", "extra_srt", "extra_vtt",
+    "extra_json", "extra_srt", "extra_vtt",
     "extra_tsv", "highlight_confidence", "show_details",
     "diarize", "show_all_models",
 )
@@ -3315,7 +3334,6 @@ def default_settings():
         "logprob_threshold": -1.0,
         "no_speech_threshold": 0.6,
         "condition_on_previous_text": True,
-        "word_timestamps": False,
         "extra_json": False,
         "extra_srt": False,
         "extra_vtt": False,
@@ -5282,7 +5300,7 @@ class WebBackend:
                     {"id": m["id"], "label": m["label"],
                      "note": m["note"], "size": m["size"]}
                     for m in DIARIZE_VOICE_MODELS],
-                "annotate": ANNOTATE_MODE,
+                "annotate": annotate_enabled(),
                 "readme_available": _find_readme() is not None,
             }
 
@@ -5873,7 +5891,9 @@ def _parse_args(argv):
     p.add_argument("--annotate", action="store_true",
                    help="show the developer annotation overlay (pin "
                         "notes to UI elements; saved to annotations.json "
-                        "in the config dir). Also: TRANSCRIBR_ANNOTATE=1")
+                        "in the config dir). Also: TRANSCRIBR_ANNOTATE=1, "
+                        "or `touch <config dir>/annotate.on` for the "
+                        "double-clicked app")
     return p.parse_args(argv)
 
 

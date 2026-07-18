@@ -75,7 +75,6 @@ export interface Settings {
   logprob_threshold: number;
   no_speech_threshold: number;
   condition_on_previous_text: boolean;
-  word_timestamps: boolean;
   extra_json: boolean;
   extra_srt: boolean;
   extra_vtt: boolean;

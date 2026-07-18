@@ -1393,6 +1393,15 @@ class TestHttpApi(unittest.TestCase):
         # Off by default; the routes exist regardless.
         _, meta = self._req("GET", "/api/meta")
         self.assertFalse(meta["annotate"])
+        # The annotate.on marker file enables the overlay live (no
+        # restart), for the double-clicked app.
+        marker = T._config_dir() / "annotate.on"
+        marker.touch()
+        try:
+            _, meta = self._req("GET", "/api/meta")
+            self.assertTrue(meta["annotate"])
+        finally:
+            marker.unlink()
         status, rec = self._req(
             "POST", "/api/annotations",
             {"view": "transcribe", "selector": "button.x",
@@ -1692,13 +1701,15 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(
             self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "faster")
 
-    def test_diarize_no_longer_forces_word_timestamps(self):
-        # Speaker detection labels finished paragraphs by time overlap,
-        # so it needs no word timestamps (decoupled in 0.9.0).
-        p = self._params(word_timestamps=False, highlight_confidence=False,
-                         diarize=True)
-        self.assertFalse(p["word_timestamps"])
+    def test_word_timestamps_always_on(self):
+        # Since 0.9.0 word timings are always recorded: they sharpen
+        # paragraph gaps, playback spans and confidence shading. A
+        # stale settings.json key cannot turn them off.
+        p = self._params(highlight_confidence=False, diarize=True)
+        self.assertTrue(p["word_timestamps"])
         self.assertTrue(p["diarize"])
+        merged = T.validate_settings({"word_timestamps": False})
+        self.assertNotIn("word_timestamps", merged)
 
     def test_diarize_model_and_threshold_flow_through(self):
         p = self._params(diarize=True, diarize_model="campplus",
@@ -1733,11 +1744,12 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(s2["title"], "Doc")
         self.assertEqual(s2["prompt"], "keywords")
 
-    def test_confidence_forces_word_timestamps(self):
-        p = self._params(word_timestamps=False, highlight_confidence=True)
+    def test_confidence_shading_no_longer_needs_forcing(self):
+        # Word timestamps are unconditional now; highlighting is purely
+        # the review-shading toggle.
+        p = self._params(highlight_confidence=True)
         self.assertTrue(p["word_timestamps"])
-        p = self._params(word_timestamps=False, highlight_confidence=False)
-        self.assertFalse(p["word_timestamps"])
+        self.assertTrue(p["highlight_confidence"])
 
     def test_language_display_to_code(self):
         self.assertEqual(self._params(language="German")["language"], "de")
