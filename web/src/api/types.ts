@@ -87,6 +87,8 @@ export interface Settings {
   show_all_models: boolean;
   /** Show the context/vocabulary priming field on the Transcribe page. */
   show_prompt: boolean;
+  /** Show the experimental speaker-detection card on the Transcribe page. */
+  show_diarize: boolean;
 }
 
 export interface RecentItem {

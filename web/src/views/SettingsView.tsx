@@ -14,10 +14,44 @@ export default function SettingsView() {
   if (!settings) return null;
   const update = useApp.getState().updateSettings;
 
+  const onLanguageChange = (v: string) => {
+    // Keep the chosen model tier when the language flips between
+    // English and anything else (small.en <-> small); non-tier models
+    // are the user's explicit pick and stay put.
+    const nowEnglish = v === "English";
+    const tier = meta.model_tiers.find(
+      (t) => t.model === settings.model || t.model_en === settings.model,
+    );
+    const patch: Partial<typeof settings> = { language: v };
+    if (tier) patch.model = nowEnglish ? tier.model_en : tier.model;
+    update(patch);
+  };
+
   return (
     <div className="mx-auto max-w-3xl px-8 py-10">
       <h1 className="mb-6 text-2xl font-bold">Settings</h1>
       <div className="flex flex-col gap-4">
+        <Card title="Language & task">
+          <div className="grid grid-cols-2 gap-4">
+            <SelectField
+              label="Spoken language"
+              value={settings.language}
+              options={meta.languages.map(([n]) => ({ value: n, label: n }))}
+              onChange={onLanguageChange}
+              note="Setting it beats auto-detect on speed and accuracy."
+            />
+            <SelectField
+              label="Task"
+              value={settings.task}
+              options={[
+                { value: "transcribe", label: "Transcribe" },
+                { value: "translate", label: "Translate into English" },
+              ]}
+              onChange={(v) => update({ task: v as typeof settings.task })}
+            />
+          </div>
+        </Card>
+
         <Card title="Saving">
           <div className="grid grid-cols-2 gap-4">
             <SelectField
@@ -54,6 +88,12 @@ export default function SettingsView() {
               checked={settings.condition_on_previous_text}
               onChange={(v) => update({ condition_on_previous_text: v })}
               note="Feeds each chunk the text before it: more consistent style, but an early mistake can propagate. Leave on unless a transcript goes off the rails."
+            />
+            <CheckField
+              label="Show the speaker detection option (experimental)"
+              checked={settings.show_diarize}
+              onChange={(v) => update({ show_diarize: v })}
+              note="Adds a Speakers card to the Transcribe page that can suggest a speaker label per paragraph. Experimental — off and hidden by default."
             />
           </div>
         </Card>

@@ -141,6 +141,14 @@ else:
     _REVEAL_LABEL = "Show in Folder"
 
 
+def _open_url(url):
+    """Open an external link (http/https/mailto) in the system browser
+    or mail client. Kept separate from _open_path so tests can stub it
+    and so nothing file-like ever reaches the browser."""
+    import webbrowser
+    webbrowser.open(url)
+
+
 def _open_path(path):
     """Open a file with the OS's default handler."""
     path = str(path)
@@ -2653,6 +2661,15 @@ def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
                 _pdfcanvas.Canvas.showPage(self)
             _pdfcanvas.Canvas.save(self)
 
+    # The hanging-indent column, in characters. Courier 10pt is 6pt per
+    # character, so 14 characters = 84pt (~2.96cm) - the wrapped lines
+    # indent to exactly where the first line's body starts, because the
+    # timestamp itself is padded to the same column with non-breaking
+    # spaces. (The .docx reaches the same alignment with a tab stop;
+    # reportlab has no tabs inside paragraphs, hence the padding.)
+    _INDENT_CHARS = 14
+    _indent_pts = _INDENT_CHARS * 6
+
     body_style = ParagraphStyle(
         "Transcript",
         fontName="Courier", fontSize=10, leading=12,
@@ -2661,8 +2678,8 @@ def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
     if show_timestamp:
         # Hanging indent: timestamp in the left column, wrapped body
         # lines aligned under the body column (mirrors the docx style).
-        body_style.leftIndent = 3.0 * cm
-        body_style.firstLineIndent = -3.0 * cm
+        body_style.leftIndent = _indent_pts
+        body_style.firstLineIndent = -_indent_pts
     label_style = ParagraphStyle(
         "SpeakerLabel",
         fontName="Courier-Bold", fontSize=10, leading=12,
@@ -2695,10 +2712,13 @@ def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
         last_speaker = speaker
 
         if show_timestamp:
-            # Non-breaking spaces keep the timestamp and the gap to the
-            # body out of reportlab's line-wrapping calculations.
-            text = (escape(format_timestamp(start))
-                    + "   " + escape(body))
+            # Pad the timestamp to the indent column with non-breaking
+            # spaces so the first line's body starts exactly where the
+            # wrapped lines are indented to (the .docx reaches the same
+            # alignment with a tab stop).
+            ts = format_timestamp(start)
+            pad = " " * max(1, _INDENT_CHARS - len(ts))
+            text = escape(ts) + pad + escape(body)
         else:
             text = escape(body)
         story.append(Paragraph(text, body_style))
@@ -3373,7 +3393,7 @@ _SETTINGS_BOOL_KEYS = (
     "show_timestamp", "condition_on_previous_text",
     "extra_json", "extra_srt", "extra_vtt",
     "extra_tsv", "show_details",
-    "diarize", "show_all_models", "show_prompt",
+    "diarize", "show_all_models", "show_prompt", "show_diarize",
 )
 
 _SETTINGS_NUMBER_KEYS = (
@@ -3430,6 +3450,9 @@ def default_settings():
         "diarize_threshold": _DIARIZE_CLUSTER_THRESHOLD,
         "show_all_models": False,
         "show_prompt": False,
+        # The experimental speaker-detection card stays hidden until
+        # enabled from the Settings page.
+        "show_diarize": False,
     }
 
 
@@ -5781,6 +5804,18 @@ class WebBackend:
 
         # -- paths, log, readme -------------------------------------------
 
+        @app.post("/api/url/open")
+        def api_url_open():
+            """Open an external link from the in-app README in the
+            system browser / mail client."""
+            body = bottle.request.json or {}
+            url = (body.get("url") or "").strip()
+            if not re.match(r"^(https?://|mailto:)", url, re.IGNORECASE):
+                _fail(ApiFail(400, "bad_url",
+                              "Only http(s) and mailto links open."))
+            _open_url(url)
+            return {"ok": True}
+
         @app.post("/api/path/open")
         def api_path_open():
             body = bottle.request.json or {}
@@ -6196,6 +6231,58 @@ def _bind_or_exit(backend, port):
             f"  python3 {Path(__file__).name} --port {port + 1}")
 
 
+# Kept module-global so the Objective-C target object isn't collected
+# while the menu still points at it.
+_ABOUT_MENU_TARGET = None
+
+
+def _hook_about_menu():
+    """macOS: make the application menu's About item show Transcribr's
+    own about text (a native alert) instead of the bare standard panel.
+    Best-effort - a failure just leaves the default item."""
+    global _ABOUT_MENU_TARGET
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSAlert, NSApp
+        from Foundation import NSObject
+        from PyObjCTools import AppHelper
+
+        class _AboutTarget(NSObject):
+            def showAbout_(self, _sender):
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_("Transcribr")
+                alert.setInformativeText_(ABOUT_TEXT)
+                alert.runModal()
+
+        _ABOUT_MENU_TARGET = _AboutTarget.alloc().init()
+
+        def patch():
+            try:
+                main_menu = NSApp.mainMenu()
+                if main_menu is None or main_menu.numberOfItems() == 0:
+                    return
+                app_menu = main_menu.itemAtIndex_(0).submenu()
+                if app_menu is None:
+                    return
+                for i in range(app_menu.numberOfItems()):
+                    item = app_menu.itemAtIndex_(i)
+                    if "about" in str(item.title() or "").lower():
+                        item.setTarget_(_ABOUT_MENU_TARGET)
+                        item.setAction_("showAbout:")
+                        break
+            except Exception:
+                _log("about-menu patch failed:\n"
+                     + traceback.format_exc())
+
+        # The menu exists once the app has finished launching; the
+        # window's loaded event is comfortably after that, and
+        # callAfter hops us onto the main thread AppKit requires.
+        AppHelper.callAfter(patch)
+    except Exception:
+        _log("about-menu hook unavailable:\n" + traceback.format_exc())
+
+
 def _attach_drop_handler(backend, window):
     """Bridge OS drag-and-drop to the front end. pywebview reveals the
     dropped files' real filesystem paths on the PYTHON side only
@@ -6282,6 +6369,7 @@ def main_web(args):
 
     def on_loaded():
         _attach_drop_handler(backend, window)
+        _hook_about_menu()
 
     def on_closed():
         # A pending (debounced) autosave must not be lost with the

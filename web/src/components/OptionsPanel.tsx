@@ -72,41 +72,12 @@ export default function OptionsPanel() {
   if (!settings) return null;
   const update = useApp.getState().updateSettings;
 
-  const onLanguageChange = (v: string) => {
-    // Keep the chosen tier when the language flips between English and
-    // anything else (small.en <-> small); non-tier models are the
-    // user's explicit pick and stay put.
-    const nowEnglish = v === "English";
-    const tier = meta.model_tiers.find(
-      (t) => t.model === settings.model || t.model_en === settings.model,
-    );
-    const patch: Partial<typeof settings> = { language: v };
-    if (tier) patch.model = nowEnglish ? tier.model_en : tier.model;
-    update(patch);
-  };
-
   return (
     <div className="flex flex-col gap-4">
       <Card title="Quick settings">
         <div className="flex flex-col gap-4">
           <ModelTierPicker />
           <div className="grid grid-cols-2 gap-4">
-            <SelectField
-              label="Spoken language"
-              value={settings.language}
-              options={meta.languages.map(([n]) => ({ value: n, label: n }))}
-              onChange={onLanguageChange}
-              note="Setting it beats auto-detect on speed and accuracy."
-            />
-            <SelectField
-              label="Task"
-              value={settings.task}
-              options={[
-                { value: "transcribe", label: "Transcribe" },
-                { value: "translate", label: "Translate into English" },
-              ]}
-              onChange={(v) => update({ task: v as typeof settings.task })}
-            />
             <NumberField
               label="Start a new paragraph after a silence of (seconds)"
               value={settings.gap}
@@ -114,12 +85,13 @@ export default function OptionsPanel() {
               max={10}
               step={0.1}
               onChange={(v) => update({ gap: v })}
-              note="Lower for rapid dialogue, higher for monologue. Sentence endings also break when followed by a pause of 40% of this. Works alongside speaker detection."
+              note="Lower for rapid dialogue, higher for monologue."
             />
           </div>
         </div>
       </Card>
 
+      {settings.show_diarize && (
       <Card title="Speakers">
         <div className="flex flex-col gap-4">
           <CheckField
@@ -165,6 +137,7 @@ export default function OptionsPanel() {
           )}
         </div>
       </Card>
+      )}
     </div>
   );
 }

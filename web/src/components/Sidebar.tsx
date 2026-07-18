@@ -52,18 +52,44 @@ function MarkdownLite({ text }: { text: string }) {
   let key = 0;
   let headingIndex = 0;   // ids match the viewer's TOC enumeration
 
+  const isStructural = (l: string) =>
+    l.trim() === "" ||
+    l.startsWith("```") ||
+    /^#{1,3}\s+/.test(l) ||
+    /^\s*[-*]\s+/.test(l) ||
+    l.trimStart().startsWith("|");
+
   const inline = (s: string): (string | JSX.Element)[] =>
-    s.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, n) => {
-      if (part.startsWith("**") && part.endsWith("**"))
-        return <strong key={n}>{part.slice(2, -2)}</strong>;
-      if (part.startsWith("`") && part.endsWith("`"))
-        return (
-          <code key={n} className="rounded bg-surface-2 px-1 font-mono text-[0.9em]">
-            {part.slice(1, -1)}
-          </code>
-        );
-      return part;
-    });
+    s
+      .split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g)
+      .map((part, n) => {
+        if (part.startsWith("**") && part.endsWith("**"))
+          return <strong key={n}>{part.slice(2, -2)}</strong>;
+        if (part.startsWith("`") && part.endsWith("`"))
+          return (
+            <code key={n} className="rounded bg-surface-2 px-1 font-mono text-[0.9em]">
+              {part.slice(1, -1)}
+            </code>
+          );
+        const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part);
+        if (link) {
+          const [, label, url] = link;
+          return (
+            <a
+              key={n}
+              href={url}
+              className="text-accent underline"
+              onClick={(e) => {
+                e.preventDefault();
+                void api.post("/api/url/open", { url }).catch(() => {});
+              }}
+            >
+              {label}
+            </a>
+          );
+        }
+        return part;
+      });
 
   while (i < lines.length) {
     const line = lines[i];
@@ -98,11 +124,64 @@ function MarkdownLite({ text }: { text: string }) {
       i += 1;
       continue;
     }
+    if (line.trimStart().startsWith("|")) {
+      // Markdown table: header row, |---| separator, data rows.
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].trimStart().startsWith("|")) {
+        const cells = lines[i]
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((c) => c.trim());
+        if (!cells.every((c) => /^:?-{2,}:?$/.test(c))) rows.push(cells);
+        i += 1;
+      }
+      const [head, ...body] = rows;
+      blocks.push(
+        <div key={key++} className="overflow-x-auto">
+          <table className="my-2 w-full border-collapse text-sm">
+            {head && (
+              <thead>
+                <tr>
+                  {head.map((c, n) => (
+                    <th
+                      key={n}
+                      className="border-b-2 border-edge px-2 py-1.5 text-left font-semibold"
+                    >
+                      {inline(c)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+            )}
+            <tbody>
+              {body.map((r, rn) => (
+                <tr key={rn}>
+                  {r.map((c, cn) => (
+                    <td key={cn} className="border-b border-edge px-2 py-1.5 align-top">
+                      {inline(c)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*[-*]\s+/, ""));
+        // A wrapped bullet continues on indented follow-on lines.
+        let item = lines[i].replace(/^\s*[-*]\s+/, "");
         i += 1;
+        while (i < lines.length && !isStructural(lines[i])) {
+          item += " " + lines[i].trim();
+          i += 1;
+        }
+        items.push(item);
       }
       blocks.push(
         <ul key={key++} className="list-disc pl-5">
@@ -116,8 +195,15 @@ function MarkdownLite({ text }: { text: string }) {
       i += 1;
       continue;
     }
-    blocks.push(<p key={key++}>{inline(line)}</p>);
+    // Plain text: join the hard-wrapped source lines into one logical
+    // paragraph so bold/links spanning a line break render properly.
+    let para = line.trim();
     i += 1;
+    while (i < lines.length && !isStructural(lines[i])) {
+      para += " " + lines[i].trim();
+      i += 1;
+    }
+    blocks.push(<p key={key++}>{inline(para)}</p>);
   }
   return <div className="flex flex-col gap-1 text-sm leading-relaxed">{blocks}</div>;
 }
@@ -196,6 +282,7 @@ function ReadmeViewer({ text, onClose }: { text: string; onClose: () => void }) 
 export default function Sidebar() {
   const meta = useApp((s) => s.meta);
   const sse = useApp((s) => s.sse);
+  const view = useApp((s) => s.view);
   const hasReview = useReview((s) => s.doc !== null);
   const [readme, setReadme] = useState<string | null>(null);
 
@@ -220,6 +307,7 @@ export default function Sidebar() {
       </nav>
 
       <div className="mt-auto flex flex-col items-center gap-2">
+{view === "review" && (
         <button
           onClick={() =>
             void alertDialog(
@@ -243,15 +331,8 @@ export default function Sidebar() {
         >
           <Icon d="M9 9a3 3 0 1 1 4.6 2.5c-.9.6-1.6 1.1-1.6 2.5m0 3.5v.01" />
         </button>
-        <button
-          onClick={() =>
-            void alertDialog("About Transcribr", meta?.about_text ?? "")
-          }
-          title="About Transcribr"
-          className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
-        >
-          <Icon d="M12 8v.01M12 11v5m0 5a9 9 0 1 1 0-18 9 9 0 0 1 0 18z" />
-        </button>
+        )}
+
         {meta?.readme_available && (
           <button
             onClick={openReadme}

@@ -1489,6 +1489,31 @@ class TestHttpApi(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(err["error"]["code"], "no_audio")
 
+    def test_url_open_scheme_guard(self):
+        opened = []
+        saved = T._open_url
+        T._open_url = opened.append
+        self.addCleanup(lambda: setattr(T, "_open_url", saved))
+        status, _ = self._req("POST", "/api/url/open",
+                              {"url": "https://example.com"})
+        self.assertEqual(status, 200)
+        status, _ = self._req("POST", "/api/url/open",
+                              {"url": "mailto:x@y.z"})
+        self.assertEqual(status, 200)
+        # Anything else (files, javascript:, empty) is refused.
+        for bad in ("file:///etc/passwd", "javascript:alert(1)", ""):
+            status, err = self._req("POST", "/api/url/open", {"url": bad})
+            self.assertEqual(status, 400, bad)
+            self.assertEqual(err["error"]["code"], "bad_url")
+        self.assertEqual(opened,
+                         ["https://example.com", "mailto:x@y.z"])
+
+    def test_show_diarize_hidden_by_default(self):
+        merged = T.validate_settings({})
+        self.assertFalse(merged["show_diarize"])
+        merged = T.validate_settings({"show_diarize": True})
+        self.assertTrue(merged["show_diarize"])
+
     def test_annotations_roundtrip(self):
         T.annotations_clear()
         self.addCleanup(T.annotations_clear)

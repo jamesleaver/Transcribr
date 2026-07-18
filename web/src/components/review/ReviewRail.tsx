@@ -123,12 +123,15 @@ function FindReplace() {
 function PlaybackCard() {
   const audio = useReview((s) => s.doc?.audio);
   const playing = useReview((s) => s.playing);
+  const playingThrough = useReview((s) => s.playingThrough);
   const selected = useReview((s) => s.selected);
   if (!audio) return null;
 
+  const paraActive = playing !== null && !playingThrough;
+  const throughActive = playing !== null && playingThrough;
   const label =
     audio.state === "ready"
-      ? playing !== null
+      ? paraActive
         ? "■ Stop"
         : "▶ Play paragraph"
       : audio.state === "probing"
@@ -164,7 +167,9 @@ function PlaybackCard() {
             className="w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-40"
             disabled={audio.state !== "ready"}
             onClick={() =>
-              useReview.getState().togglePlay(playing ?? selected)
+              useReview
+                .getState()
+                .togglePlay(paraActive ? playing! : selected)
             }
           >
             {label}
@@ -173,10 +178,12 @@ function PlaybackCard() {
             className="mt-2 w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-40"
             disabled={audio.state !== "ready"}
             onClick={() =>
-              useReview.getState().togglePlay(selected, true)
+              useReview
+                .getState()
+                .togglePlay(throughActive ? playing! : selected, true)
             }
           >
-            ▶▶ Play from here
+            {throughActive ? "■ Stop playing" : "▶▶ Play from here"}
           </button>
           <p className="mt-2 text-[11px] text-muted">
             P plays just the selected paragraph (press again to stop);

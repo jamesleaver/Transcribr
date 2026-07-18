@@ -50,6 +50,40 @@ export const useDialogs = create<DialogState>((set, get) => ({
   },
 }));
 
+// ---- Multi-choice dialog (e.g. after-save Open / Reveal / Done) ------
+
+interface ChoicePending {
+  title: string;
+  body: string;
+  labels: string[];
+  resolve: (index: number | null) => void;
+}
+
+interface ChoiceState {
+  current: ChoicePending | null;
+  show: (title: string, body: string, labels: string[]) => Promise<number | null>;
+  answer: (index: number | null) => void;
+}
+
+export const useChoiceDialog = create<ChoiceState>((set, get) => ({
+  current: null,
+  show: (title, body, labels) =>
+    new Promise<number | null>((resolve) => {
+      set({ current: { title, body, labels, resolve } });
+    }),
+  answer: (index) => {
+    get().current?.resolve(index);
+    set({ current: null });
+  },
+}));
+
+export const choiceDialog = (
+  title: string,
+  body: string,
+  labels: string[],
+): Promise<number | null> =>
+  useChoiceDialog.getState().show(title, body, labels);
+
 export const confirmDialog = (spec: Omit<DialogSpec, "kind">) =>
   useDialogs.getState().show({ ...spec, kind: "confirm" });
 

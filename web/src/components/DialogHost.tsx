@@ -1,9 +1,55 @@
 import { useEffect } from "react";
-import { useDialogs } from "../state/dialogs";
+import { useChoiceDialog, useDialogs } from "../state/dialogs";
 
 // Renders the queued promise-based dialogs (the messagebox
 // replacement). Esc answers no/dismiss; Enter gives the dialog's
 // default answer (Tk's default="no" overwrite semantics preserved).
+
+function ChoiceHost() {
+  const current = useChoiceDialog((s) => s.current);
+  const answer = useChoiceDialog((s) => s.answer);
+
+  useEffect(() => {
+    if (!current) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        answer(null);
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [current, answer]);
+
+  if (!current) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6">
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="w-full max-w-md rounded-xl border border-edge bg-surface p-5 shadow-2xl"
+      >
+        <h2 className="mb-2 text-base font-semibold">{current.title}</h2>
+        <p className="whitespace-pre-wrap text-sm text-fg">{current.body}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          {current.labels.map((label, i) => (
+            <button
+              key={label}
+              className={
+                i === current.labels.length - 1
+                  ? "rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg"
+                  : "rounded-lg border border-edge px-4 py-2 text-sm font-medium hover:bg-surface-2"
+              }
+              onClick={() => answer(i)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function DialogHost() {
   const current = useDialogs((s) => s.current);
@@ -24,7 +70,7 @@ export default function DialogHost() {
     return () => document.removeEventListener("keydown", onKey, true);
   }, [current, answer]);
 
-  if (!current) return null;
+  if (!current) return <ChoiceHost />;
   const { spec } = current;
 
   return (

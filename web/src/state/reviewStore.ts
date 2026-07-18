@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { api, ApiError } from "../api/client";
 import { playSpan, stopPlayback } from "../audio";
-import { alertDialog, confirmDialog, errorDialog } from "./dialogs";
+import { choiceDialog, confirmDialog, errorDialog } from "./dialogs";
 import { useApp } from "./store";
 
 // The review workspace's state: a mirror of the server-side
@@ -86,6 +86,8 @@ interface ReviewSlice {
   setMatchCase: (value: boolean) => void;
 
   playing: number | null;
+  /** True while the active playback runs on past its paragraph. */
+  playingThrough: boolean;
   setAudioStatus: (status: AudioStatus) => void;
   /** `through` plays on past the paragraph to the end of the audio. */
   togglePlay: (index: number, through?: boolean) => void;
@@ -118,6 +120,22 @@ interface ReviewSlice {
 
 function clamp(i: number, n: number): number {
   return Math.max(0, Math.min(i, n - 1));
+}
+
+/** After a save/export: open the file, show it in the folder, or move
+ *  on - James's post-save flow of choice. */
+async function offerOpenOrReveal(
+  title: string,
+  body: string,
+  path: string,
+): Promise<void> {
+  const i = await choiceDialog(title, body, [
+    "Open file",
+    "Show in folder",
+    "Done",
+  ]);
+  if (i === 0) await api.post("/api/path/open", { path }).catch(() => {});
+  if (i === 1) await api.post("/api/path/reveal", { path }).catch(() => {});
 }
 
 async function mutateApi(
@@ -189,10 +207,12 @@ export const useReview = create<ReviewSlice>((set, get) => ({
 
   closeDoc: () => {
     stopPlayback();
-    set({ doc: null, editing: null, searchHit: null, playing: null });
+    set({ doc: null, editing: null, searchHit: null, playing: null,
+      playingThrough: false });
   },
 
   playing: null,
+  playingThrough: false,
 
   saveShowTimestamp: null,
   setSaveShowTimestamp: (value) => set({ saveShowTimestamp: value }),
@@ -215,8 +235,9 @@ export const useReview = create<ReviewSlice>((set, get) => ({
           ...(s.verifyName.trim() ? { verified_by: s.verifyName } : {}),
         },
       );
-      void alertDialog("Exported",
-        `Written to:\n${res.out_path}\n\nThe review stays open.`);
+      void offerOpenOrReveal("Exported",
+        `Written to:\n${res.out_path}\n\nThe review stays open.`,
+        res.out_path);
     } catch (err) {
       if (err instanceof ApiError) {
         void errorDialog("Export failed", err.message);
@@ -254,21 +275,22 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     const s = get();
     const doc = s.doc;
     if (!doc) return;
-    if (s.playing === index && !through) {
+    // Pressing the same control again stops that mode of playback.
+    if (s.playing === index && s.playingThrough === through) {
       stopPlayback();
-      set({ playing: null });
+      set({ playing: null, playingThrough: false });
       return;
     }
     const span = doc.paragraphs[index]?.play;
     if (!span || doc.audio.state !== "ready" || !doc.audio.url) return;
     stopPlayback();
-    set({ playing: index });
+    set({ playing: index, playingThrough: through });
     playSpan(
       doc.audio.url,
       through ? { start: span.start, end: null } : span,
       () => {
         if (useReview.getState().playing === index)
-          set({ playing: null });
+          set({ playing: null, playingThrough: false });
       },
     );
   },
@@ -442,7 +464,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       // The save format follows the Settings page's default (docx or
       // txt); one-off PDFs use the Export button instead.
       const fmt = useApp.getState().settings?.output_format;
-      await api.post<{ out_path: string }>("/api/review/save", {
+      const saved = await api.post<{ out_path: string }>("/api/review/save", {
         rev: doc.rev,
         mode,
         ...(fmt ? { format: fmt } : {}),
@@ -457,6 +479,8 @@ export const useReview = create<ReviewSlice>((set, get) => ({
         });
       get().closeDoc();
       useApp.getState().setView("transcribe");
+      void offerOpenOrReveal("Saved", `Written to:\n${saved.out_path}`,
+        saved.out_path);
     } catch (err) {
       if (err instanceof ApiError && err.code === "stale_rev") {
         await get().refetch();
