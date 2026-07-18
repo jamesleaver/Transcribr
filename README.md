@@ -2,6 +2,8 @@
 
 (c) James Leaver, 2026. Version 0.9.0.
 
+Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
+
 An experimental GUI for transcribing audio and video files on macOS and
 Windows. A Whisper engine (faster-whisper by default; mlx-whisper and
 openai-whisper where installed) does the transcription, an optional
