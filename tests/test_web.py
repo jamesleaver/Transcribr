@@ -1051,8 +1051,8 @@ class TestReviewSession(unittest.TestCase):
                 return names
             names.append(event)
 
-    def _fresh_session(self, fmt="txt", with_result=True):
-        out = str(Path(self.tmp.name) / f"doc.transcript.{fmt}")
+    def _fresh_session(self, fmt="txt", with_result=True, name="doc"):
+        out = str(Path(self.tmp.name) / f"{name}.transcript.{fmt}")
         info = {
             "paragraphs": _doc(),
             "out_path": out,
@@ -1146,6 +1146,84 @@ class TestReviewSession(unittest.TestCase):
         out.rename(target)
         info = T.open_transcript_info(str(target))
         self.assertEqual(info["audio_path"], str(audio))
+
+    @staticmethod
+    def _pdf_text(path):
+        """Decode reportlab's ASCII85+Flate content streams to text."""
+        import base64
+        import re
+        import zlib
+        blob = ""
+        raw = Path(path).read_bytes()
+        for m in re.finditer(rb"stream(.*?)endstream", raw, re.S):
+            part = m.group(1).strip(b"\r\n")
+            try:
+                part = zlib.decompress(
+                    base64.a85decode(part, adobe=True))
+            except Exception:
+                try:
+                    part = zlib.decompress(part)
+                except Exception:
+                    pass
+            blob += part.decode("latin-1", "ignore")
+        return blob
+
+    def test_export_pdf_carries_verified_disclaimer(self):
+        # Regression: the verified-by wording must reach exported
+        # PDFs exactly as it does saved docx files.
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("needs reportlab")
+        session, _ = self._fresh_session(fmt="txt")
+        path = session.export(session.model.rev, "pdf",
+                              verified_by="J. Leaver")
+        text = self._pdf_text(path)
+        self.assertIn("verified by J. Leaver", text)
+        self.assertNotIn("may not have been checked", text)
+        # Without a name the warning stays.
+        session2, _ = self._fresh_session(fmt="txt", name="unverified")
+        path2 = session2.export(session2.model.rev, "pdf")
+        text2 = self._pdf_text(path2)
+        self.assertIn("may not have been checked", text2)
+        self.assertNotIn("verified by", text2)
+
+    def test_verified_by_sticks_to_session(self):
+        # Once set, the name applies to later writes that don't
+        # mention it; an explicit empty string clears it again.
+        session, _ = self._fresh_session(fmt="txt")
+        session.export(session.model.rev, "pdf",
+                       verified_by="J. Leaver")
+        self.assertEqual(session.verified_by, "J. Leaver")
+        p2 = session.export(session.model.rev, "txt")
+        self.assertIn("verified by J. Leaver", Path(p2).read_text())
+        p3 = session.export(session.model.rev, "txt",
+                            verified_by="")
+        self.assertIsNone(session.verified_by)
+        self.assertIn("may not have been checked",
+                      Path(p3).read_text())
+
+    def test_docx_roundtrips_verified_by(self):
+        # Saving a verified docx embeds the name in its metadata; the
+        # payload of a review opened from that file pre-fills it.
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        session, out = self._fresh_session(fmt="docx")
+        session.save(session.model.rev, "no_labels",
+                     verified_by="J. Leaver")
+        info = T.open_transcript_info(out)
+        self.assertEqual(info["verified_by"], "J. Leaver")
+        reopened = T.ReviewSession(info, self.broker)
+        self.assertEqual(reopened.payload()["verified_by"],
+                         "J. Leaver")
+        # An unverified docx seeds nothing.
+        session2, out2 = self._fresh_session(fmt="docx",
+                                             name="plain")
+        session2.save(session2.model.rev, "no_labels")
+        self.assertIsNone(
+            T.open_transcript_info(out2)["verified_by"])
 
     def test_extra_formats_follow_reviewed_text(self):
         # SRT/VTT/TSV reflect the user's edits; JSON keeps the raw
@@ -1287,9 +1365,9 @@ class TestReviewSession(unittest.TestCase):
         self.assertEqual(
             set(data.keys()),
             {"out_path", "show_timestamp", "title", "output_format",
-             "loaded", "diarized", "audio_path", "paragraphs",
-             "speakers", "speaker_names",
-             "saved_at"})   # v0.6.0 schema + 0.9.0's "diarized" flag
+             "loaded", "diarized", "verified_by", "audio_path",
+             "paragraphs", "speakers", "speaker_names",
+             "saved_at"})   # v0.6.0 schema + 0.9.0 additions
         self.assertEqual(data["speakers"][0], "3")
         self.assertEqual(data["speaker_names"], {"3": "Q C"})
         restored = T.autosave_restore_info(data)
@@ -1676,13 +1754,16 @@ class TestHttpApi(unittest.TestCase):
 
         golden["out_path"] = out
         golden["saved_at"] = produced["saved_at"]
-        golden["diarized"] = False    # intentional 0.9.0 addition
+        golden["diarized"] = False       # intentional 0.9.0 additions
+        golden["verified_by"] = None
         self.assertEqual(produced, golden)
 
-        # A pre-0.9.0 autosave (no "diarized" key) must still restore.
+        # A pre-0.9.0 autosave (neither new key) must still restore.
         del golden["diarized"]
+        del golden["verified_by"]
         restored = T.autosave_restore_info(golden)
         self.assertFalse(restored["diarized"])
+        self.assertIsNone(restored["verified_by"])
         session.model.close()
 
 

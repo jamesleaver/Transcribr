@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -1259,13 +1259,16 @@ def _parse_docx_transcript(path):
             "Transcribr-produced transcript."
         )
 
-    # The writer embeds the source-audio location in the document
-    # metadata (comments) so playback survives re-opening.
+    # The writer embeds Transcribr metadata (comments): the source
+    # audio for playback, and who verified the transcript.
     embedded_audio = None
+    embedded_verified = None
     try:
         import json as _json
-        meta = _json.loads(doc.core_properties.comments or "")
-        embedded_audio = (meta.get("transcribr") or {}).get("audio")
+        meta = (_json.loads(doc.core_properties.comments or "")
+                .get("transcribr") or {})
+        embedded_audio = meta.get("audio")
+        embedded_verified = meta.get("verified_by")
     except Exception:
         pass
 
@@ -1275,6 +1278,7 @@ def _parse_docx_transcript(path):
         "title": title,
         "show_timestamp": saw_timestamp,
         "audio_path": embedded_audio,
+        "verified_by": embedded_verified,
     }
 
 
@@ -2586,14 +2590,18 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
     disc_run = disc.add_run(_disclaimer_text(verified_by))
     disc_run.italic = True
 
-    # Embed the source-audio location in the document metadata so
-    # re-opening this transcript later can find the recording for
-    # playback (the review pane also offers "Locate audio…" when the
-    # file has moved).
-    if audio_path:
+    # Embed Transcribr's own metadata in the document: the source-audio
+    # location (so playback works when the transcript is re-opened) and
+    # who verified it (so the review pane's Verify field comes back
+    # filled in).
+    if audio_path or verified_by:
         import json as _json
-        doc.core_properties.comments = _json.dumps(
-            {"transcribr": {"audio": str(audio_path)}})
+        meta = {}
+        if audio_path:
+            meta["audio"] = str(audio_path)
+        if verified_by:
+            meta["verified_by"] = str(verified_by)
+        doc.core_properties.comments = _json.dumps({"transcribr": meta})
 
     # Footer: "Page X of Y" right-aligned, in Courier New so it matches
     # the body font. python-docx doesn't expose Word field codes
@@ -4955,6 +4963,7 @@ def open_transcript_info(path):
         "extra_formats": [],
         "preset_speakers": preset_speakers,
         "preset_speaker_names": preset_speaker_names,
+        "verified_by": parsed.get("verified_by"),
         "loaded": True,
         # Prefer the audio location embedded in the .docx metadata
         # (when it still exists on disk); fall back to the
@@ -4983,6 +4992,7 @@ def autosave_restore_info(data):
         "extra_formats": [],
         "loaded": bool(data.get("loaded")),
         "diarized": bool(data.get("diarized")),
+        "verified_by": data.get("verified_by"),
         "audio_path": data.get("audio_path"),
         "preset_speakers": data.get("speakers") or [],
         "preset_speaker_names": data.get("speaker_names") or {},
@@ -5008,6 +5018,8 @@ class ReviewSession:
         self.result = info.get("result")
         self.extra_formats = info.get("extra_formats") or []
         self.diarized = bool(info.get("diarized"))
+        self.verified_by = ((info.get("verified_by") or "").strip()
+                            or None)
         self._safety_path = None    # set by from_fresh after its pre-save
         self._log_line = log or (lambda text: None)
         self.lock = threading.RLock()
@@ -5106,6 +5118,7 @@ class ReviewSession:
                 "can_redo": m.can_redo(),
                 "has_word_conf": bool(m.word_conf),
                 "diarized": self.diarized,
+                "verified_by": self.verified_by,
                 "paragraphs": paragraphs,
             }
 
@@ -5192,6 +5205,7 @@ class ReviewSession:
             "output_format": self.output_format,
             "loaded": self.loaded,
             "diarized": self.diarized,
+            "verified_by": self.verified_by,
             "audio_path": self.audio_path,
             "paragraphs": [[list(seg) for seg in para]
                            for para in paragraphs],
@@ -5233,6 +5247,8 @@ class ReviewSession:
                 raise ApiFail(400, "bad_request", f"Unknown format {fmt}.")
             if show_timestamp is not None:
                 self.show_timestamp = bool(show_timestamp)
+            if verified_by is not None:
+                self.verified_by = verified_by.strip() or None
             m = self.model
             for letter in m.LETTERS:
                 m.speaker_names[letter] = m.speaker_names.get(
@@ -5244,7 +5260,7 @@ class ReviewSession:
                     Path(self.out_path).with_suffix(f".export.{fmt}"))
             self._write(export_path, m.resolved_speakers(),
                         output_format=fmt,
-                        verified_by=(verified_by or "").strip() or None)
+                        verified_by=self.verified_by)
             self._log_line(f"Exported: {export_path}\n")
             _recent_add(export_path)
             self.broker.publish("recents", {})
@@ -5259,9 +5275,11 @@ class ReviewSession:
         the format. `verified_by` switches the appended disclaimer to
         a named certification. Ports _on_review_save /
         _on_review_cancel(fresh) / _on_review_save_revision."""
-        verified_by = (verified_by or "").strip() or None
         with self.lock:
             self._check_rev(rev)
+            if verified_by is not None:
+                self.verified_by = verified_by.strip() or None
+            verified_by = self.verified_by
             if out_format in ("txt", "docx", "pdf") \
                     and out_format != self.output_format:
                 self.output_format = out_format
@@ -5574,7 +5592,8 @@ class WebBackend:
                     fmt=str(body.get("format") or "pdf"),
                     show_timestamp=(bool(show_ts)
                                     if show_ts is not None else None),
-                    verified_by=str(body.get("verified_by") or ""))
+                    verified_by=(str(body["verified_by"])
+                                 if "verified_by" in body else None))
             except ApiFail as e:
                 _fail(e)
             return {"out_path": path}
@@ -5627,7 +5646,8 @@ class WebBackend:
                         out_format=(str(fmt) if fmt else None),
                         show_timestamp=(bool(show_ts)
                                         if show_ts is not None else None),
-                        verified_by=str(body.get("verified_by") or ""))
+                        verified_by=(str(body["verified_by"])
+                                     if "verified_by" in body else None))
                     backend.controller.last_output = out_path
                     backend.review = None
                     return {"out_path": out_path}

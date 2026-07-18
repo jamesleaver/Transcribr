@@ -41,6 +41,7 @@ export interface ReviewPayload {
   can_redo: boolean;
   has_word_conf: boolean;
   diarized: boolean;
+  verified_by: string | null;
   paragraphs: ReviewParagraph[];
   new_index?: number | null;
   count?: number;
@@ -202,7 +203,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       searchHit: null,
       showConfidence: payload.has_word_conf,
       saveShowTimestamp: null,
-      verifyName: "",
+      verifyName: payload.verified_by ?? "",
     }),
 
   closeDoc: () => {
@@ -232,7 +233,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
           ...(s.saveShowTimestamp !== null
             ? { show_timestamp: s.saveShowTimestamp }
             : {}),
-          ...(s.verifyName.trim() ? { verified_by: s.verifyName } : {}),
+          verified_by: s.verifyName,
         },
       );
       void offerOpenOrReveal("Exported",
@@ -471,7 +472,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
         ...(s.saveShowTimestamp !== null
           ? { show_timestamp: s.saveShowTimestamp }
           : {}),
-        ...(s.verifyName.trim() ? { verified_by: s.verifyName } : {}),
+        verified_by: s.verifyName,
       });
       if (s.saveShowTimestamp !== null)
         useApp.getState().updateSettings({
