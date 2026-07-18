@@ -72,7 +72,9 @@ class TestParagraphify(unittest.TestCase):
         self.assertEqual(len(T.paragraphify(segs, 1.5)), 1)
 
     def test_gap_breaks(self):
-        segs = [(0.0, 1.0, self.A), (5.0, 6.0, self.B)]
+        # Capitalised continuation so the mid-sentence guard stays out
+        # of the way and the silence rule alone is under test.
+        segs = [(0.0, 1.0, self.A), (5.0, 6.0, "Toward the river then")]
         self.assertEqual(len(T.paragraphify(segs, 1.5)), 2)
 
     def test_sentence_end_with_pause_breaks(self):
@@ -121,6 +123,30 @@ class TestParagraphify(unittest.TestCase):
         segs = [(i * 10.0, i * 10.0 + 9.0, self.A) for i in range(13)]
         paras = T.paragraphify(segs, 100.0)
         self.assertEqual(len(paras), 3)
+
+    def test_never_breaks_mid_sentence(self):
+        # Real-case regression: "...on the 27th of March" | "2026. What
+        # is your name?" was split by a hard silence. A break must not
+        # land mid-sentence, whatever the pause.
+        segs = [(0.0, 2.0, "It happened on the 27th of March"),
+                (4.5, 6.0, "2026. What is your name?")]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 1)
+        segs = [(0.0, 2.0, "and then he told me that I was"),
+                (4.5, 6.0, "behaving badly and had to leave")]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 1)
+
+    def test_uppercase_start_after_missing_punctuation_can_break(self):
+        # Whisper sometimes drops the final full stop; a capitalised
+        # fresh sentence after a long silence is still a boundary.
+        segs = [(0.0, 2.0, "and that was the end of it"),
+                (4.5, 6.0, "Detective Jones entered the room")]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 2)
+
+    def test_cap_still_splits_endless_continuation(self):
+        # The 60s cap remains the last resort even for run-ons.
+        segs = [(i * 10.0, i * 10.0 + 9.0, "and it went on and on")
+                for i in range(13)]
+        self.assertEqual(len(T.paragraphify(segs, 1.5)), 3)
 
     def test_wall_to_wall_segments_break_on_punctuation_alone(self):
         # faster-whisper without word timestamps pads segments

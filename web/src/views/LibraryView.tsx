@@ -54,7 +54,7 @@ export default function LibraryView() {
     <div className="mx-auto max-w-3xl px-8 py-10">
       <header className="mb-6 flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Library</h1>
+          <h1 className="text-2xl font-semibold">Recent transcripts</h1>
           <p className="mt-1 text-sm text-muted">
             Recent transcripts — open one to review and label speakers.
           </p>

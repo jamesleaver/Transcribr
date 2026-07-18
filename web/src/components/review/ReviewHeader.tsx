@@ -45,6 +45,10 @@ export default function ReviewHeader() {
       </div>
 
       <div className="flex gap-2">
+        <button className={btn} title="Write a PDF copy alongside the transcript — the review stays open"
+          onClick={() => void useReview.getState().exportAs("pdf")}>
+          Export PDF
+        </button>
         {doc.loaded ? (
           <>
             <button className={accentBtn} onClick={() => void saveThen("labels")()}>

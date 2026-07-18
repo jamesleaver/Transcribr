@@ -117,12 +117,6 @@ export default function OptionsPanel() {
               note="Lower for rapid dialogue, higher for monologue. Sentence endings also break when followed by a pause of 40% of this. Works alongside speaker detection."
             />
           </div>
-          <CheckField
-            label="Condition on previous text"
-            checked={settings.condition_on_previous_text}
-            onChange={(v) => update({ condition_on_previous_text: v })}
-            note="Feeds each chunk the text before it: more consistent style, but an early mistake can propagate. Try turning it off if a transcript goes off the rails."
-          />
         </div>
       </Card>
 

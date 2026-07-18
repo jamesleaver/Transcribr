@@ -45,6 +45,13 @@ export function useReviewHotkeys(): void {
         void st.redo();
         return;
       }
+      if (mod && (e.key === "p" || e.key === "P")) {
+        // Play on from the selected paragraph to the end of the audio
+        // (plain P plays just the paragraph).
+        e.preventDefault();
+        st.togglePlay(st.selected, true);
+        return;
+      }
       if (mod) return;
 
       switch (e.key) {

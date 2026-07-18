@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { api, ApiError } from "../api/client";
 import { playSpan, stopPlayback } from "../audio";
-import { confirmDialog, errorDialog } from "./dialogs";
+import { alertDialog, confirmDialog, errorDialog } from "./dialogs";
 import { useApp } from "./store";
 
 // The review workspace's state: a mirror of the server-side
@@ -87,13 +87,17 @@ interface ReviewSlice {
 
   playing: number | null;
   setAudioStatus: (status: AudioStatus) => void;
-  togglePlay: (index: number) => void;
+  /** `through` plays on past the paragraph to the end of the audio. */
+  togglePlay: (index: number, through?: boolean) => void;
+  locateAudio: () => Promise<void>;
 
   /** Review-pane saving options; null = keep what the run started with. */
-  saveFormat: "txt" | "docx" | "pdf" | null;
   saveShowTimestamp: boolean | null;
-  setSaveFormat: (value: "txt" | "docx" | "pdf") => void;
   setSaveShowTimestamp: (value: boolean) => void;
+  /** Certifier name for the "verified by" disclaimer; empty = unverified. */
+  verifyName: string;
+  setVerifyName: (value: string) => void;
+  exportAs: (fmt: "pdf") => Promise<void>;
 
   needsAttention: (index: number) => boolean;
   jumpNextAttention: () => void;
@@ -179,8 +183,8 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       findStatus: "",
       searchHit: null,
       showConfidence: payload.has_word_conf,
-      saveFormat: null,
       saveShowTimestamp: null,
+      verifyName: "",
     }),
 
   closeDoc: () => {
@@ -190,10 +194,54 @@ export const useReview = create<ReviewSlice>((set, get) => ({
 
   playing: null,
 
-  saveFormat: null,
   saveShowTimestamp: null,
-  setSaveFormat: (value) => set({ saveFormat: value }),
   setSaveShowTimestamp: (value) => set({ saveShowTimestamp: value }),
+  verifyName: "",
+  setVerifyName: (value) => set({ verifyName: value }),
+
+  exportAs: async (fmt) => {
+    const s = get();
+    const doc = s.doc;
+    if (!doc) return;
+    try {
+      const res = await api.post<{ out_path: string }>(
+        "/api/review/export",
+        {
+          rev: doc.rev,
+          format: fmt,
+          ...(s.saveShowTimestamp !== null
+            ? { show_timestamp: s.saveShowTimestamp }
+            : {}),
+          ...(s.verifyName.trim() ? { verified_by: s.verifyName } : {}),
+        },
+      );
+      void alertDialog("Exported",
+        `Written to:\n${res.out_path}\n\nThe review stays open.`);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        void errorDialog("Export failed", err.message);
+      } else {
+        throw err;
+      }
+    }
+  },
+
+  locateAudio: async () => {
+    const picked = await api.post<{ path?: string; cancelled?: boolean }>(
+      "/api/pick",
+      { kind: "media" },
+    );
+    if (!picked.path) return;
+    try {
+      await api.post("/api/review/audio", { path: picked.path });
+    } catch (err) {
+      if (err instanceof ApiError) {
+        void errorDialog("Can't use that file", err.message);
+      } else {
+        throw err;
+      }
+    }
+  },
 
   setAudioStatus: (status) =>
     set((s) => {
@@ -202,11 +250,11 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       return { doc: { ...s.doc, audio: status } };
     }),
 
-  togglePlay: (index) => {
+  togglePlay: (index, through = false) => {
     const s = get();
     const doc = s.doc;
     if (!doc) return;
-    if (s.playing === index) {
+    if (s.playing === index && !through) {
       stopPlayback();
       set({ playing: null });
       return;
@@ -215,9 +263,14 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     if (!span || doc.audio.state !== "ready" || !doc.audio.url) return;
     stopPlayback();
     set({ playing: index });
-    playSpan(doc.audio.url, span, () => {
-      if (useReview.getState().playing === index) set({ playing: null });
-    });
+    playSpan(
+      doc.audio.url,
+      through ? { start: span.start, end: null } : span,
+      () => {
+        if (useReview.getState().playing === index)
+          set({ playing: null });
+      },
+    );
   },
 
   refetch: async () => {
@@ -386,21 +439,22 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     const doc = s.doc;
     if (!doc) return;
     try {
+      // The save format follows the Settings page's default (docx or
+      // txt); one-off PDFs use the Export button instead.
+      const fmt = useApp.getState().settings?.output_format;
       await api.post<{ out_path: string }>("/api/review/save", {
         rev: doc.rev,
         mode,
-        ...(s.saveFormat !== null ? { format: s.saveFormat } : {}),
+        ...(fmt ? { format: fmt } : {}),
         ...(s.saveShowTimestamp !== null
           ? { show_timestamp: s.saveShowTimestamp }
           : {}),
+        ...(s.verifyName.trim() ? { verified_by: s.verifyName } : {}),
       });
-      // The chosen options become the defaults for future runs.
-      const persist: Record<string, unknown> = {};
-      if (s.saveFormat !== null) persist.output_format = s.saveFormat;
       if (s.saveShowTimestamp !== null)
-        persist.show_timestamp = s.saveShowTimestamp;
-      if (Object.keys(persist).length)
-        useApp.getState().updateSettings(persist);
+        useApp.getState().updateSettings({
+          show_timestamp: s.saveShowTimestamp,
+        });
       get().closeDoc();
       useApp.getState().setView("transcribe");
     } catch (err) {

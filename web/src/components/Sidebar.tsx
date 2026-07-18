@@ -50,6 +50,7 @@ function MarkdownLite({ text }: { text: string }) {
   const lines = text.split("\n");
   let i = 0;
   let key = 0;
+  let headingIndex = 0;   // ids match the viewer's TOC enumeration
 
   const inline = (s: string): (string | JSX.Element)[] =>
     s.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, n) => {
@@ -89,7 +90,11 @@ function MarkdownLite({ text }: { text: string }) {
           : h[1].length === 2
             ? "mt-5 text-lg font-semibold"
             : "mt-4 text-base font-semibold";
-      blocks.push(<div key={key++} className={cls}>{inline(h[2])}</div>);
+      blocks.push(
+        <div key={key++} id={`rm-h-${headingIndex++}`} className={cls}>
+          {inline(h[2])}
+        </div>,
+      );
       i += 1;
       continue;
     }
@@ -117,14 +122,40 @@ function MarkdownLite({ text }: { text: string }) {
   return <div className="flex flex-col gap-1 text-sm leading-relaxed">{blocks}</div>;
 }
 
+/** Strip sections that make no sense in the in-app viewer (the
+ *  Screenshots gallery is remote images the strict page can't show). */
+function stripSections(text: string, titles: string[]): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    const h = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (h) {
+      skipping = titles.some(
+        (t) => h[2].trim().toLowerCase() === t.toLowerCase(),
+      );
+      if (skipping) continue;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n");
+}
+
 function ReadmeViewer({ text, onClose }: { text: string; onClose: () => void }) {
+  const cleaned = stripSections(text, ["Screenshots"]);
+  const headings = cleaned
+    .split("\n")
+    .map((l) => /^(#{1,3})\s+(.*)$/.exec(l))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m, i) => ({ level: m[1].length, title: m[2].trim(), id: `rm-h-${i}` }));
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
       onClick={onClose}
     >
       <div
-        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-2xl"
+        className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-edge px-5 py-3">
@@ -136,8 +167,26 @@ function ReadmeViewer({ text, onClose }: { text: string; onClose: () => void }) 
             Close (Esc)
           </button>
         </div>
-        <div className="overflow-y-auto px-6 py-4">
-          <MarkdownLite text={text} />
+        <div className="flex min-h-0 flex-1">
+          <nav className="hidden w-56 shrink-0 overflow-y-auto border-r border-edge px-3 py-4 sm:block">
+            {headings.map((h) => (
+              <button
+                key={h.id}
+                className="block w-full truncate rounded px-2 py-1 text-left text-xs text-muted hover:bg-surface-2 hover:text-fg"
+                style={{ paddingLeft: `${8 + (h.level - 1) * 12}px` }}
+                onClick={() =>
+                  document
+                    .getElementById(h.id)
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" })
+                }
+              >
+                {h.title}
+              </button>
+            ))}
+          </nav>
+          <div className="min-w-0 flex-1 overflow-y-auto px-6 py-4">
+            <MarkdownLite text={cleaned} />
+          </div>
         </div>
       </div>
     </div>
@@ -166,8 +215,7 @@ export default function Sidebar() {
         <NavButton view="transcribe" label="Transcribe" icon={<Icon d={ICONS.transcribe} />} />
         <NavButton view="review" label="Review" icon={<Icon d={ICONS.review} />}
           disabled={!hasReview} />
-        <NavButton view="library" label="Library" icon={<Icon d={ICONS.library} />} />
-        <NavButton view="models" label="Models" icon={<Icon d={ICONS.models} />} />
+        <NavButton view="library" label="Recent" icon={<Icon d={ICONS.library} />} />
         <NavButton view="settings" label="Settings" icon={<Icon d={ICONS.settings} />} />
       </nav>
 
@@ -203,13 +251,6 @@ export default function Sidebar() {
           className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
         >
           <Icon d="M12 8v.01M12 11v5m0 5a9 9 0 1 1 0-18 9 9 0 0 1 0 18z" />
-        </button>
-        <button
-          onClick={() => void api.post("/api/log/open", {}).catch(() => {})}
-          title="Open the log file"
-          className="rounded-lg p-2 text-muted transition-colors hover:bg-surface-2 hover:text-fg"
-        >
-          <Icon d="M6 3h8l4 4v14H6V3zm8 0v4h4M9 12h6M9 16h6" />
         </button>
         {meta?.readme_available && (
           <button

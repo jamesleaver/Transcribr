@@ -1095,6 +1095,58 @@ class TestReviewSession(unittest.TestCase):
                      show_timestamp=False)
         self.assertNotIn("[00:00]", Path(out).read_text())
 
+    def test_disclaimer_switches_when_verified(self):
+        session, out = self._fresh_session(fmt="txt")
+        session.save(session.model.rev, "no_labels",
+                     verified_by="  J. Leaver  ")
+        text = Path(out).read_text()
+        self.assertIn("verified by J. Leaver", text)
+        self.assertNotIn("may not have been checked", text)
+
+    def test_unverified_disclaimer_warns(self):
+        session, out = self._fresh_session(fmt="txt")
+        session.save(session.model.rev, "no_labels")
+        text = Path(out).read_text()
+        self.assertIn("may not have been checked by a human", text)
+        # The parser strips the disclaimer on re-open either way.
+        info = T.open_transcript_info(out)
+        bodies = " ".join(seg[2] for para in info["paragraphs"]
+                          for seg in para)
+        self.assertNotIn("Transcribed using Transcribr", bodies)
+
+    def test_export_writes_pdf_and_keeps_session_open(self):
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("needs reportlab")
+        session, out = self._fresh_session(fmt="txt")
+        path = session.export(session.model.rev, "pdf",
+                              verified_by="J. Leaver")
+        self.assertTrue(path.endswith(".pdf"))
+        self.assertTrue(Path(path).exists())
+        self.assertFalse(session.closed)     # review stays open
+        self.assertTrue(Path(out).exists())  # original untouched
+
+    def test_docx_embeds_and_recovers_audio_path(self):
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        audio = Path(self.tmp.name) / "hearing.mp3"
+        audio.write_bytes(b"\x00" * 32)
+        out = Path(self.tmp.name) / "hearing.transcript.docx"
+        T.write_paragraphs_to_file(
+            _doc(), out, show_timestamp=True, title="T",
+            output_format="docx", audio_path=str(audio))
+        # Move the transcript away from its sibling so the filename
+        # guess fails and only the embedded metadata can find it.
+        moved = Path(self.tmp.name) / "elsewhere"
+        moved.mkdir()
+        target = moved / out.name
+        out.rename(target)
+        info = T.open_transcript_info(str(target))
+        self.assertEqual(info["audio_path"], str(audio))
+
     def test_extra_formats_follow_reviewed_text(self):
         # SRT/VTT/TSV reflect the user's edits; JSON keeps the raw
         # engine result.

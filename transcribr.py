@@ -742,11 +742,32 @@ def _gaps_are_informative(segments) -> bool:
     return contiguous / (len(segments) - 1) < 0.7
 
 
+def _is_sentence_continuation(prev_stripped: str, curr_text: str) -> bool:
+    """True when a paragraph break would land mid-sentence: the
+    previous segment did not finish a sentence (no terminal
+    punctuation) and the next one carries straight on (opens with a
+    lowercase letter or a digit - "...the 27th of March" | "2026.").
+    Mid-sentence breaks read as errors in a transcript, so this
+    overrides even the hard silence rule; the 60-second cap is the
+    only thing that can still split such a run."""
+    if not prev_stripped or prev_stripped.endswith(
+            (".", "!", "?", ":", '"', "”") + _INTERRUPTION_ENDINGS):
+        return False
+    # A bare short response ("Yes", "Okay") is a complete utterance
+    # even when Whisper drops its full stop - never glue onto it.
+    if _is_short_response(prev_stripped):
+        return False
+    first = (curr_text or "").lstrip()[:1]
+    return first.islower() or first.isdigit()
+
+
 def _should_break(prev, curr, gap_threshold: float,
                   gaps_informative: bool = True) -> bool:
     """The paragraph-boundary heuristics, graded by strength:
 
-    - a silence at least the user's threshold always breaks;
+    - a break never lands mid-sentence (see
+      _is_sentence_continuation), whatever the silence;
+    - a silence at least the user's threshold breaks;
     - a question mark, an interruption/trail-off ending, or a short
       conversational response always breaks (dialogue turn cues);
     - a sentence ending (". !") or an opening acknowledgment ("Yeah,
@@ -767,6 +788,9 @@ def _should_break(prev, curr, gap_threshold: float,
     soft_gap = max(_SOFT_BREAK_MIN_SECONDS,
                    gap_threshold * _SOFT_BREAK_FRACTION)
 
+    # Never split a sentence down the middle.
+    if _is_sentence_continuation(prev_stripped, curr_text):
+        return False
     # Hard silence beyond the user's pause threshold.
     if gap >= gap_threshold:
         return True
@@ -862,6 +886,19 @@ def paragraphify(segments, gap_threshold: float, words=None):
     return paragraphs
 
 
+def _disclaimer_text(verified_by=None) -> str:
+    """The line appended to every saved transcript. Unverified output
+    carries a warning; once a human certifies the transcript from the
+    review pane, it names them instead."""
+    if verified_by:
+        return ("Transcribed using Transcribr - (c) James Leaver, 2026. "
+                f"This transcript has been verified by {verified_by}.")
+    return ("Transcribed using Transcribr - (c) James Leaver, 2026. "
+            "If this text has not been deleted by the person who prepared "
+            "this document, then the accuracy of this transcript may not "
+            "have been checked by a human.")
+
+
 def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str:
     """Render paragraphs to plain text.
 
@@ -902,11 +939,16 @@ def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str
 
 
 def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
-                              title=None, output_format="txt", speakers=None):
+                              title=None, output_format="txt",
+                              speakers=None, verified_by=None,
+                              audio_path=None):
     """Single entry point for writing transcript output.
 
     Centralises the txt-vs-docx-vs-pdf switch so the worker (direct-write
     path) and the GUI (review-screen path) can both call the same function.
+    `verified_by` switches the appended disclaimer to a named
+    certification; `audio_path` is embedded in .docx metadata so
+    playback works when the transcript is re-opened later.
 
     Raises ImportError with a friendly message if .docx or .pdf is
     requested but the needed package isn't installed.
@@ -918,7 +960,8 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
         try:
             _write_docx(paragraphs, out_path,
                         show_timestamp=show_timestamp, title=title,
-                        speakers=speakers)
+                        speakers=speakers, verified_by=verified_by,
+                        audio_path=audio_path)
         except ImportError:
             raise ImportError(
                 "Cannot write .docx: the 'python-docx' package is not "
@@ -928,16 +971,17 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
         try:
             _write_pdf(paragraphs, out_path,
                        show_timestamp=show_timestamp, title=title,
-                       speakers=speakers)
+                       speakers=speakers, verified_by=verified_by)
         except ImportError:
             raise ImportError(
                 "Cannot write .pdf: the 'reportlab' package is not "
                 "installed. Install it with:\n  pip install reportlab\n"
                 "Or pick the .txt or .docx format instead.")
     else:
+        text = render(paragraphs, show_timestamp=show_timestamp,
+                      title=title, speakers=speakers)
         out_path.write_text(
-            render(paragraphs, show_timestamp=show_timestamp,
-                   title=title, speakers=speakers),
+            text + "\n" + _disclaimer_text(verified_by) + "\n",
             encoding="utf-8",
         )
 
@@ -1206,11 +1250,23 @@ def _parse_docx_transcript(path):
             "No transcript content found. The file may not be a "
             "Transcribr-produced transcript."
         )
+
+    # The writer embeds the source-audio location in the document
+    # metadata (comments) so playback survives re-opening.
+    embedded_audio = None
+    try:
+        import json as _json
+        meta = _json.loads(doc.core_properties.comments or "")
+        embedded_audio = (meta.get("transcribr") or {}).get("audio")
+    except Exception:
+        pass
+
     return {
         "paragraphs": paragraphs,
         "speakers": speakers,
         "title": title,
         "show_timestamp": saw_timestamp,
+        "audio_path": embedded_audio,
     }
 
 
@@ -1612,12 +1668,18 @@ def _run_diarization(audio, num_speakers, q, cancel_event=None,
 
     def progress(num_processed_chunks, num_total_chunks):
         if num_total_chunks:
-            decile = int(num_processed_chunks * 10 / num_total_chunks)
+            pct = min(100, int(num_processed_chunks * 100
+                               / num_total_chunks))
+            q.put(("progress", {
+                "pct": pct,
+                "status_text": f"Identifying speakers… {pct}%",
+                "stage": "diarizing",
+            }))
+            decile = pct // 10
             if decile > last_decile[0]:
                 last_decile[0] = decile
                 q.put(("log",
-                       f"  ... listening for voices "
-                       f"{min(100, decile * 10)}%\n"))
+                       f"  ... listening for voices {decile * 10}%\n"))
         return 0
 
     t0 = time.time()
@@ -2040,6 +2102,7 @@ def transcribe_worker(params, q, cancel_event):
             title=params.get("title"),
             output_format=params.get("output_format", "txt"),
             speakers=speaker_names,
+            audio_path=params["input"],
         )
     except ImportError as e:
         q.put(("error", str(e)))
@@ -2411,7 +2474,7 @@ def _run_mlx_whisper(params, q, cancel_event):
 
 
 def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
-                speakers=None):
+                speakers=None, verified_by=None, audio_path=None):
     """Write paragraphs to a .docx file with a page-numbered footer and an
     italic disclaimer at the end.
 
@@ -2512,13 +2575,17 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
     # Italic disclaimer at the end. Plain (non-indented) paragraph.
     doc.add_paragraph()  # blank spacer line
     disc = doc.add_paragraph()
-    disc_run = disc.add_run(
-        "Transcribed using Transcribr - (c) James Leaver, 2026. "
-        "If this text has not been deleted by the person who prepared this "
-        "document, then the accuracy of this transcript may not have been "
-        "checked by a human."
-    )
+    disc_run = disc.add_run(_disclaimer_text(verified_by))
     disc_run.italic = True
+
+    # Embed the source-audio location in the document metadata so
+    # re-opening this transcript later can find the recording for
+    # playback (the review pane also offers "Locate audio…" when the
+    # file has moved).
+    if audio_path:
+        import json as _json
+        doc.core_properties.comments = _json.dumps(
+            {"transcribr": {"audio": str(audio_path)}})
 
     # Footer: "Page X of Y" right-aligned, in Courier New so it matches
     # the body font. python-docx doesn't expose Word field codes
@@ -2550,7 +2617,7 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
 
 
 def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
-               speakers=None):
+               speakers=None, verified_by=None):
     """Write paragraphs to an A4 PDF, visually matching the .docx output:
     Courier body with a hanging timestamp indent, bold speaker labels that
     stay with their paragraph, an italic disclaimer, and a right-aligned
@@ -2638,12 +2705,7 @@ def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
 
     story.append(Spacer(1, 6))
     story.append(Paragraph(
-        escape(
-            "Transcribed using Transcribr - (c) James Leaver, 2026. "
-            "If this text has not been deleted by the person who prepared "
-            "this document, then the accuracy of this transcript may not "
-            "have been checked by a human."
-        ),
+        escape(_disclaimer_text(verified_by)),
         disclaimer_style,
     ))
 
@@ -3769,6 +3831,17 @@ class RunController:
                 self._append_log(data)
             elif kind == "eta":
                 self._handle_eta(data)
+            elif kind == "progress":
+                # Direct phase progress (e.g. the speaker-detection
+                # pass after transcription reaches 100%).
+                self.progress = {
+                    "pct": max(0.0, min(100.0,
+                                        float(data.get("pct", 0)))),
+                    "status_text": str(data.get("status_text", "")),
+                    **({"stage": data["stage"]}
+                       if data.get("stage") else {}),
+                }
+                self.broker.publish("progress", self.progress)
             elif kind == "download":
                 self._handle_download(data)
             elif kind == "status":
@@ -4860,7 +4933,14 @@ def open_transcript_info(path):
         "preset_speakers": preset_speakers,
         "preset_speaker_names": preset_speaker_names,
         "loaded": True,
-        "audio_path": _guess_audio_for_transcript(path),
+        # Prefer the audio location embedded in the .docx metadata
+        # (when it still exists on disk); fall back to the
+        # filename-sibling guess.
+        "audio_path": (
+            parsed.get("audio_path")
+            if parsed.get("audio_path")
+            and Path(parsed["audio_path"]).exists()
+            else _guess_audio_for_transcript(path)),
     }
 
 
@@ -5100,14 +5180,17 @@ class ReviewSession:
 
     # ----- Save / close ----------------------------------------------------
 
-    def _write(self, out_path, speakers):
+    def _write(self, out_path, speakers, *, output_format=None,
+               verified_by=None):
         try:
             write_paragraphs_to_file(
                 self.model.paragraphs, Path(out_path),
                 show_timestamp=self.show_timestamp,
                 title=self.title,
-                output_format=self.output_format,
+                output_format=output_format or self.output_format,
                 speakers=speakers,
+                verified_by=verified_by,
+                audio_path=self.audio_path,
             )
         except ImportError as e:
             raise ApiFail(500, "missing_dependency", str(e))
@@ -5116,14 +5199,44 @@ class ReviewSession:
         except Exception as e:
             raise ApiFail(500, "save_failed", f"{type(e).__name__}: {e}")
 
+    def export(self, rev, fmt="pdf", show_timestamp=None,
+               verified_by=None):
+        """Write a one-off export of the CURRENT reviewed state (with
+        labels) alongside the output path, without closing the
+        session. Returns the export path."""
+        with self.lock:
+            self._check_rev(rev)
+            if fmt not in ("pdf", "docx", "txt"):
+                raise ApiFail(400, "bad_request", f"Unknown format {fmt}.")
+            if show_timestamp is not None:
+                self.show_timestamp = bool(show_timestamp)
+            m = self.model
+            for letter in m.LETTERS:
+                m.speaker_names[letter] = m.speaker_names.get(
+                    letter, "").strip() or f"Speaker {letter}"
+            export_path = str(Path(self.out_path).with_suffix(f".{fmt}"))
+            if os.path.normcase(export_path) == os.path.normcase(
+                    self.out_path):
+                export_path = str(
+                    Path(self.out_path).with_suffix(f".export.{fmt}"))
+            self._write(export_path, m.resolved_speakers(),
+                        output_format=fmt,
+                        verified_by=(verified_by or "").strip() or None)
+            self._log_line(f"Exported: {export_path}\n")
+            _recent_add(export_path)
+            self.broker.publish("recents", {})
+            return export_path
+
     def save(self, rev, mode, extra_queue=None, out_format=None,
-             show_timestamp=None):
+             show_timestamp=None, verified_by=None):
         """mode: "labels" | "no_labels" | "revision". Returns the final
         out_path. `out_format` and `show_timestamp`, when given (the
-        review pane's saving options), override what the run was
-        started with - the output path's extension follows the format.
-        Ports _on_review_save / _on_review_cancel(fresh) /
-        _on_review_save_revision."""
+        Settings default / the review pane's options), override what
+        the run was started with - the output path's extension follows
+        the format. `verified_by` switches the appended disclaimer to
+        a named certification. Ports _on_review_save /
+        _on_review_cancel(fresh) / _on_review_save_revision."""
+        verified_by = (verified_by or "").strip() or None
         with self.lock:
             self._check_rev(rev)
             if out_format in ("txt", "docx", "pdf") \
@@ -5143,17 +5256,19 @@ class ReviewSession:
                                   "Revisions only apply to loaded "
                                   "transcripts.")
                 out_path = str(_next_revision_path(Path(self.out_path)))
-                self._write(out_path, m.resolved_speakers())
+                self._write(out_path, m.resolved_speakers(),
+                            verified_by=verified_by)
                 self._log_line(f"Saved revision: {out_path}\n")
             elif mode == "labels":
                 out_path = self.out_path
-                self._write(out_path, m.resolved_speakers())
+                self._write(out_path, m.resolved_speakers(),
+                            verified_by=verified_by)
                 self._log_line(
                     f"Wrote {len(m.paragraphs)} paragraphs (with speaker "
                     f"labels)\nto: {out_path}\n")
             elif mode == "no_labels":
                 out_path = self.out_path
-                self._write(out_path, None)
+                self._write(out_path, None, verified_by=verified_by)
                 self._log_line(f"Saved without speaker labels: "
                                f"{out_path}\n")
             else:
@@ -5425,6 +5540,44 @@ class WebBackend:
                 f"\nLoaded transcript from: {path}\n")
             return {"review": session.payload()}
 
+        @app.post("/api/review/export")
+        def api_review_export():
+            body = bottle.request.json or {}
+            try:
+                session = backend._live_review()
+                show_ts = body.get("show_timestamp")
+                path = session.export(
+                    int(body.get("rev", -1)),
+                    fmt=str(body.get("format") or "pdf"),
+                    show_timestamp=(bool(show_ts)
+                                    if show_ts is not None else None),
+                    verified_by=str(body.get("verified_by") or ""))
+            except ApiFail as e:
+                _fail(e)
+            return {"out_path": path}
+
+        @app.post("/api/review/audio")
+        def api_review_audio():
+            """Point the open review session at the source recording
+            when the embedded/guessed path is missing (the review
+            pane's "Locate audio…" button)."""
+            body = bottle.request.json or {}
+            path = (body.get("path") or "").strip()
+            try:
+                session = backend._live_review()
+                if not path or not Path(path).exists():
+                    raise ApiFail(400, "not_found",
+                                  f"No such file:\n{path}")
+                if Path(path).suffix.lower() not in _AUDIO_EXTENSIONS:
+                    raise ApiFail(400, "not_audio",
+                                  "That doesn't look like an audio or "
+                                  "video file.")
+                session.audio_path = path
+                backend._attach_audio(session)
+            except ApiFail as e:
+                _fail(e)
+            return {"ok": True}
+
         @app.post("/api/review/<action>")
         def api_review_mutate(action):
             if action in ("save", "close"):
@@ -5450,7 +5603,8 @@ class WebBackend:
                         extra_queue=backend.controller.queue,
                         out_format=(str(fmt) if fmt else None),
                         show_timestamp=(bool(show_ts)
-                                        if show_ts is not None else None))
+                                        if show_ts is not None else None),
+                        verified_by=str(body.get("verified_by") or ""))
                     backend.controller.last_output = out_path
                     backend.review = None
                     return {"out_path": out_path}

@@ -162,12 +162,12 @@ is needed at all — the PyAV package bundles the decoding libraries).
 
 ## Using the application
 
-The window has five views, switched in the left sidebar:
+The window has four views, switched in the left sidebar:
 **Transcribe** (choose a file and the quick settings, run jobs),
-**Review** (check speakers, edit, and choose how to save), **Library**
-(recent transcripts), **Models** (see what's downloaded and free up
-space), and **Settings** (everything advanced: accuracy tuning, extra
-technical files, appearance). The defaults are sensible for most jobs;
+**Review** (check speakers, edit, verify, and save), **Recent**
+(recent transcripts), and **Settings** (everything advanced: accuracy
+tuning, extra technical files, model downloads, appearance, the
+log). The defaults are sensible for most jobs;
 pick an input file and click **Run Transcription** — the review pane
 opens automatically when it finishes.
 
@@ -348,7 +348,7 @@ disk. Whether timestamps appear in the saved file (`[MM:SS]` at each
 paragraph) is chosen on the Review pane's Saving card, on by
 default.
 
-### Library
+### Recent
 
 The last ten transcripts you produced or opened, with their locations.
 Click one (or its **Review** button) to re-open it for speaker
@@ -409,12 +409,17 @@ arrive pre-filled ("speakers suggested automatically — please verify"
 appears in the header) and your job is to check them, name the
 speakers, and fill in whatever was left unlabelled.
 
-The right rail's **Saving** card chooses how the finished document is
-written: the format (`.docx` by default, `.txt`, or `.pdf`) and
-whether timestamps appear in the saved file. Changing the format here
-saves under the matching extension (and your choice becomes the
-default for future runs). **Shade low-confidence words** on the same
-rail highlights the words the engine was unsure about.
+The right rail also holds: **Playback** (P plays just the selected
+paragraph, ⌘P plays on from it; **Locate audio…** points at the
+recording if it can't be found — saved `.docx` transcripts embed the
+recording's location so playback survives re-opening), **Timestamps /
+uncertain words** (whether timestamps appear in the saved file, and
+confidence shading), and **Verify transcript** — type your name to
+certify you have checked the transcript, which switches the appended
+disclaimer from the accuracy warning to *"This transcript has been
+verified by <your name>."* The save format (`.docx`/`.txt`) is set on
+the Settings page; **Export PDF** in the header writes a one-off PDF
+copy without closing the review.
 
 | Action | How |
 |---|---|

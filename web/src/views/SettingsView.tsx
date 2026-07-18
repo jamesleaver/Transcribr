@@ -1,5 +1,7 @@
+import { api } from "../api/client";
 import { useApp } from "../state/store";
 import { Card, CheckField, NumberField, SelectField } from "../components/fields";
+import ModelsView from "./ModelsView";
 import type { ThemeSetting } from "../api/types";
 
 // The advanced-settings page: everything that shouldn't crowd the
@@ -16,19 +18,42 @@ export default function SettingsView() {
     <div className="mx-auto max-w-3xl px-8 py-10">
       <h1 className="mb-6 text-2xl font-bold">Settings</h1>
       <div className="flex flex-col gap-4">
+        <Card title="Saving">
+          <div className="grid grid-cols-2 gap-4">
+            <SelectField
+              label="Default save format"
+              value={settings.output_format === "txt" ? "txt" : "docx"}
+              options={[
+                { value: "docx", label: "Word (.docx)" },
+                { value: "txt", label: "Plain text (.txt)" },
+              ]}
+              onChange={(v) =>
+                update({ output_format: v as "docx" | "txt" })
+              }
+              note="Transcripts save in this format. One-off PDFs come from the Export PDF button on the Review pane."
+            />
+          </div>
+        </Card>
+
         <Card title="Transcribe page">
           <div className="flex flex-col gap-2.5">
             <CheckField
               label="Show the full Whisper model list"
               checked={settings.show_all_models}
               onChange={(v) => update({ show_all_models: v })}
-              note="Adds the full model dropdown under the three-tier picker. Downloads are managed from the Models view."
+              note="Adds the full model dropdown under the three-tier picker."
             />
             <CheckField
               label="Show the context / vocabulary hint field"
               checked={settings.show_prompt}
               onChange={(v) => update({ show_prompt: v })}
               note="A field that primes the engine with names, acronyms and place names. Powerful for jargon-heavy recordings, but priming can backfire — it stays hidden unless you want it."
+            />
+            <CheckField
+              label="Condition on previous text"
+              checked={settings.condition_on_previous_text}
+              onChange={(v) => update({ condition_on_previous_text: v })}
+              note="Feeds each chunk the text before it: more consistent style, but an early mistake can propagate. Leave on unless a transcript goes off the rails."
             />
           </div>
         </Card>
@@ -109,6 +134,23 @@ export default function SettingsView() {
             />
           </div>
         </Card>
+
+        <Card title="Troubleshooting">
+          <button
+            className="rounded-lg border border-edge px-3 py-2 text-sm hover:bg-surface-2"
+            onClick={() => void api.post("/api/log/open", {}).catch(() => {})}
+          >
+            Open the log file
+          </button>
+          <p className="mt-2 text-xs text-muted">
+            The last few lines usually show the cause when something
+            misbehaves.
+          </p>
+        </Card>
+
+        <section className="rounded-xl border border-edge bg-surface p-5">
+          <ModelsView embedded />
+        </section>
       </div>
     </div>
   );

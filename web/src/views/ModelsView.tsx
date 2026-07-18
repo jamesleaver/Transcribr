@@ -258,7 +258,7 @@ function InstallableEngines({
   );
 }
 
-export default function ModelsView() {
+export default function ModelsView({ embedded = false }: { embedded?: boolean }) {
   const data = useModels((s) => s.data);
   const loaded = useModels((s) => s.loaded);
   const loading = useModels((s) => s.loading);
@@ -275,10 +275,12 @@ export default function ModelsView() {
   const jobKey = job ? `${job.engine}:${job.model}` : null;
 
   return (
-    <div className="mx-auto max-w-3xl px-8 py-10">
+    <div className={embedded ? "" : "mx-auto max-w-3xl px-8 py-10"}>
       <header className="mb-6 flex items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold">Models</h1>
+          <h1 className={embedded ? "text-sm font-semibold" : "text-2xl font-semibold"}>
+            Models
+          </h1>
           <p className="mt-1 text-sm text-muted">
             Downloaded Whisper models and the space they use. Each engine
             keeps its own copy, so the same model can be stored more than once.

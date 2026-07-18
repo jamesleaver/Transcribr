@@ -143,10 +143,21 @@ function PlaybackCard() {
         Playback
       </h2>
       {label === null ? (
-        <p className="text-[11px] leading-relaxed text-muted">
-          No audio available for this transcript
-          {audio.error ? ` — ${audio.error}` : "."}
-        </p>
+        <>
+          <p className="text-[11px] leading-relaxed text-muted">
+            No audio available for this transcript
+            {audio.error ? ` — ${audio.error}` : "."}
+          </p>
+          <button
+            className="mt-2 w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2"
+            onClick={() => void useReview.getState().locateAudio()}
+          >
+            Locate audio…
+          </button>
+          <p className="mt-2 text-[11px] text-muted">
+            Point at the original recording if it has moved.
+          </p>
+        </>
       ) : (
         <>
           <button
@@ -158,8 +169,18 @@ function PlaybackCard() {
           >
             {label}
           </button>
+          <button
+            className="mt-2 w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2 disabled:opacity-40"
+            disabled={audio.state !== "ready"}
+            onClick={() =>
+              useReview.getState().togglePlay(selected, true)
+            }
+          >
+            ▶▶ Play from here
+          </button>
           <p className="mt-2 text-[11px] text-muted">
-            P plays the selected paragraph; press again to stop.
+            P plays just the selected paragraph (press again to stop);
+            ⌘P plays on from it.
           </p>
         </>
       )}
@@ -167,66 +188,69 @@ function PlaybackCard() {
   );
 }
 
-function SavingOptions() {
+function VerifyCard() {
+  const verifyName = useReview((s) => s.verifyName);
+  return (
+    <section className="rounded-xl border border-edge bg-surface p-4">
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+        Verify transcript
+      </h2>
+      <input
+        className={`${inputCls} w-full py-1.5`}
+        placeholder="Your name"
+        value={verifyName}
+        onChange={(e) => useReview.getState().setVerifyName(e.target.value)}
+      />
+      <p className="mt-2 text-[11px] leading-relaxed text-muted">
+        {verifyName.trim()
+          ? `Saved documents will state: "This transcript has been verified by ${verifyName.trim()}."`
+          : "Enter your name to certify you have checked this transcript. " +
+            "Until then, saved documents carry a warning that accuracy " +
+            "may not have been checked by a human."}
+      </p>
+    </section>
+  );
+}
+
+function TimestampsCard() {
   const doc = useReview((s) => s.doc);
-  const saveFormat = useReview((s) => s.saveFormat);
   const saveShowTimestamp = useReview((s) => s.saveShowTimestamp);
+  const hasConf = useReview((s) => s.doc?.has_word_conf ?? false);
+  const showConf = useReview((s) => s.showConfidence);
   if (!doc) return null;
-  const format = saveFormat ?? (doc.output_format as "txt" | "docx" | "pdf");
   const timestamps = saveShowTimestamp ?? doc.show_timestamp;
 
   return (
     <section className="rounded-xl border border-edge bg-surface p-4">
       <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-        Saving
+        Timestamps / uncertain words
       </h2>
-      <div className="mb-3 flex gap-4">
-        {(["docx", "txt", "pdf"] as const).map((fmt) => (
-          <label key={fmt} className="flex cursor-pointer items-center gap-1.5 text-sm">
-            <input
-              type="radio"
-              name="save-fmt"
-              className="accent-(--accent)"
-              checked={format === fmt}
-              onChange={() => useReview.getState().setSaveFormat(fmt)}
-            />
-            .{fmt}
-          </label>
-        ))}
-      </div>
-      <CheckField
-        label="Include timestamps in the saved file"
-        checked={timestamps}
-        onChange={(v) => useReview.getState().setSaveShowTimestamp(v)}
-      />
-      {format === "pdf" && (
-        <p className="mt-2 text-[11px] leading-relaxed text-muted">
-          PDFs can't be re-opened for labelling later — use .docx or .txt
-          if you'll want to revisit the speakers.
-        </p>
-      )}
-    </section>
-  );
-}
-
-export default function ReviewRail() {
-  const hasConf = useReview((s) => s.doc?.has_word_conf ?? false);
-  const showConf = useReview((s) => s.showConfidence);
-  return (
-    <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
-      <SpeakersPanel />
-      <PlaybackCard />
-      <SavingOptions />
-      <FindReplace />
-      {hasConf && (
-        <section className="rounded-xl border border-edge bg-surface p-4">
+      <div className="flex flex-col gap-2.5">
+        <CheckField
+          label="Include timestamps in the saved file"
+          checked={timestamps}
+          onChange={(v) => useReview.getState().setSaveShowTimestamp(v)}
+        />
+        {hasConf && (
           <CheckField
             label="Shade low-confidence words"
             checked={showConf}
             onChange={(v) => useReview.getState().setShowConfidence(v)}
           />
-        </section>
-      )}
+        )}
+      </div>
+    </section>
+  );
+}
+
+export default function ReviewRail() {
+  return (
+    <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
+      <SpeakersPanel />
+      <PlaybackCard />
+      <TimestampsCard />
+      <FindReplace />
+      <VerifyCard />
     </aside>
   );
 }
