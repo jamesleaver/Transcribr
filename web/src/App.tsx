@@ -5,6 +5,7 @@ import Sidebar from "./components/Sidebar";
 import LibraryView from "./views/LibraryView";
 import ModelsView from "./views/ModelsView";
 import ReviewView from "./views/ReviewView";
+import SettingsView from "./views/SettingsView";
 import TranscribeView from "./views/TranscribeView";
 import { api } from "./api/client";
 import { confirmDialog } from "./state/dialogs";
@@ -87,6 +88,7 @@ export default function App() {
         {view === "review" && <ReviewView />}
         {view === "library" && <LibraryView />}
         {view === "models" && <ModelsView />}
+        {view === "settings" && <SettingsView />}
       </main>
       <DialogHost />
       {meta.annotate && <AnnotateOverlay />}

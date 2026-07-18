@@ -167,6 +167,48 @@ function PlaybackCard() {
   );
 }
 
+function SavingOptions() {
+  const doc = useReview((s) => s.doc);
+  const saveFormat = useReview((s) => s.saveFormat);
+  const saveShowTimestamp = useReview((s) => s.saveShowTimestamp);
+  if (!doc) return null;
+  const format = saveFormat ?? (doc.output_format as "txt" | "docx" | "pdf");
+  const timestamps = saveShowTimestamp ?? doc.show_timestamp;
+
+  return (
+    <section className="rounded-xl border border-edge bg-surface p-4">
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+        Saving
+      </h2>
+      <div className="mb-3 flex gap-4">
+        {(["docx", "txt", "pdf"] as const).map((fmt) => (
+          <label key={fmt} className="flex cursor-pointer items-center gap-1.5 text-sm">
+            <input
+              type="radio"
+              name="save-fmt"
+              className="accent-(--accent)"
+              checked={format === fmt}
+              onChange={() => useReview.getState().setSaveFormat(fmt)}
+            />
+            .{fmt}
+          </label>
+        ))}
+      </div>
+      <CheckField
+        label="Include timestamps in the saved file"
+        checked={timestamps}
+        onChange={(v) => useReview.getState().setSaveShowTimestamp(v)}
+      />
+      {format === "pdf" && (
+        <p className="mt-2 text-[11px] leading-relaxed text-muted">
+          PDFs can't be re-opened for labelling later — use .docx or .txt
+          if you'll want to revisit the speakers.
+        </p>
+      )}
+    </section>
+  );
+}
+
 export default function ReviewRail() {
   const hasConf = useReview((s) => s.doc?.has_word_conf ?? false);
   const showConf = useReview((s) => s.showConfidence);
@@ -174,6 +216,7 @@ export default function ReviewRail() {
     <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
       <SpeakersPanel />
       <PlaybackCard />
+      <SavingOptions />
       <FindReplace />
       {hasConf && (
         <section className="rounded-xl border border-edge bg-surface p-4">

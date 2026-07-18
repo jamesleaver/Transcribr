@@ -89,6 +89,12 @@ interface ReviewSlice {
   setAudioStatus: (status: AudioStatus) => void;
   togglePlay: (index: number) => void;
 
+  /** Review-pane saving options; null = keep what the run started with. */
+  saveFormat: "txt" | "docx" | "pdf" | null;
+  saveShowTimestamp: boolean | null;
+  setSaveFormat: (value: "txt" | "docx" | "pdf") => void;
+  setSaveShowTimestamp: (value: boolean) => void;
+
   needsAttention: (index: number) => boolean;
   jumpNextAttention: () => void;
   findNext: () => void;
@@ -173,6 +179,8 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       findStatus: "",
       searchHit: null,
       showConfidence: payload.has_word_conf,
+      saveFormat: null,
+      saveShowTimestamp: null,
     }),
 
   closeDoc: () => {
@@ -181,6 +189,11 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   },
 
   playing: null,
+
+  saveFormat: null,
+  saveShowTimestamp: null,
+  setSaveFormat: (value) => set({ saveFormat: value }),
+  setSaveShowTimestamp: (value) => set({ saveShowTimestamp: value }),
 
   setAudioStatus: (status) =>
     set((s) => {
@@ -369,13 +382,25 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   },
 
   save: async (mode) => {
-    const doc = get().doc;
+    const s = get();
+    const doc = s.doc;
     if (!doc) return;
     try {
       await api.post<{ out_path: string }>("/api/review/save", {
         rev: doc.rev,
         mode,
+        ...(s.saveFormat !== null ? { format: s.saveFormat } : {}),
+        ...(s.saveShowTimestamp !== null
+          ? { show_timestamp: s.saveShowTimestamp }
+          : {}),
       });
+      // The chosen options become the defaults for future runs.
+      const persist: Record<string, unknown> = {};
+      if (s.saveFormat !== null) persist.output_format = s.saveFormat;
+      if (s.saveShowTimestamp !== null)
+        persist.show_timestamp = s.saveShowTimestamp;
+      if (Object.keys(persist).length)
+        useApp.getState().updateSettings(persist);
       get().closeDoc();
       useApp.getState().setView("transcribe");
     } catch (err) {

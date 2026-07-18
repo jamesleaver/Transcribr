@@ -67,7 +67,6 @@ export interface Settings {
   prompt: string;
   gap: number;
   show_timestamp: boolean;
-  review: boolean;
   temperature: number;
   beam_size: number;
   best_of: number;
@@ -79,7 +78,6 @@ export interface Settings {
   extra_srt: boolean;
   extra_vtt: boolean;
   extra_tsv: boolean;
-  highlight_confidence: boolean;
   theme: ThemeSetting;
   show_details: boolean;
   diarize: boolean;
@@ -87,6 +85,8 @@ export interface Settings {
   diarize_model: string;
   diarize_threshold: number;
   show_all_models: boolean;
+  /** Show the context/vocabulary priming field on the Transcribe page. */
+  show_prompt: boolean;
 }
 
 export interface RecentItem {

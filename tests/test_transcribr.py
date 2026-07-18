@@ -531,11 +531,11 @@ class TestTheme(unittest.TestCase):
 
 class TestSettingsPersistence(unittest.TestCase):
     def test_round_trip(self):
-        T._settings_save({"model": "tiny", "gap": 2.5, "review": True})
+        T._settings_save({"model": "tiny", "gap": 2.5, "diarize": True})
         loaded = T._settings_load()
         self.assertEqual(loaded["model"], "tiny")
         self.assertEqual(loaded["gap"], 2.5)
-        self.assertIs(loaded["review"], True)
+        self.assertIs(loaded["diarize"], True)
 
     def test_corrupt_file_returns_empty(self):
         T._settings_file().write_text("{not json", encoding="utf-8")

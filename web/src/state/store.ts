@@ -5,7 +5,7 @@ import { injectPalettes, setTheme } from "../theme";
 import { useRun } from "./runStore";
 import { useReview } from "./reviewStore";
 
-export type View = "transcribe" | "review" | "library" | "models";
+export type View = "transcribe" | "review" | "library" | "models" | "settings";
 export type SseStatus = "connecting" | "open" | "down";
 
 interface AppState {

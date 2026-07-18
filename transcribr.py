@@ -2005,8 +2005,9 @@ def transcribe_worker(params, q, cancel_event):
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if params.get("review_before_save"):
-        word_conf = (_extract_word_conf(result)
-                     if params.get("highlight_confidence") else None)
+        # Word timings are always recorded, so the review pane always
+        # gets confidence data; its own toggle governs the shading.
+        word_conf = _extract_word_conf(result) or None
         q.put((
             "paragraphs_ready",
             {
@@ -2655,11 +2656,32 @@ def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
     doc.build(story, canvasmaker=_NumberedCanvas)
 
 
-def _write_extra_formats(result, txt_out_path, formats, q):
+def _reviewed_result(paragraphs, result):
+    """A result-shaped dict whose segments carry the REVIEWED text, so
+    the extra outputs (SRT/VTT/TSV) reflect the user's edits, splits
+    and merges rather than the raw engine pass. The JSON extra keeps
+    the raw engine result - it is the technical record."""
+    segments = [
+        {"start": float(seg[0]), "end": float(seg[1]),
+         "text": str(seg[2])}
+        for para in paragraphs
+        for seg in para
+        if str(seg[2]).strip()
+    ]
+    out = dict(result or {})
+    out["segments"] = segments
+    return out
+
+
+def _write_extra_formats(result, txt_out_path, formats, q,
+                         raw_result=None):
     """Write SRT/VTT/JSON/TSV next to the paragraph .txt.
 
     Engine-agnostic: reads from result["segments"] which every engine
-    runner normalises to a list of {"start", "end", "text"} dicts."""
+    runner normalises to a list of {"start", "end", "text"} dicts.
+    `raw_result`, when given (the review-save path), is written for the
+    JSON extra instead of `result` - the JSON is the raw engine
+    record, while SRT/VTT/TSV follow the reviewed text."""
     segments = (result or {}).get("segments", []) if result else []
     if not segments:
         q.put(("log", "Note: no segments available for extra outputs.\n"))
@@ -2676,7 +2698,7 @@ def _write_extra_formats(result, txt_out_path, formats, q):
         out = output_dir / f"{stem}.{fmt}"
         try:
             if fmt == "json":
-                _write_json_result(out, result)
+                _write_json_result(out, raw_result or result)
             elif fmt == "srt":
                 _write_srt(out, segments)
             elif fmt == "vtt":
@@ -3250,7 +3272,6 @@ def build_worker_params(settings, in_path, out_path, *,
         # feed confidence shading. The modest speed cost buys a
         # noticeably better transcript.
         word_timestamps=True,
-        highlight_confidence=settings["highlight_confidence"],
         initial_prompt=prompt or None,
         # With no title, name the document after the source file. (The
         # filename is never fed to the engine - recorder names like
@@ -3282,13 +3303,15 @@ def build_worker_params(settings, in_path, out_path, *,
 # and missing ones fall back to the defaults, so a stale or corrupt
 # file can't wedge the app.
 
-# ("word_timestamps" was a stored setting until 0.9.0; it is now always
-# on for the run, and any stale key in settings.json is simply dropped.)
+# ("word_timestamps", "review" and "highlight_confidence" were stored
+# settings until 0.9.0: word timings are now always recorded, single
+# runs always open the review pane, and confidence shading is the
+# review pane's own toggle. Stale keys in settings.json are dropped.)
 _SETTINGS_BOOL_KEYS = (
-    "show_timestamp", "review", "condition_on_previous_text",
+    "show_timestamp", "condition_on_previous_text",
     "extra_json", "extra_srt", "extra_vtt",
-    "extra_tsv", "highlight_confidence", "show_details",
-    "diarize", "show_all_models",
+    "extra_tsv", "show_details",
+    "diarize", "show_all_models", "show_prompt",
 )
 
 _SETTINGS_NUMBER_KEYS = (
@@ -3326,7 +3349,6 @@ def default_settings():
         "prompt": "",
         "gap": 1.5,
         "show_timestamp": True,
-        "review": True,
         "temperature": 0.0,
         "beam_size": 5,
         "best_of": 5,
@@ -3338,7 +3360,6 @@ def default_settings():
         "extra_srt": False,
         "extra_vtt": False,
         "extra_tsv": False,
-        "highlight_confidence": False,
         "theme": "auto",
         "show_details": False,
         "diarize": False,
@@ -3346,6 +3367,7 @@ def default_settings():
         "diarize_model": DIARIZE_DEFAULT_VOICE_MODEL,
         "diarize_threshold": _DIARIZE_CLUSTER_THRESHOLD,
         "show_all_models": False,
+        "show_prompt": False,
     }
 
 
@@ -3633,7 +3655,9 @@ class RunController:
             try:
                 params = build_worker_params(
                     settings, in_path, out_path,
-                    review_before_save=bool(settings.get("review")))
+                    # Single files always pause for review since 0.9.0
+                    # (batches still save directly).
+                    review_before_save=True)
             except _EngineNotAvailable:
                 raise ApiFail(409, "no_engine", _NO_ENGINE_HINT)
 
@@ -4881,6 +4905,7 @@ class ReviewSession:
         self.result = info.get("result")
         self.extra_formats = info.get("extra_formats") or []
         self.diarized = bool(info.get("diarized"))
+        self._safety_path = None    # set by from_fresh after its pre-save
         self._log_line = log or (lambda text: None)
         self.lock = threading.RLock()
         self.closed = False
@@ -4924,6 +4949,7 @@ class ReviewSession:
                     output_format=info["output_format"],
                     speakers=None,
                 )
+                session._safety_path = str(info["out_path"])
                 session._log_line(
                     f"Safety copy saved (no labels yet): "
                     f"{info['out_path']}\n")
@@ -5090,12 +5116,23 @@ class ReviewSession:
         except Exception as e:
             raise ApiFail(500, "save_failed", f"{type(e).__name__}: {e}")
 
-    def save(self, rev, mode, extra_queue=None):
+    def save(self, rev, mode, extra_queue=None, out_format=None,
+             show_timestamp=None):
         """mode: "labels" | "no_labels" | "revision". Returns the final
-        out_path. Ports _on_review_save / _on_review_cancel(fresh) /
+        out_path. `out_format` and `show_timestamp`, when given (the
+        review pane's saving options), override what the run was
+        started with - the output path's extension follows the format.
+        Ports _on_review_save / _on_review_cancel(fresh) /
         _on_review_save_revision."""
         with self.lock:
             self._check_rev(rev)
+            if out_format in ("txt", "docx", "pdf") \
+                    and out_format != self.output_format:
+                self.output_format = out_format
+                self.out_path = str(
+                    Path(self.out_path).with_suffix(f".{out_format}"))
+            if show_timestamp is not None:
+                self.show_timestamp = bool(show_timestamp)
             m = self.model
             for letter in m.LETTERS:
                 m.speaker_names[letter] = m.speaker_names.get(
@@ -5122,11 +5159,28 @@ class ReviewSession:
             else:
                 raise ApiFail(400, "bad_request", f"Unknown mode {mode}.")
 
+            # A fresh session's safety copy becomes an orphan when the
+            # user saved under a different extension - remove it.
+            if (self._safety_path
+                    and os.path.normcase(self._safety_path)
+                    != os.path.normcase(out_path)
+                    and Path(self._safety_path).exists()):
+                try:
+                    Path(self._safety_path).unlink()
+                    self._log_line(
+                        f"Removed the safety copy: {self._safety_path}\n")
+                except OSError:
+                    pass
+
             # Extra formats only accompany full fresh runs (parity).
+            # SRT/VTT/TSV follow the REVIEWED text; JSON keeps the raw
+            # engine result.
             if (mode in ("labels", "no_labels") and self.result
                     and self.extra_formats and extra_queue is not None):
-                _write_extra_formats(self.result, Path(out_path),
-                                     self.extra_formats, extra_queue)
+                _write_extra_formats(
+                    _reviewed_result(m.paragraphs, self.result),
+                    Path(out_path), self.extra_formats, extra_queue,
+                    raw_result=self.result)
             self._finish(reason="saved", out_path=out_path)
             return out_path
 
@@ -5388,10 +5442,15 @@ class WebBackend:
             try:
                 session = backend._live_review()
                 if action == "save":
+                    fmt = body.get("format")
+                    show_ts = body.get("show_timestamp")
                     out_path = session.save(
                         int(body.get("rev", -1)),
                         str(body.get("mode", "labels")),
-                        extra_queue=backend.controller.queue)
+                        extra_queue=backend.controller.queue,
+                        out_format=(str(fmt) if fmt else None),
+                        show_timestamp=(bool(show_ts)
+                                        if show_ts is not None else None))
                     backend.controller.last_output = out_path
                     backend.review = None
                     return {"out_path": out_path}

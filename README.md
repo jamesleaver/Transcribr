@@ -162,17 +162,17 @@ is needed at all — the PyAV package bundles the decoding libraries).
 
 ## Using the application
 
-The window has four views, switched in the left sidebar:
-**Transcribe** (choose files and options, run jobs), **Review** (label
-speakers and edit a finished transcript), **Library** (recent
-transcripts), and **Models** (see what's downloaded and free up space).
-The defaults are sensible for most jobs; pick an input file and click
-**Run Transcription**.
+The window has five views, switched in the left sidebar:
+**Transcribe** (choose a file and the quick settings, run jobs),
+**Review** (check speakers, edit, and choose how to save), **Library**
+(recent transcripts), **Models** (see what's downloaded and free up
+space), and **Settings** (everything advanced: accuracy tuning, extra
+technical files, appearance). The defaults are sensible for most jobs;
+pick an input file and click **Run Transcription** — the review pane
+opens automatically when it finishes.
 
-The app remembers your settings (engine, model, format, description,
-decoding options, theme) between launches. The moon button at the
-bottom of the sidebar cycles between following the system appearance,
-light, and dark.
+The app remembers every setting between launches. The theme (system /
+light / dark) lives on the Settings page.
 
 ### Choosing files and output
 
@@ -186,16 +186,16 @@ read works: `.mp3`, `.wav`, `.m4a`, `.mp4`, `.mov`, `.aac`, `.flac`,
 `.ogg`, `.opus`, `.webm`, etc.
 
 **Output.** Where the transcript goes. Auto-fills to
-`<input>.transcript.<ext>` next to the input file whenever you change
-the input or the format. Override it if you want it somewhere else.
+`<input>.transcript.docx` next to the input file. Override it if you
+want it somewhere else. Transcripts save as Word (`.docx`) by default;
+the format choice (with `.txt` and `.pdf`) lives on the **Review**
+pane's Saving card, where it belongs to the finished document:
 
-**Format.**
-
-- **`.txt`** — plain text, one paragraph per block, each starting with
-  a timestamp in square brackets. Easiest to edit anywhere.
 - **`.docx`** — A4 Word document in a monospaced font with a hanging
   indent (timestamp in the left column, body wrapping cleanly), bold
   speaker labels, a "Page X of Y" footer, and an italic disclaimer.
+- **`.txt`** — plain text, one paragraph per block. Easiest to edit
+  anywhere.
 - **`.pdf`** — an A4 PDF with the same layout as the Word output.
   (PDFs can't be re-opened for labelling later; use `.docx` or `.txt`
   if you'll want to revisit the speaker labels.)
@@ -204,7 +204,8 @@ the input or the format. Override it if you want it somewhere else.
 It is **not** sent to the engine — it only labels the document. Left
 blank, the transcript is titled after the source file's name instead.
 
-**Context / vocabulary hint** *(optional)*. Free text fed to the engine
+**Context / vocabulary hint** *(optional; enable it from the Settings
+page)*. Free text fed to the engine
 as its `initial_prompt` to prime it with names and jargon it may not
 know. It can help accuracy on proper nouns — but **priming is opt-in
 and can backfire**: the prompt may bleed into the transcript or trigger
@@ -286,7 +287,18 @@ else, speaker detection runs entirely on your computer. In batch runs
 saved transcripts as "Speaker 1", "Speaker 2", … — open the file from
 the Library later to rename them.
 
-### Accuracy tuning (rarely needed)
+### The Settings page
+
+Everything advanced lives here, off the main page: the full-model-list
+and vocabulary-hint toggles for the Transcribe page, the extra
+technical files, accuracy tuning, and the theme.
+
+**Extra technical files.** Optional sidecar files saved alongside
+every transcript: SRT / VTT subtitles and a TSV spreadsheet — these
+follow your review edits, splits and merges — plus a JSON file keeping
+the engine's raw output as the technical record.
+
+#### Accuracy tuning (rarely needed)
 
 **Engine.** Which Whisper implementation does the work. **Automatic
 (recommended)** picks the fastest engine installed on this computer
@@ -330,13 +342,11 @@ every full stop. A segment opening with an acknowledgment ("Yeah, I
 did") breaks on the same condition, a 60-second cap stops run-on
 paragraphs, and when word-level timestamps were recorded the gaps are
 measured between the actual words rather than Whisper's padded
-segment edges. *Show timestamps in
-output* prefixes each paragraph with `[MM:SS]`. *Review and label
-speakers before saving* opens the review pane when transcription
-finishes (untick to save straight to disk).
-
-**Additional outputs.** Optional technical sidecar files: JSON (the
-full Whisper result), SRT / VTT subtitles, and TSV.
+segment edges. Single files always open
+the review pane when transcription finishes; batches save straight to
+disk. Whether timestamps appear in the saved file (`[MM:SS]` at each
+paragraph) is chosen on the Review pane's Saving card, on by
+default.
 
 ### Library
 
@@ -398,6 +408,13 @@ in the panel on the right. If speaker detection was on, the labels
 arrive pre-filled ("speakers suggested automatically — please verify"
 appears in the header) and your job is to check them, name the
 speakers, and fill in whatever was left unlabelled.
+
+The right rail's **Saving** card chooses how the finished document is
+written: the format (`.docx` by default, `.txt`, or `.pdf`) and
+whether timestamps appear in the saved file. Changing the format here
+saves under the matching extension (and your choice becomes the
+default for future runs). **Shade low-confidence words** on the same
+rail highlights the words the engine was unsure about.
 
 | Action | How |
 |---|---|

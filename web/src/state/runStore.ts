@@ -10,13 +10,6 @@ import { useApp } from "./store";
 
 const NO_ENGINE_TITLE = "No transcription engine installed";
 
-function swapExt(path: string, fmt: string): string {
-  // Parity with _on_format_changed (5525): swap the extension only if
-  // the current one is a known transcript format.
-  const m = path.match(/^(.*)\.(txt|docx|pdf)$/i);
-  return m ? `${m[1]}.${fmt}` : path;
-}
-
 interface RunSlice {
   staged: InspectedFile[];
   outputPath: string; // single-file mode; "" = derive server-side
@@ -34,7 +27,6 @@ interface RunSlice {
   removeStaged: (index: number) => void;
   clearStaged: () => void;
   setOutputPath: (value: string) => void;
-  onFormatChanged: (fmt: string) => void;
   derivedOutput: () => string;
 
   browse: () => Promise<void>;
@@ -80,13 +72,6 @@ export const useRun = create<RunSlice>((set, get) => ({
   clearStaged: () => set({ staged: [], outputPath: "", outputTouched: false }),
 
   setOutputPath: (value) => set({ outputPath: value, outputTouched: true }),
-
-  onFormatChanged: (fmt) =>
-    set((s) =>
-      s.outputTouched && s.outputPath
-        ? { outputPath: swapExt(s.outputPath, fmt) }
-        : {},
-    ),
 
   derivedOutput: () => {
     const s = get();

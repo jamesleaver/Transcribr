@@ -1074,6 +1074,56 @@ class TestReviewSession(unittest.TestCase):
         self.assertIn("Hello there.", text)
         self.assertEqual(session.payload()["total"], 3)
 
+    def test_save_format_override_reswaps_extension(self):
+        # The review pane's Saving options: saving a .txt run as .docx
+        # writes the .docx and removes the orphaned .txt safety copy.
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        session, out = self._fresh_session(fmt="txt")
+        final = session.save(session.model.rev, "no_labels",
+                             out_format="docx")
+        self.assertTrue(final.endswith("doc.transcript.docx"))
+        self.assertTrue(Path(final).exists())
+        self.assertFalse(Path(out).exists(),
+                         "orphaned safety copy should be removed")
+
+    def test_save_show_timestamp_override(self):
+        session, out = self._fresh_session(fmt="txt")
+        session.save(session.model.rev, "no_labels",
+                     show_timestamp=False)
+        self.assertNotIn("[00:00]", Path(out).read_text())
+
+    def test_extra_formats_follow_reviewed_text(self):
+        # SRT/VTT/TSV reflect the user's edits; JSON keeps the raw
+        # engine result.
+        import json as _json
+        import queue as queue_mod
+        raw = {"segments": [
+            {"start": 0.0, "end": 5.0, "text": "Hello there."},
+            {"start": 5.0, "end": 9.0, "text": "How are you?"}]}
+        out = str(Path(self.tmp.name) / "doc.transcript.txt")
+        info = {
+            "paragraphs": _doc(), "out_path": out,
+            "show_timestamp": True, "title": "Test doc",
+            "output_format": "txt", "result": raw,
+            "extra_formats": ["srt", "json"], "loaded": False,
+            "audio_path": None, "word_conf": None,
+        }
+        session = T.ReviewSession.from_fresh(info, self.broker)
+        session.mutate(session.model.rev, "edit",
+                       {"index": 0, "text": "Edited opening line."})
+        q = queue_mod.Queue()
+        session.save(session.model.rev, "no_labels", extra_queue=q)
+        srt = (Path(self.tmp.name) / "doc.srt").read_text()
+        self.assertIn("Edited opening line.", srt)
+        self.assertNotIn("Hello there.", srt)
+        raw_json = _json.loads(
+            (Path(self.tmp.name) / "doc.json").read_text())
+        texts = [s["text"] for s in raw_json["segments"]]
+        self.assertIn("Hello there.", texts)   # raw record untouched
+
     def test_payload_shape(self):
         session, _ = self._fresh_session()
         p = session.payload()
@@ -1705,7 +1755,7 @@ class TestBuildWorkerParams(unittest.TestCase):
         # Since 0.9.0 word timings are always recorded: they sharpen
         # paragraph gaps, playback spans and confidence shading. A
         # stale settings.json key cannot turn them off.
-        p = self._params(highlight_confidence=False, diarize=True)
+        p = self._params(diarize=True)
         self.assertTrue(p["word_timestamps"])
         self.assertTrue(p["diarize"])
         merged = T.validate_settings({"word_timestamps": False})
@@ -1744,12 +1794,13 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(s2["title"], "Doc")
         self.assertEqual(s2["prompt"], "keywords")
 
-    def test_confidence_shading_no_longer_needs_forcing(self):
-        # Word timestamps are unconditional now; highlighting is purely
-        # the review-shading toggle.
-        p = self._params(highlight_confidence=True)
-        self.assertTrue(p["word_timestamps"])
-        self.assertTrue(p["highlight_confidence"])
+    def test_stale_review_and_highlight_keys_are_dropped(self):
+        # Both became always-on / review-pane concerns in 0.9.0.
+        merged = T.validate_settings({"review": False,
+                                      "highlight_confidence": True})
+        self.assertNotIn("review", merged)
+        self.assertNotIn("highlight_confidence", merged)
+        self.assertNotIn("highlight_confidence", self._params())
 
     def test_language_display_to_code(self):
         self.assertEqual(self._params(language="German")["language"], "de")
