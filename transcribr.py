@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.5"
+__version__ = "0.9.6"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -5167,7 +5167,8 @@ def retranscribe_slice(audio_path, start, end, settings, q, cancel_event):
 
 class RetransJob:
     """One selection re-transcription on a background thread, reporting
-    "retrans" SSE events: running -> done | failed | cancelled. The
+    "retrans" SSE events: running (carrying a progress percentage and
+    the engine's live log lines) -> done | failed | cancelled. The
     result is applied to the session only if the client's revision is
     still current, so edits made meanwhile are never clobbered."""
 
@@ -5180,6 +5181,9 @@ class RetransJob:
         self.hi = hi
         self.state = "running"
         self.cancel_event = threading.Event()
+        self.q = queue.Queue()          # engine log/progress messages
+        self._done = threading.Event()  # tells the drain thread to stop
+        self._run_index = 0             # which run is transcribing now
         # Split the selection into the maximal runs of NON-reviewed
         # paragraphs; reviewed paragraphs are protected and act as
         # boundaries. Each run carries its own audio span [start, end),
@@ -5207,27 +5211,97 @@ class RetransJob:
         threading.Thread(target=self._run, daemon=True,
                          name="transcribr-retrans").start()
 
-    def _publish(self, state, message=""):
+    def _publish(self, state, message="", **extra):
         self.state = state
         self.backend.broker.publish(
-            "retrans", {"state": state, "message": message})
+            "retrans", {"state": state, "message": message, **extra})
+
+    def _overall_pct(self, frac):
+        """Scale one slice's 0..1 fraction to the whole selection's
+        percentage (a selection can be several runs)."""
+        total = max(1, len(self.spans))
+        return max(0.0, min(100.0,
+                            (self._run_index + min(1.0, frac)) / total * 100))
+
+    def _drain(self):
+        """Forward the engine's queue to the client as it runs: log
+        lines fill the output box, 'eta' messages drive the progress
+        bar, and stage markers ('status'/'download') caption it."""
+        while True:
+            try:
+                first = self.q.get(timeout=0.2)
+            except queue.Empty:
+                if self._done.is_set():
+                    return
+                continue
+            batch = [first]
+            while True:
+                try:
+                    batch.append(self.q.get_nowait())
+                except queue.Empty:
+                    break
+            log_delta = ""
+            prog = None
+            for kind, data in batch:
+                if kind == "log":
+                    log_delta += data
+                elif kind == "eta" and data.get("audio_total"):
+                    frac = data["audio_done"] / data["audio_total"]
+                    prog = {
+                        "pct": self._overall_pct(frac),
+                        "indeterminate": False,
+                        "status_text": (
+                            f"{_format_duration(data['audio_done'])} of "
+                            f"{_format_duration(data['audio_total'])}"
+                            f"   ·   {data['speed']:.1f}x speed"),
+                    }
+                elif kind == "status":
+                    stage = data.get("stage", "")
+                    prog = {
+                        "pct": self._overall_pct(0.0),
+                        "indeterminate": True,
+                        "status_text": {
+                            "loading": "Loading model…",
+                            "transcribing": "Transcribing…",
+                        }.get(stage, "Working…"),
+                    }
+                elif kind == "download":
+                    total = data.get("total") or 0
+                    got = data.get("downloaded") or 0
+                    prog = {
+                        "pct": self._overall_pct(got / total if total else 0),
+                        "indeterminate": not total,
+                        "status_text": (
+                            f"Downloading model "
+                            f"'{data.get('model', '')}' (first use)"),
+                    }
+            if log_delta or prog:
+                ev = {"state": "running", "message": ""}
+                if log_delta:
+                    ev["log_delta"] = log_delta
+                if prog:
+                    ev.update(prog)
+                self.backend.broker.publish("retrans", ev)
 
     def _run(self):
-        q = queue.Queue()   # engine log lines; only failures surface
+        if not self.spans:
+            self._publish(
+                "failed",
+                "Every selected paragraph is marked reviewed - nothing "
+                "was re-transcribed. Un-review a paragraph to include it.")
+            return
+        drain = threading.Thread(target=self._drain, daemon=True,
+                                 name="transcribr-retrans-log")
+        drain.start()
         try:
-            if not self.spans:
-                self._publish(
-                    "failed",
-                    "Every selected paragraph is marked reviewed - "
-                    "nothing was re-transcribed. Un-review a paragraph "
-                    "to include it.")
-                return
-            self._publish("running", "Re-transcribing the selection…")
+            self._publish("running", "Re-transcribing the selection…",
+                          pct=0.0, indeterminate=True)
             results = []        # (run_lo, run_hi, segments)
-            for run_lo, run_hi, start, end in self.spans:
+            for i, (run_lo, run_hi, start, end) in enumerate(self.spans):
+                self._run_index = i
                 segments = retranscribe_slice(
                     self.session.audio_path, start, end,
-                    self.settings, q, self.cancel_event)
+                    self.settings, self.q, self.cancel_event)
                 results.append((run_lo, run_hi, segments))
             self.session.apply_retranscribe(
                 self.rev, results, self.settings["gap"])
@@ -5237,7 +5311,7 @@ class RetransJob:
                     if covered < selected else "")
             self._publish("done",
                           "Done - the selection was replaced (undo "
-                          "reverses it)." + note)
+                          "reverses it)." + note, pct=100.0)
         except _CancelledByUser:
             self._publish("cancelled", "Re-transcription stopped.")
         except _EngineNotAvailable as e:
@@ -5252,6 +5326,8 @@ class RetransJob:
         except Exception as e:
             _log("retranscribe failed:\n" + traceback.format_exc())
             self._publish("failed", f"{type(e).__name__}: {e}")
+        finally:
+            self._done.set()
 
 
 class AudioPrep:

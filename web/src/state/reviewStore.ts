@@ -8,6 +8,14 @@ import { useApp } from "./store";
 // ReviewSession document plus purely client-side concerns (selection,
 // edit mode, find state, confidence-shading toggle).
 
+const RETRANS_IDLE = {
+  running: false,
+  message: "",
+  pct: 0,
+  indeterminate: false,
+  log: "",
+};
+
 export interface ReviewParagraph {
   id: number;
   start: number;
@@ -106,7 +114,13 @@ interface ReviewSlice {
   verifyName: string;
   /** Shift-click range selection for section-level actions. */
   selRange: { from: number; to: number } | null;
-  retrans: { running: boolean; message: string };
+  retrans: {
+    running: boolean;
+    message: string;
+    pct: number;
+    indeterminate: boolean;
+    log: string;
+  };
   setVerifyName: (value: string) => void;
   exportAs: (fmt: "pdf") => Promise<void>;
 
@@ -120,7 +134,13 @@ interface ReviewSlice {
   selectRangeTo: (index: number) => void;
   retranscribe: (model: string, condition: boolean) => Promise<void>;
   cancelRetranscribe: () => Promise<void>;
-  applyRetrans: (d: { state: string; message: string }) => void;
+  applyRetrans: (d: {
+    state: string;
+    message?: string;
+    pct?: number;
+    indeterminate?: boolean;
+    log_delta?: string;
+  }) => void;
   setSpeakerName: (slot: string, name: string) => Promise<void>;
   addSpeaker: () => Promise<void>;
   commitEdit: (index: number, text: string) => Promise<void>;
@@ -219,7 +239,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       saveShowTimestamp: null,
       verifyName: payload.verified_by ?? "",
       selRange: null,
-      retrans: { running: false, message: "" },
+      retrans: RETRANS_IDLE,
     }),
 
   closeDoc: () => {
@@ -237,7 +257,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   setVerifyName: (value) => set({ verifyName: value }),
 
   selRange: null,
-  retrans: { running: false, message: "" },
+  retrans: RETRANS_IDLE,
 
   selectRangeTo: (index) =>
     set((s) => {
@@ -261,7 +281,15 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     if (!doc || s.retrans.running) return;
     const range = s.selRange ?? { from: s.selected, to: s.selected };
     try {
-      set({ retrans: { running: true, message: "Starting…" } });
+      set({
+        retrans: {
+          running: true,
+          message: "Starting…",
+          pct: 0,
+          indeterminate: true,
+          log: "",
+        },
+      });
       await api.post("/api/review/retranscribe", {
         rev: doc.rev,
         from: range.from,
@@ -270,7 +298,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
         condition,
       });
     } catch (err) {
-      set({ retrans: { running: false, message: "" } });
+      set({ retrans: RETRANS_IDLE });
       if (err instanceof ApiError) {
         void errorDialog("Cannot re-transcribe", err.message);
       } else {
@@ -284,11 +312,31 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   },
 
   applyRetrans: (d) => {
+    const prev = get().retrans;
     if (d.state === "running") {
-      set({ retrans: { running: true, message: d.message } });
+      set({
+        retrans: {
+          running: true,
+          message: d.message ? d.message : prev.message,
+          pct: d.pct ?? prev.pct,
+          indeterminate: d.indeterminate ?? prev.indeterminate,
+          log: d.log_delta
+            ? (prev.log + d.log_delta).slice(-100_000)
+            : prev.log,
+        },
+      });
       return;
     }
-    set({ retrans: { running: false, message: d.message } });
+    // Terminal: keep the log visible; the message reports the outcome.
+    set({
+      retrans: {
+        running: false,
+        message: d.message ?? "",
+        pct: d.state === "done" ? 100 : prev.pct,
+        indeterminate: false,
+        log: prev.log,
+      },
+    });
     if (d.state === "done") {
       set({ selRange: null });
       void get().refetch();

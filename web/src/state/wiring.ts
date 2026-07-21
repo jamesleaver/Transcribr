@@ -63,7 +63,13 @@ onEvent("review_closed", () => {
 
 onEvent("retrans", (d) => {
   useReview.getState().applyRetrans(
-    d as { state: string; message: string },
+    d as {
+      state: string;
+      message?: string;
+      pct?: number;
+      indeterminate?: boolean;
+      log_delta?: string;
+    },
   );
 });
 

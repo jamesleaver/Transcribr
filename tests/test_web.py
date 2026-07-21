@@ -1608,6 +1608,12 @@ class TestReviewSession(unittest.TestCase):
             calls["span"] = (start, end)
             calls["condition"] = settings["condition_on_previous_text"]
             calls["model"] = settings["model"]
+            # Emit the kind of messages a real engine run produces so
+            # the drain thread's progress/log forwarding is exercised.
+            q.put(("log", "Transcribing slice...\n"))
+            q.put(("eta", {"audio_done": 1.0, "audio_total": 2.0,
+                           "eta_seconds": 1.0, "speed": 2.0}))
+            _time.sleep(0.05)
             return [(start + 0.1, start + 1.5, "Fixed text.")]
 
         T.retranscribe_slice = fake_slice
@@ -1624,6 +1630,7 @@ class TestReviewSession(unittest.TestCase):
                 if _time.monotonic() > deadline:
                     raise AssertionError("job stuck")
                 _time.sleep(0.02)
+            _time.sleep(0.4)   # let the drain thread flush
         finally:
             T.retranscribe_slice = orig
             self.broker.publish = orig_publish
@@ -1633,10 +1640,18 @@ class TestReviewSession(unittest.TestCase):
         # Slice span: paragraph 1's start through paragraph 2's start.
         self.assertEqual(calls["span"], expected_span)
         self.assertIn("Fixed text.", session.model.body(1))
-        self.assertIn(("retrans", {"state": "done",
-                                   "message": "Done - the selection was "
-                                   "replaced (undo reverses it)."}),
-                      events)
+        retrans = [d for k, d in events if k == "retrans"]
+        # Terminal event reports done at 100%.
+        done = [d for d in retrans if d["state"] == "done"]
+        self.assertTrue(done and done[0]["pct"] == 100.0)
+        self.assertIn("undo reverses it", done[0]["message"])
+        # The engine's log line was forwarded to the output box.
+        self.assertTrue(any(d.get("log_delta") == "Transcribing slice...\n"
+                            for d in retrans))
+        # The eta message drove a real progress percentage.
+        self.assertTrue(any(d.get("pct") == 50.0
+                            and d.get("indeterminate") is False
+                            for d in retrans))
 
     def test_recents_reviewed_and_verified_flags(self):
         T._recent_save([])

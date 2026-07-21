@@ -260,6 +260,19 @@ function FixSectionCard() {
   const settings = useApp((s) => s.settings);
   const [model, setModel] = useState("");
   const [condition, setCondition] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+  const logRef = useRef<HTMLPreElement>(null);
+
+  const hasActivity = retrans.running || retrans.log.length > 0;
+  // Reveal the output box automatically once a run starts.
+  useEffect(() => {
+    if (retrans.running) setShowLog(true);
+  }, [retrans.running]);
+  // Keep the newest engine output in view.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [retrans.log]);
 
   const range = selRange ?? { from: selected, to: selected };
   const paragraphs = useReview((s) => s.doc?.paragraphs ?? []);
@@ -329,18 +342,57 @@ function FixSectionCard() {
           </button>
         )}
       </div>
-      {reviewedInRange > 0 && count > 0 && (
+
+      {hasActivity && (
+        <div className="mt-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="truncate text-[11px] text-muted">
+              {retrans.message || "Working…"}
+            </span>
+            <span className="shrink-0 text-[11px] tabular-nums text-muted">
+              {retrans.running && retrans.indeterminate
+                ? ""
+                : `${Math.round(retrans.pct)}%`}
+            </span>
+          </div>
+          <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-2">
+            {retrans.running && retrans.indeterminate ? (
+              <div className="h-full w-1/3 animate-progress-indeterminate rounded-full bg-accent" />
+            ) : (
+              <div
+                className="h-full rounded-full bg-accent transition-[width] duration-300"
+                style={{ width: `${retrans.pct}%` }}
+              />
+            )}
+          </div>
+          <button
+            className="mt-2 text-[11px] text-muted hover:text-fg"
+            onClick={() => setShowLog((v) => !v)}
+          >
+            {showLog ? "Hide output ▾" : "Show output ▸"}
+          </button>
+          {showLog && (
+            <pre
+              ref={logRef}
+              className="mt-1 h-32 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-surface-2 p-2 font-mono text-[10px] leading-relaxed text-muted"
+            >
+              {retrans.log || "No output yet."}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {!retrans.running && reviewedInRange > 0 && count > 0 && (
         <p className="mt-2 text-[11px] leading-relaxed text-muted">
           {reviewedInRange} reviewed paragraph
           {reviewedInRange === 1 ? "" : "s"} in the selection will be kept.
         </p>
       )}
-      {(retrans.message || !audioReady || count === 0) && (
+      {!hasActivity && (!audioReady || count === 0) && (
         <p className="mt-2 text-[11px] leading-relaxed text-muted">
-          {retrans.message
-            || (!audioReady
-              ? "Needs the source recording — use Locate audio… on the Playback card."
-              : "Every selected paragraph is marked reviewed — un-review one to re-transcribe it.")}
+          {!audioReady
+            ? "Needs the source recording — use Locate audio… on the Playback card."
+            : "Every selected paragraph is marked reviewed — un-review one to re-transcribe it."}
         </p>
       )}
     </section>
