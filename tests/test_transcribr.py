@@ -819,6 +819,63 @@ class TestDeadAirDetection(unittest.TestCase):
         self.assertIsNone(letters)
 
 
+class TestHallucinationDetection(unittest.TestCase):
+    @staticmethod
+    def _paras(*texts):
+        return [[(float(i), float(i) + 1.0, t)]
+                for i, t in enumerate(texts)]
+
+    def test_flags_repeated_phrase_loop(self):
+        paras = self._paras(
+            "The vehicle was blue.",
+            "Thanks for watching. Thanks for watching. Thanks for "
+            "watching.",
+            "The officer then spoke.")
+        self.assertEqual(T.detect_hallucinations(paras), [1])
+
+    def test_flags_single_word_loop(self):
+        paras = self._paras("So the witness said this.",
+                            "you you you you you you")
+        self.assertEqual(T.detect_hallucinations(paras), [1])
+
+    def test_flags_two_repeat_paragraph_that_is_all_loop(self):
+        # A paragraph that is nothing but a phrase repeated twice, long
+        # enough not to be an ordinary short repeat.
+        paras = self._paras("Setting the scene here.",
+                            "Thanks for watching. Thanks for watching.")
+        self.assertEqual(T.detect_hallucinations(paras), [1])
+
+    def test_short_two_repeat_phrase_not_flagged(self):
+        # "Thank you. Thank you." is only four words - ordinary, not a
+        # runaway loop.
+        self.assertEqual(
+            T.detect_hallucinations(self._paras("Thank you. Thank you.")),
+            [])
+
+    def test_flags_consecutive_duplicate_paragraphs(self):
+        paras = self._paras(
+            "Opening remarks by counsel.",
+            "The signal was lost at this point.",
+            "The signal was lost at this point.",
+            "Cross-examination resumed.")
+        self.assertEqual(T.detect_hallucinations(paras), [1, 2])
+
+    def test_ignores_ordinary_courtroom_repetition(self):
+        # Short affirmations and a phrase used twice non-consecutively
+        # are not loops.
+        paras = self._paras(
+            "Yes. Yes.",
+            "No, no.",
+            "I went to the shop and the shop was closed.",
+            "That is correct.")
+        self.assertEqual(T.detect_hallucinations(paras), [])
+
+    def test_two_word_short_paragraph_not_flagged(self):
+        # Guards the coverage floor: a 2-word paragraph shouldn't trip.
+        self.assertEqual(
+            T.detect_hallucinations(self._paras("Thank you.")), [])
+
+
 class TestUnknownFormatFallsBackToTxt(unittest.TestCase):
     def test_unknown_format_writes_text(self):
         with tempfile.TemporaryDirectory() as d:

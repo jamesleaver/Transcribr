@@ -276,12 +276,8 @@ function FixSectionCard() {
 
   const range = selRange ?? { from: selected, to: selected };
   const paragraphs = useReview((s) => s.doc?.paragraphs ?? []);
-  let count = 0;
-  let reviewedInRange = 0;
-  for (let i = range.from; i <= range.to && i < paragraphs.length; i++) {
-    if (paragraphs[i]?.reviewed) reviewedInRange += 1;
-    else count += 1;
-  }
+  const count = Math.min(range.to, paragraphs.length - 1) - range.from + 1;
+  const suspectCount = paragraphs.filter((p) => p.suspect).length;
   const english = settings?.language === "English";
   const tiers = meta?.model_tiers ?? [];
   const btn =
@@ -294,9 +290,25 @@ function FixSectionCard() {
       </h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted">
         Re-run part of the recording through the engine — for repeated or
-        invented text. Shift-click extends the selection; only the
-        selected paragraphs are replaced, and undo reverses it.
+        invented text. Shift-click extends the selection; the selected
+        paragraphs are replaced, and undo reverses it.
       </p>
+
+      {suspectCount > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5">
+          <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+            ⚠ {suspectCount} paragraph{suspectCount === 1 ? "" : "s"}{" "}
+            {suspectCount === 1 ? "looks" : "look"} like repeated or
+            hallucinated text.
+          </p>
+          <button
+            className="mt-1.5 rounded border border-amber-500/50 px-2 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/15 dark:text-amber-400"
+            onClick={() => useReview.getState().jumpNextSuspect()}
+          >
+            Jump to next
+          </button>
+        </div>
+      )}
       <label className="mb-1 block text-[11px] font-medium text-muted">
         Model for the re-run
       </label>
@@ -382,17 +394,10 @@ function FixSectionCard() {
         </div>
       )}
 
-      {!retrans.running && reviewedInRange > 0 && count > 0 && (
+      {!hasActivity && !audioReady && (
         <p className="mt-2 text-[11px] leading-relaxed text-muted">
-          {reviewedInRange} reviewed paragraph
-          {reviewedInRange === 1 ? "" : "s"} in the selection will be kept.
-        </p>
-      )}
-      {!hasActivity && (!audioReady || count === 0) && (
-        <p className="mt-2 text-[11px] leading-relaxed text-muted">
-          {!audioReady
-            ? "Needs the source recording — use Locate audio… on the Playback card."
-            : "Every selected paragraph is marked reviewed — un-review one to re-transcribe it."}
+          Needs the source recording — use Locate audio… on the Playback
+          card.
         </p>
       )}
     </section>

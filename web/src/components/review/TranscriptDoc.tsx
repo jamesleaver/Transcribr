@@ -305,11 +305,16 @@ const Row = memo(function Row({
     <div
       ref={ref}
       onClick={onClick}
-      className="group grid cursor-default grid-cols-[130px_64px_1fr_24px] gap-3 rounded-lg px-3 py-1.5"
+      title={
+        para.suspect
+          ? "This looks like repeated or hallucinated text — consider re-transcribing it (Fix a section)."
+          : undefined
+      }
+      className="grid cursor-default grid-cols-[130px_64px_1fr] gap-3 rounded-lg px-3 py-1.5"
       style={{
         background: rowBg,
-        boxShadow: para.reviewed
-          ? "inset 3px 0 0 0 var(--accent)"
+        boxShadow: para.suspect
+          ? "inset 3px 0 0 0 #d97706"
           : undefined,
       }}
     >
@@ -366,25 +371,6 @@ const Row = memo(function Row({
           {renderBody(para.body, showConf ? para.conf : [], hit)}
         </div>
       )}
-      <button
-        className={`self-start rounded pt-0.5 text-xs transition-opacity ${
-          para.reviewed
-            ? "opacity-100"
-            : "opacity-0 group-hover:opacity-60 hover:!opacity-100"
-        }`}
-        style={{ color: para.reviewed ? "var(--accent)" : "var(--muted)" }}
-        title={
-          para.reviewed
-            ? "Reviewed — protected from re-transcription. Click to unmark."
-            : "Mark this paragraph reviewed (protects it from re-transcription)"
-        }
-        onClick={(e) => {
-          e.stopPropagation();
-          void useReview.getState().setReviewed(index, !para.reviewed);
-        }}
-      >
-        {para.reviewed ? "✓" : "○"}
-      </button>
     </div>
   );
 });

@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.6"
+__version__ = "0.9.7"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -2188,6 +2188,87 @@ def transcribe_worker(params, q, cancel_event):
     q.put(("done", str(out_path)))
 
 
+# --- hallucination detection ------------------------------------------
+# Whisper (and similar models) loop on silence or noise, emitting the
+# same word or short phrase over and over ("you you you…", "Thank you.
+# Thank you. Thank you.") or repeating a whole line across paragraphs.
+# These heuristics flag the obvious loops so the review pane can suggest
+# re-transcribing them. Deliberately conservative: the aim is runaway
+# repetition, not the ordinary "Yes. Yes." of a real exchange.
+
+_WORD_RE = re.compile(r"\w+(?:['’]\w+)?", re.UNICODE)
+
+# A phrase (1-4 words) repeated at least this many times in a row, when
+# it also dominates the paragraph, reads as a loop rather than emphasis.
+HALLUCINATION_MIN_REPEATS = 3
+HALLUCINATION_COVERAGE = 0.6
+
+
+def _normalise_words(text):
+    return _WORD_RE.findall((text or "").lower())
+
+
+def _is_fully_periodic(words):
+    """True if the whole word list is a phrase repeated k>=2 times (a
+    paragraph that is nothing but a loop), and it is long enough that
+    this can't be an ordinary short repeat like 'Thank you. Thank you.'."""
+    n = len(words)
+    if n < 5:
+        return False
+    for d in range(1, n // 2 + 1):
+        if n % d == 0:
+            base = words[:d]
+            if all(words[i:i + d] == base for i in range(0, n, d)):
+                return True
+    return False
+
+
+def _has_repetition_loop(text):
+    """True if `text` is dominated by an immediately-repeated 1-4 word
+    phrase (the classic model loop): either the phrase repeats three or
+    more times and covers most of the paragraph, or the paragraph is
+    nothing but two-or-more repeats of one phrase."""
+    words = _normalise_words(text)
+    n = len(words)
+    if n < HALLUCINATION_MIN_REPEATS:
+        return False
+    if _is_fully_periodic(words):
+        return True
+    for size in range(1, 5):
+        for i in range(0, n - size + 1):
+            phrase = words[i:i + size]
+            reps = 1
+            j = i + size
+            while words[j:j + size] == phrase:
+                reps += 1
+                j += size
+            if reps >= HALLUCINATION_MIN_REPEATS and \
+                    reps * size >= max(HALLUCINATION_MIN_REPEATS,
+                                       n * HALLUCINATION_COVERAGE):
+                return True
+    return False
+
+
+def detect_hallucinations(paragraphs):
+    """Return the sorted indices of paragraphs that look like engine
+    hallucination: a runaway repeated word/phrase within a paragraph,
+    or a non-trivial line repeated verbatim across adjacent paragraphs."""
+    bodies = [" ".join(seg[2] for seg in para).strip()
+              for para in paragraphs]
+    flagged = set()
+    for i, body in enumerate(bodies):
+        if _has_repetition_loop(body):
+            flagged.add(i)
+    # Consecutive (normalised-)identical, non-trivial paragraphs.
+    for i in range(1, len(bodies)):
+        prev = _normalise_words(bodies[i - 1])
+        cur = _normalise_words(bodies[i])
+        if cur and cur == prev and len(cur) >= 3:
+            flagged.add(i - 1)
+            flagged.add(i)
+    return sorted(flagged)
+
+
 # --- dead-air detection -----------------------------------------------
 # True "no recorded audio" (a camera whose microphone switches on late,
 # a muted channel) sits at or near digital silence - far below even a
@@ -3121,7 +3202,7 @@ class TranscriptModel:
     _UNDO_LIMIT = 200
 
     def __init__(self, paragraphs, speakers=None, speaker_names=None,
-                 word_conf=None, ts_marks=None, reviewed=None, *,
+                 word_conf=None, ts_marks=None, *,
                  on_autosave=None, timer_factory=None):
         self.paragraphs = [list(p) for p in paragraphs]
         n = len(self.paragraphs)
@@ -3146,13 +3227,6 @@ class TranscriptModel:
         self.ts_marks = list(ts_marks) if ts_marks else [None] * n
         while len(self.ts_marks) < n:
             self.ts_marks.append(None)
-        # Per-paragraph "reviewed" flag: paragraphs the human has
-        # approved. The re-transcribe feature treats these as protected
-        # islands and never overwrites them.
-        self.reviewed = ([bool(x) for x in reviewed] if reviewed
-                         else [False] * n)
-        while len(self.reviewed) < n:
-            self.reviewed.append(False)
         self.rev = 0
         self._undo_stack = []
         self._redo_stack = []
@@ -3311,7 +3385,6 @@ class TranscriptModel:
             "visible_speakers": self.visible_speakers,
             "ids": list(self.ids),
             "ts_marks": list(self.ts_marks),
-            "reviewed": list(self.reviewed),
         }
 
     def _restore(self, snap):
@@ -3321,7 +3394,6 @@ class TranscriptModel:
         self.visible_speakers = snap["visible_speakers"]
         self.ids = list(snap["ids"])
         self.ts_marks = list(snap["ts_marks"])
-        self.reviewed = list(snap["reviewed"])
 
     def _push_undo(self):
         self._undo_stack.append(self._snapshot())
@@ -3444,7 +3516,6 @@ class TranscriptModel:
         del self.speakers[idx]
         del self.ids[idx]
         del self.ts_marks[idx]
-        del self.reviewed[idx]
         self.rev += 1
         return True
 
@@ -3522,22 +3593,8 @@ class TranscriptModel:
         self.speakers.insert(idx + 1, self.speakers[idx])
         self.ids.insert(idx + 1, self._new_id())
         self.ts_marks.insert(idx + 1, None)
-        self.reviewed.insert(idx + 1, self.reviewed[idx])
         self.rev += 1
         return idx + 1
-
-    def set_reviewed(self, idx, flag):
-        """Mark paragraph idx reviewed (approved) or not. Reviewed
-        paragraphs are protected from re-transcription."""
-        if not (0 <= idx < len(self.paragraphs)):
-            return False
-        flag = bool(flag)
-        if flag == self.reviewed[idx]:
-            return True
-        self._push_undo()
-        self.reviewed[idx] = flag
-        self.rev += 1
-        return True
 
     def set_ts_mark(self, idx, value):
         """Set paragraph idx's timestamp state: None (show the computed
@@ -3561,8 +3618,8 @@ class TranscriptModel:
         paragraphs - the re-transcribe splice. `runs` is a list of
         (lo, hi, new_paragraphs); they must be non-overlapping and in
         ascending order. Applied right-to-left so earlier indices don't
-        shift. Replacements arrive unlabelled, not reviewed, with clean
-        timestamp state. One undo step covers the whole operation."""
+        shift. Replacements arrive unlabelled with clean timestamp
+        state. One undo step covers the whole operation."""
         runs = [r for r in runs if r[2]]
         if not runs:
             return False
@@ -3577,7 +3634,6 @@ class TranscriptModel:
             self.speakers[lo:hi + 1] = [None] * k
             self.ids[lo:hi + 1] = [self._new_id() for _ in range(k)]
             self.ts_marks[lo:hi + 1] = [None] * k
-            self.reviewed[lo:hi + 1] = [False] * k
         self.rev += 1
         return True
 
@@ -5183,31 +5239,14 @@ class RetransJob:
         self.cancel_event = threading.Event()
         self.q = queue.Queue()          # engine log/progress messages
         self._done = threading.Event()  # tells the drain thread to stop
-        self._run_index = 0             # which run is transcribing now
-        # Split the selection into the maximal runs of NON-reviewed
-        # paragraphs; reviewed paragraphs are protected and act as
-        # boundaries. Each run carries its own audio span [start, end),
-        # where end is the next paragraph's start (a reviewed island or
-        # the paragraph past the selection) or None at end-of-file - so
-        # a reviewed paragraph's audio is never re-transcribed over.
+        # The whole selection is one span: [start of the first selected
+        # paragraph, start of the paragraph just past the selection),
+        # or to end-of-file when it reaches the last paragraph.
         m = session.model
-        self.runs = []          # list of [run_lo, run_hi, start, end]
-        run = None
-        for i in range(lo, hi + 1):
-            if m.reviewed[i]:
-                run = None
-                continue
-            if run is None:
-                run = [i, i]
-                self.runs.append(run)
-            else:
-                run[1] = i
-        self.spans = []
-        for run_lo, run_hi in self.runs:
-            start = float(m.paragraphs[run_lo][0][0])
-            end = (float(m.paragraphs[run_hi + 1][0][0])
-                   if run_hi + 1 < len(m.paragraphs) else None)
-            self.spans.append((run_lo, run_hi, start, end))
+        start = float(m.paragraphs[lo][0][0])
+        end = (float(m.paragraphs[hi + 1][0][0])
+               if hi + 1 < len(m.paragraphs) else None)
+        self.span = (start, end)
         threading.Thread(target=self._run, daemon=True,
                          name="transcribr-retrans").start()
 
@@ -5217,11 +5256,8 @@ class RetransJob:
             "retrans", {"state": state, "message": message, **extra})
 
     def _overall_pct(self, frac):
-        """Scale one slice's 0..1 fraction to the whole selection's
-        percentage (a selection can be several runs)."""
-        total = max(1, len(self.spans))
-        return max(0.0, min(100.0,
-                            (self._run_index + min(1.0, frac)) / total * 100))
+        """One slice's 0..1 fraction as a percentage."""
+        return max(0.0, min(100.0, min(1.0, frac) * 100))
 
     def _drain(self):
         """Forward the engine's queue to the client as it runs: log
@@ -5284,34 +5320,22 @@ class RetransJob:
                 self.backend.broker.publish("retrans", ev)
 
     def _run(self):
-        if not self.spans:
-            self._publish(
-                "failed",
-                "Every selected paragraph is marked reviewed - nothing "
-                "was re-transcribed. Un-review a paragraph to include it.")
-            return
         drain = threading.Thread(target=self._drain, daemon=True,
                                  name="transcribr-retrans-log")
         drain.start()
         try:
             self._publish("running", "Re-transcribing the selection…",
                           pct=0.0, indeterminate=True)
-            results = []        # (run_lo, run_hi, segments)
-            for i, (run_lo, run_hi, start, end) in enumerate(self.spans):
-                self._run_index = i
-                segments = retranscribe_slice(
-                    self.session.audio_path, start, end,
-                    self.settings, self.q, self.cancel_event)
-                results.append((run_lo, run_hi, segments))
+            start, end = self.span
+            segments = retranscribe_slice(
+                self.session.audio_path, start, end,
+                self.settings, self.q, self.cancel_event)
             self.session.apply_retranscribe(
-                self.rev, results, self.settings["gap"])
-            selected = self.hi - self.lo + 1
-            covered = sum(hi - lo + 1 for lo, hi in self.runs)
-            note = (" Reviewed paragraphs were kept."
-                    if covered < selected else "")
+                self.rev, [(self.lo, self.hi, segments)],
+                self.settings["gap"])
             self._publish("done",
                           "Done - the selection was replaced (undo "
-                          "reverses it)." + note, pct=100.0)
+                          "reverses it).", pct=100.0)
         except _CancelledByUser:
             self._publish("cancelled", "Re-transcription stopped.")
         except _EngineNotAvailable as e:
@@ -5511,7 +5535,6 @@ def autosave_restore_info(data):
         "preset_speakers": data.get("speakers") or [],
         "preset_speaker_names": data.get("speaker_names") or {},
         "preset_ts_marks": data.get("ts_marks") or [],
-        "preset_reviewed": data.get("reviewed") or [],
     }
 
 
@@ -5548,7 +5571,6 @@ class ReviewSession:
             speaker_names=info.get("preset_speaker_names") or None,
             word_conf=info.get("word_conf"),
             ts_marks=info.get("preset_ts_marks") or None,
-            reviewed=info.get("preset_reviewed") or None,
             on_autosave=self._write_autosave,
         )
         # Reveal enough name fields to cover preset slots (parity with
@@ -5599,6 +5621,7 @@ class ReviewSession:
         with self.lock:
             m = self.model
             conf = m.confidence_spans()
+            suspect = set(detect_hallucinations(m.paragraphs))
             paragraphs = []
             for i, para in enumerate(m.paragraphs):
                 span = m.playback_span(i)
@@ -5615,7 +5638,7 @@ class ReviewSession:
                     "body": m.body(i),
                     "speaker": m.speakers[i],
                     "ts": m.ts_marks[i],
-                    "reviewed": m.reviewed[i],
+                    "suspect": i in suspect,
                     "play": play,
                     "conf": [list(s) for s in conf[i]],
                 })
@@ -5696,11 +5719,6 @@ class ReviewSession:
                     raise ApiFail(400, "bad_request",
                                   "Bad index or timestamp value.")
                 result = self.payload()
-            elif action == "reviewed":
-                if not m.set_reviewed(int(body.get("index", -1)),
-                                      bool(body.get("value"))):
-                    raise ApiFail(400, "bad_request", "Bad index.")
-                result = self.payload()
             elif action == "replace-all":
                 count = m.replace_all(str(body.get("find", "")),
                                       str(body.get("replace", "")),
@@ -5720,7 +5738,7 @@ class ReviewSession:
 
     def apply_retranscribe(self, rev, results, gap):
         """Splice re-transcribed segments back into the model. `results`
-        is a list of (lo, hi, segments) for each non-reviewed run, each
+        is a list of (lo, hi, segments) runs to splice, each
         paragraphified with the current gap threshold, applied as one
         undo step. A run whose audio yields no speech is left unchanged
         rather than deleted. Returns the number of runs actually
@@ -5770,7 +5788,6 @@ class ReviewSession:
             "speakers": list(speakers),
             "speaker_names": names,
             "ts_marks": list(self.model.ts_marks),
-            "reviewed": list(self.model.reviewed),
             "saved_at": time.time(),
         })
         self.broker.publish("autosave", {"saved_at": time.time()})

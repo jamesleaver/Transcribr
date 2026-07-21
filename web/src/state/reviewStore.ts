@@ -25,8 +25,8 @@ export interface ReviewParagraph {
   /** Timestamp state: null = computed time, "hidden", or an amended
    *  time in seconds. */
   ts: "hidden" | number | null;
-  /** Human-approved: protected from the re-transcribe feature. */
-  reviewed: boolean;
+  /** Looks like engine hallucination (repeated/looping text). */
+  suspect: boolean;
   play: { start: number; end: number | null } | null;
   conf: [number, number, "low" | "med"][];
 }
@@ -130,8 +130,8 @@ interface ReviewSlice {
 
   setSpeaker: (index: number, slot: string | null) => Promise<void>;
   setTimestamp: (index: number, value: "hidden" | number | null) => Promise<void>;
-  setReviewed: (index: number, value: boolean) => Promise<void>;
   selectRangeTo: (index: number) => void;
+  jumpNextSuspect: () => void;
   retranscribe: (model: string, condition: boolean) => Promise<void>;
   cancelRetranscribe: () => Promise<void>;
   applyRetrans: (d: {
@@ -485,6 +485,31 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     }
   },
 
+  jumpNextSuspect: () => {
+    const s = get();
+    const paras = s.doc?.paragraphs ?? [];
+    const n = paras.length;
+    if (n === 0) return;
+    // Find the next suspect paragraph after the current selection,
+    // then select the whole contiguous suspect run so one
+    // re-transcription covers it. Wraps around.
+    const anchor = (s.selRange?.to ?? s.selected) + 1;
+    for (let off = 0; off < n; off++) {
+      const i = (anchor + off) % n;
+      if (paras[i].suspect) {
+        let lo = i;
+        let hi = i;
+        while (lo > 0 && paras[lo - 1].suspect) lo -= 1;
+        while (hi < n - 1 && paras[hi + 1].suspect) hi += 1;
+        set({
+          selected: lo,
+          selRange: lo === hi ? null : { from: lo, to: hi },
+        });
+        return;
+      }
+    }
+  },
+
   findNext: () => {
     const s = get();
     const doc = s.doc;
@@ -523,10 +548,6 @@ export const useReview = create<ReviewSlice>((set, get) => ({
 
   setTimestamp: async (index, value) => {
     applyResult(await mutateApi("timestamp", { index, value }));
-  },
-
-  setReviewed: async (index, value) => {
-    applyResult(await mutateApi("reviewed", { index, value }));
   },
 
   setSpeaker: async (index, slot) => {
