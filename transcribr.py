@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -318,8 +318,10 @@ def _recent_file():
 
 
 def _recent_load():
-    """Return the list of recent transcript paths, most-recent first.
-    Best-effort; returns [] on any read/parse error."""
+    """Return the recent-transcript entries, most-recent first, each a
+    dict {"path", "reviewed", "verified"}. Pre-0.9.5 files stored bare
+    path strings - they are upgraded on read. Best-effort; returns []
+    on any read/parse error."""
     try:
         import json
         path = _recent_file()
@@ -327,31 +329,57 @@ def _recent_load():
             return []
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
+        out = []
         if isinstance(data, list):
-            return [str(p) for p in data if isinstance(p, str)]
+            for item in data:
+                if isinstance(item, str):
+                    out.append({"path": item, "reviewed": False,
+                                "verified": False})
+                elif isinstance(item, dict) and item.get("path"):
+                    out.append({"path": str(item["path"]),
+                                "reviewed": bool(item.get("reviewed")),
+                                "verified": bool(item.get("verified"))})
+        return out
     except Exception:
         pass
     return []
 
 
-def _recent_save(paths):
+def _recent_save(items):
     try:
         import json
+        norm = []
+        for item in items:
+            if isinstance(item, str):
+                item = {"path": item, "reviewed": False,
+                        "verified": False}
+            norm.append(item)
         with open(_recent_file(), "w", encoding="utf-8") as fh:
-            json.dump(list(paths)[:_RECENT_MAX], fh, indent=2)
+            json.dump(norm[:_RECENT_MAX], fh, indent=2)
     except Exception as e:
         _log(f"Could not write recent.json: {e}")
 
 
-def _recent_add(path):
-    """Move `path` to the front of the recent list (deduping). No-op on error."""
+def _recent_add(path, reviewed=None, verified=None):
+    """Move `path` to the front of the recent list (deduping). The
+    reviewed/verified flags update the entry when given; None keeps
+    whatever the entry already says (e.g. merely re-opening a reviewed
+    transcript doesn't clear its badge). No-op on error."""
     try:
         path = str(Path(path).resolve())
     except Exception:
         path = str(path)
     items = _recent_load()
-    items = [p for p in items if p != path]
-    items.insert(0, path)
+    prior = next((i for i in items if i["path"] == path), None)
+    entry = {
+        "path": path,
+        "reviewed": (bool(reviewed) if reviewed is not None
+                     else bool(prior and prior["reviewed"])),
+        "verified": (bool(verified) if verified is not None
+                     else bool(prior and prior["verified"])),
+    }
+    items = [i for i in items if i["path"] != path]
+    items.insert(0, entry)
     _recent_save(items)
 
 
@@ -912,7 +940,8 @@ def _disclaimer_text(verified_by=None) -> str:
             "have been checked by a human.")
 
 
-def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str:
+def render(paragraphs, *, show_timestamp=True, title=None, speakers=None,
+           hide_ts=None) -> str:
     """Render paragraphs to plain text.
 
     `speakers`, if given, is a list parallel to `paragraphs` where each
@@ -941,7 +970,8 @@ def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str
             # Emit an explicit marker so re-parsing this file doesn't carry
             # the previous speaker over.
             block_lines.append(f"{UNATTRIBUTED_LABEL}:")
-        if show_timestamp:
+        hidden = bool(hide_ts and i < len(hide_ts) and hide_ts[i])
+        if show_timestamp and not hidden:
             block_lines.append(f"{format_timestamp(start)}  {body}")
         else:
             block_lines.append(body)
@@ -954,7 +984,7 @@ def render(paragraphs, *, show_timestamp=True, title=None, speakers=None) -> str
 def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
                               title=None, output_format="txt",
                               speakers=None, verified_by=None,
-                              audio_path=None):
+                              audio_path=None, hide_ts=None):
     """Single entry point for writing transcript output.
 
     Centralises the txt-vs-docx-vs-pdf switch so the worker (direct-write
@@ -974,7 +1004,7 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
             _write_docx(paragraphs, out_path,
                         show_timestamp=show_timestamp, title=title,
                         speakers=speakers, verified_by=verified_by,
-                        audio_path=audio_path)
+                        audio_path=audio_path, hide_ts=hide_ts)
         except ImportError:
             raise ImportError(
                 "Cannot write .docx: the 'python-docx' package is not "
@@ -984,7 +1014,8 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
         try:
             _write_pdf(paragraphs, out_path,
                        show_timestamp=show_timestamp, title=title,
-                       speakers=speakers, verified_by=verified_by)
+                       speakers=speakers, verified_by=verified_by,
+                       hide_ts=hide_ts)
         except ImportError:
             raise ImportError(
                 "Cannot write .pdf: the 'reportlab' package is not "
@@ -992,7 +1023,7 @@ def write_paragraphs_to_file(paragraphs, out_path, *, show_timestamp=True,
                 "Or pick the .txt or .docx format instead.")
     else:
         text = render(paragraphs, show_timestamp=show_timestamp,
-                      title=title, speakers=speakers)
+                      title=title, speakers=speakers, hide_ts=hide_ts)
         out_path.write_text(
             text + "\n" + _disclaimer_text(verified_by) + "\n",
             encoding="utf-8",
@@ -1108,6 +1139,7 @@ def _parse_txt_transcript(path):
     title = None
     paragraphs = []
     speakers = []
+    ts_hidden = []
     current_speaker = None
     saw_timestamp = False  # tracks whether we ever saw [MM:SS]
 
@@ -1150,13 +1182,17 @@ def _parse_txt_transcript(path):
             start_t = ts
             lines[0] = after_ts.lstrip()
         else:
-            start_t = 0.0
+            # No stamp on this paragraph: carry the previous start
+            # forward so playback lands nearby. If the file has stamps
+            # elsewhere, the missing one was hidden on purpose.
+            start_t = (paragraphs[-1][0][0] if paragraphs else 0.0)
         body = " ".join(line.strip() for line in lines if line.strip())
         if not body:
             continue
         # Synthesise a single segment for this paragraph.
         paragraphs.append([(start_t, start_t + 1.0, body)])
         speakers.append(current_speaker)
+        ts_hidden.append(ts is None)
 
     if not paragraphs:
         raise TranscriptParseError(
@@ -1168,6 +1204,7 @@ def _parse_txt_transcript(path):
         "speakers": speakers,
         "title": title,
         "show_timestamp": saw_timestamp,
+        "ts_hidden": ts_hidden,
     }
 
 
@@ -1201,6 +1238,7 @@ def _parse_docx_transcript(path):
     speakers = []
     current_speaker = None
     saw_timestamp = False
+    ts_hidden = []
 
     docx_paragraphs = list(doc.paragraphs)
     if not docx_paragraphs:
@@ -1251,12 +1289,15 @@ def _parse_docx_transcript(path):
             start_t = ts
             body = after_ts.strip()
         else:
-            start_t = 0.0
+            # Deliberately hidden stamp (or stamp-less output): carry
+            # the previous start forward so playback lands nearby.
+            start_t = (paragraphs[-1][0][0] if paragraphs else 0.0)
             body = body_text.strip()
         if not body:
             continue
         paragraphs.append([(start_t, start_t + 1.0, body)])
         speakers.append(current_speaker)
+        ts_hidden.append(ts is None)
 
     if not paragraphs:
         raise TranscriptParseError(
@@ -1289,6 +1330,7 @@ def _parse_docx_transcript(path):
         "speakers": speakers,
         "title": title,
         "show_timestamp": saw_timestamp,
+        "ts_hidden": ts_hidden,
         "audio_path": embedded_audio,
         "audio_path_rel": embedded_audio_rel,
         "verified_by": embedded_verified,
@@ -2628,7 +2670,8 @@ def _run_mlx_whisper(params, q, cancel_event):
 
 
 def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
-                speakers=None, verified_by=None, audio_path=None):
+                speakers=None, verified_by=None, audio_path=None,
+                hide_ts=None):
     """Write paragraphs to a .docx file with a page-numbered footer and an
     italic disclaimer at the end.
 
@@ -2721,7 +2764,8 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
         last_speaker = speaker
 
         p = doc.add_paragraph(style="Transcript")
-        if show_timestamp:
+        hidden = bool(hide_ts and i < len(hide_ts) and hide_ts[i])
+        if show_timestamp and not hidden:
             p.add_run(format_timestamp(start) + "\t" + body)
         else:
             p.add_run(body)
@@ -2800,7 +2844,7 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
 
 
 def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
-               speakers=None, verified_by=None):
+               speakers=None, verified_by=None, hide_ts=None):
     """Write paragraphs to an A4 PDF, visually matching the .docx output:
     Courier body with a hanging timestamp indent, bold speaker labels that
     stay with their paragraph, an italic disclaimer, and a right-aligned
@@ -2886,7 +2930,8 @@ def _write_pdf(paragraphs, out_path, *, show_timestamp=True, title=None,
             story.append(Paragraph(escape(UNATTRIBUTED_LABEL), label_style))
         last_speaker = speaker
 
-        if show_timestamp:
+        hidden = bool(hide_ts and i < len(hide_ts) and hide_ts[i])
+        if show_timestamp and not hidden:
             # Pad the timestamp to the indent column with non-breaking
             # spaces so the first line's body starts exactly where the
             # wrapped lines are indented to (the .docx reaches the same
@@ -3076,7 +3121,8 @@ class TranscriptModel:
     _UNDO_LIMIT = 200
 
     def __init__(self, paragraphs, speakers=None, speaker_names=None,
-                 word_conf=None, *, on_autosave=None, timer_factory=None):
+                 word_conf=None, ts_marks=None, reviewed=None, *,
+                 on_autosave=None, timer_factory=None):
         self.paragraphs = [list(p) for p in paragraphs]
         n = len(self.paragraphs)
         self.speakers = (list(speakers) if speakers is not None
@@ -3093,6 +3139,20 @@ class TranscriptModel:
                                         self.MAX_SPEAKERS))
         self._next_id = 0
         self.ids = [self._new_id() for _ in self.paragraphs]
+        # Per-paragraph timestamp state: None = show the computed time,
+        # "hidden" = omit the stamp in saved output, a number = show
+        # that time instead (an editorial correction; playback keeps
+        # using the real segment times).
+        self.ts_marks = list(ts_marks) if ts_marks else [None] * n
+        while len(self.ts_marks) < n:
+            self.ts_marks.append(None)
+        # Per-paragraph "reviewed" flag: paragraphs the human has
+        # approved. The re-transcribe feature treats these as protected
+        # islands and never overwrites them.
+        self.reviewed = ([bool(x) for x in reviewed] if reviewed
+                         else [False] * n)
+        while len(self.reviewed) < n:
+            self.reviewed.append(False)
         self.rev = 0
         self._undo_stack = []
         self._redo_stack = []
@@ -3250,6 +3310,8 @@ class TranscriptModel:
             "speaker_names": dict(self.speaker_names),
             "visible_speakers": self.visible_speakers,
             "ids": list(self.ids),
+            "ts_marks": list(self.ts_marks),
+            "reviewed": list(self.reviewed),
         }
 
     def _restore(self, snap):
@@ -3258,6 +3320,8 @@ class TranscriptModel:
         self.speaker_names = dict(snap["speaker_names"])
         self.visible_speakers = snap["visible_speakers"]
         self.ids = list(snap["ids"])
+        self.ts_marks = list(snap["ts_marks"])
+        self.reviewed = list(snap["reviewed"])
 
     def _push_undo(self):
         self._undo_stack.append(self._snapshot())
@@ -3379,6 +3443,8 @@ class TranscriptModel:
         del self.paragraphs[idx]
         del self.speakers[idx]
         del self.ids[idx]
+        del self.ts_marks[idx]
+        del self.reviewed[idx]
         self.rev += 1
         return True
 
@@ -3455,8 +3521,65 @@ class TranscriptModel:
         self.paragraphs.insert(idx + 1, second)
         self.speakers.insert(idx + 1, self.speakers[idx])
         self.ids.insert(idx + 1, self._new_id())
+        self.ts_marks.insert(idx + 1, None)
+        self.reviewed.insert(idx + 1, self.reviewed[idx])
         self.rev += 1
         return idx + 1
+
+    def set_reviewed(self, idx, flag):
+        """Mark paragraph idx reviewed (approved) or not. Reviewed
+        paragraphs are protected from re-transcription."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return False
+        flag = bool(flag)
+        if flag == self.reviewed[idx]:
+            return True
+        self._push_undo()
+        self.reviewed[idx] = flag
+        self.rev += 1
+        return True
+
+    def set_ts_mark(self, idx, value):
+        """Set paragraph idx's timestamp state: None (show the computed
+        time), "hidden", or a number of seconds to show instead."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return False
+        if value is not None and value != "hidden":
+            try:
+                value = max(0.0, float(value))
+            except (TypeError, ValueError):
+                return False
+        if value == self.ts_marks[idx]:
+            return True
+        self._push_undo()
+        self.ts_marks[idx] = value
+        self.rev += 1
+        return True
+
+    def replace_runs(self, runs):
+        """Atomically replace several disjoint paragraph runs with fresh
+        paragraphs - the re-transcribe splice. `runs` is a list of
+        (lo, hi, new_paragraphs); they must be non-overlapping and in
+        ascending order. Applied right-to-left so earlier indices don't
+        shift. Replacements arrive unlabelled, not reviewed, with clean
+        timestamp state. One undo step covers the whole operation."""
+        runs = [r for r in runs if r[2]]
+        if not runs:
+            return False
+        n = len(self.paragraphs)
+        for lo, hi, _ in runs:
+            if not (0 <= lo <= hi < n):
+                return False
+        self._push_undo()
+        for lo, hi, new_paragraphs in sorted(runs, reverse=True):
+            k = len(new_paragraphs)
+            self.paragraphs[lo:hi + 1] = [list(p) for p in new_paragraphs]
+            self.speakers[lo:hi + 1] = [None] * k
+            self.ids[lo:hi + 1] = [self._new_id() for _ in range(k)]
+            self.ts_marks[lo:hi + 1] = [None] * k
+            self.reviewed[lo:hi + 1] = [False] * k
+        self.rev += 1
+        return True
 
     def replace_all(self, term, replacement, match_case=False):
         """Replace every occurrence across the document. One undo step;
@@ -4121,7 +4244,7 @@ class RunController:
         self.broker.publish("progress", self.progress)
         self._append_log("\n=== Done ===\n")
         if output_path and Path(output_path).exists():
-            _recent_add(output_path)
+            _recent_add(output_path, reviewed=False, verified=False)
             self.broker.publish("recents", {})
         self._publish_run_state()
 
@@ -4155,7 +4278,8 @@ class RunController:
         else:
             b["succeeded"].append(output_path)
             if output_path and Path(output_path).exists():
-                _recent_add(output_path)
+                _recent_add(output_path, reviewed=False,
+                            verified=False)
                 self.broker.publish("recents", {})
         if b["stop"]:
             self._finish_batch(stopped=True)
@@ -4991,6 +5115,145 @@ def _extract_audio_m4a_pyav(src, target):
                 out_container.mux(pkt)
 
 
+def retranscribe_slice(audio_path, start, end, settings, q, cancel_event):
+    """Transcribe just [start, end) seconds of `audio_path` with the
+    given settings dict (already carrying any model / conditioning
+    overrides). The slice is written to a temporary 16 kHz wav so every
+    engine handles it identically. Returns segment tuples offset back
+    to absolute times in the source recording."""
+    audio = decode_audio_16k(audio_path)
+    if audio is None:
+        raise RuntimeError(
+            "The source audio could not be decoded for re-transcription "
+            "(the 'av' package is required).")
+    lo = max(0, int(float(start) * AUDIO_SAMPLE_RATE))
+    hi = (len(audio) if end is None
+          else max(lo, min(len(audio), int(float(end) * AUDIO_SAMPLE_RATE))))
+    piece = audio[lo:hi]
+    if len(piece) < AUDIO_SAMPLE_RATE // 2:
+        raise RuntimeError("That section is too short to re-transcribe.")
+    import tempfile
+    import wave
+    import numpy as np
+    fd, tmp = tempfile.mkstemp(prefix="transcribr-retrans-",
+                               suffix=".wav")
+    os.close(fd)
+    try:
+        with wave.open(tmp, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(AUDIO_SAMPLE_RATE)
+            ints = np.clip(np.asarray(piece, dtype="float32") * 32767.0,
+                           -32768, 32767).astype("<i2")
+            w.writeframes(ints.tobytes())
+        params = build_worker_params(settings, tmp, tmp + ".out.txt",
+                                     review_before_save=False)
+        params["_audio"] = piece
+        runner = {
+            "whisper": _run_openai_whisper,
+            "faster": _run_faster_whisper,
+            "mlx": _run_mlx_whisper,
+        }.get(params.get("engine"), _run_faster_whisper)
+        segments, _result, _partial = runner(params, q, cancel_event)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    off = lo / float(AUDIO_SAMPLE_RATE)
+    return [(float(seg[0]) + off, float(seg[1]) + off, seg[2])
+            for seg in segments]
+
+
+class RetransJob:
+    """One selection re-transcription on a background thread, reporting
+    "retrans" SSE events: running -> done | failed | cancelled. The
+    result is applied to the session only if the client's revision is
+    still current, so edits made meanwhile are never clobbered."""
+
+    def __init__(self, backend, session, settings, rev, lo, hi):
+        self.backend = backend
+        self.session = session
+        self.settings = settings
+        self.rev = rev
+        self.lo = lo
+        self.hi = hi
+        self.state = "running"
+        self.cancel_event = threading.Event()
+        # Split the selection into the maximal runs of NON-reviewed
+        # paragraphs; reviewed paragraphs are protected and act as
+        # boundaries. Each run carries its own audio span [start, end),
+        # where end is the next paragraph's start (a reviewed island or
+        # the paragraph past the selection) or None at end-of-file - so
+        # a reviewed paragraph's audio is never re-transcribed over.
+        m = session.model
+        self.runs = []          # list of [run_lo, run_hi, start, end]
+        run = None
+        for i in range(lo, hi + 1):
+            if m.reviewed[i]:
+                run = None
+                continue
+            if run is None:
+                run = [i, i]
+                self.runs.append(run)
+            else:
+                run[1] = i
+        self.spans = []
+        for run_lo, run_hi in self.runs:
+            start = float(m.paragraphs[run_lo][0][0])
+            end = (float(m.paragraphs[run_hi + 1][0][0])
+                   if run_hi + 1 < len(m.paragraphs) else None)
+            self.spans.append((run_lo, run_hi, start, end))
+        threading.Thread(target=self._run, daemon=True,
+                         name="transcribr-retrans").start()
+
+    def _publish(self, state, message=""):
+        self.state = state
+        self.backend.broker.publish(
+            "retrans", {"state": state, "message": message})
+
+    def _run(self):
+        q = queue.Queue()   # engine log lines; only failures surface
+        try:
+            if not self.spans:
+                self._publish(
+                    "failed",
+                    "Every selected paragraph is marked reviewed - "
+                    "nothing was re-transcribed. Un-review a paragraph "
+                    "to include it.")
+                return
+            self._publish("running", "Re-transcribing the selection…")
+            results = []        # (run_lo, run_hi, segments)
+            for run_lo, run_hi, start, end in self.spans:
+                segments = retranscribe_slice(
+                    self.session.audio_path, start, end,
+                    self.settings, q, self.cancel_event)
+                results.append((run_lo, run_hi, segments))
+            self.session.apply_retranscribe(
+                self.rev, results, self.settings["gap"])
+            selected = self.hi - self.lo + 1
+            covered = sum(hi - lo + 1 for lo, hi in self.runs)
+            note = (" Reviewed paragraphs were kept."
+                    if covered < selected else "")
+            self._publish("done",
+                          "Done - the selection was replaced (undo "
+                          "reverses it)." + note)
+        except _CancelledByUser:
+            self._publish("cancelled", "Re-transcription stopped.")
+        except _EngineNotAvailable as e:
+            self._publish("failed", str(e))
+        except ApiFail as e:
+            if e.code == "stale_rev":
+                self._publish("failed",
+                              "The transcript changed while the engine "
+                              "ran - nothing was replaced. Try again.")
+            else:
+                self._publish("failed", str(e))
+        except Exception as e:
+            _log("retranscribe failed:\n" + traceback.format_exc())
+            self._publish("failed", f"{type(e).__name__}: {e}")
+
+
 class AudioPrep:
     """Prepares one review session's audio for the <audio> element on a
     background thread, reporting progress as audio_status SSE events.
@@ -5133,6 +5396,9 @@ def open_transcript_info(path):
         "extra_formats": [],
         "preset_speakers": preset_speakers,
         "preset_speaker_names": preset_speaker_names,
+        "preset_ts_marks": (
+            ["hidden" if h else None for h in parsed.get("ts_hidden") or []]
+            if parsed.get("show_timestamp") else []),
         "verified_by": parsed.get("verified_by"),
         "loaded": True,
         # Prefer the audio location embedded in the .docx metadata
@@ -5168,6 +5434,8 @@ def autosave_restore_info(data):
         "audio_path": data.get("audio_path"),
         "preset_speakers": data.get("speakers") or [],
         "preset_speaker_names": data.get("speaker_names") or {},
+        "preset_ts_marks": data.get("ts_marks") or [],
+        "preset_reviewed": data.get("reviewed") or [],
     }
 
 
@@ -5203,6 +5471,8 @@ class ReviewSession:
             speakers=preset_speakers,
             speaker_names=info.get("preset_speaker_names") or None,
             word_conf=info.get("word_conf"),
+            ts_marks=info.get("preset_ts_marks") or None,
+            reviewed=info.get("preset_reviewed") or None,
             on_autosave=self._write_autosave,
         )
         # Reveal enough name fields to cover preset slots (parity with
@@ -5268,6 +5538,8 @@ class ReviewSession:
                     "end": para[-1][1] if para else 0.0,
                     "body": m.body(i),
                     "speaker": m.speakers[i],
+                    "ts": m.ts_marks[i],
+                    "reviewed": m.reviewed[i],
                     "play": play,
                     "conf": [list(s) for s in conf[i]],
                 })
@@ -5342,6 +5614,17 @@ class ReviewSession:
                     raise ApiFail(400, "bad_request",
                                   "Can't merge the first paragraph.")
                 result = self.payload()
+            elif action == "timestamp":
+                if not m.set_ts_mark(int(body.get("index", -1)),
+                                     body.get("value")):
+                    raise ApiFail(400, "bad_request",
+                                  "Bad index or timestamp value.")
+                result = self.payload()
+            elif action == "reviewed":
+                if not m.set_reviewed(int(body.get("index", -1)),
+                                      bool(body.get("value"))):
+                    raise ApiFail(400, "bad_request", "Bad index.")
+                result = self.payload()
             elif action == "replace-all":
                 count = m.replace_all(str(body.get("find", "")),
                                       str(body.get("replace", "")),
@@ -5358,6 +5641,33 @@ class ReviewSession:
                 raise ApiFail(404, "unknown_action", action)
             self.broker.publish("review_changed", {"rev": m.rev})
             return result
+
+    def apply_retranscribe(self, rev, results, gap):
+        """Splice re-transcribed segments back into the model. `results`
+        is a list of (lo, hi, segments) for each non-reviewed run, each
+        paragraphified with the current gap threshold, applied as one
+        undo step. A run whose audio yields no speech is left unchanged
+        rather than deleted. Returns the number of runs actually
+        replaced. Refused when the session moved on or closed."""
+        with self.lock:
+            if self.closed:
+                raise ApiFail(409, "closed", "The review has closed.")
+            self._check_rev(rev)
+            runs = []
+            for lo, hi, segments in results:
+                paras = paragraphify(segments, gap)
+                if paras:
+                    runs.append((lo, hi, paras))
+            if not runs:
+                raise ApiFail(
+                    422, "no_speech",
+                    "No speech was detected in the selected audio - the "
+                    "original paragraphs were left unchanged.")
+            if not self.model.replace_runs(runs):
+                raise ApiFail(400, "bad_request", "Bad paragraph range.")
+            self.broker.publish("review_changed",
+                                {"rev": self.model.rev})
+            return len(runs)
 
     # ----- Autosave -------------------------------------------------------
 
@@ -5383,23 +5693,45 @@ class ReviewSession:
                            for para in paragraphs],
             "speakers": list(speakers),
             "speaker_names": names,
+            "ts_marks": list(self.model.ts_marks),
+            "reviewed": list(self.model.reviewed),
             "saved_at": time.time(),
         })
         self.broker.publish("autosave", {"saved_at": time.time()})
 
     # ----- Save / close ----------------------------------------------------
 
+    def _paragraphs_for_writing(self):
+        """Apply the per-paragraph timestamp marks for output: amended
+        times replace the first segment's start (that is what every
+        writer prints), and the hidden list tells the writers which
+        stamps to omit."""
+        m = self.model
+        paras = []
+        hidden = []
+        for i, para in enumerate(m.paragraphs):
+            mark = (m.ts_marks[i] if i < len(m.ts_marks) else None)
+            hidden.append(mark == "hidden")
+            if isinstance(mark, (int, float)) and para:
+                first = para[0]
+                para = ([(float(mark), first[1], first[2])]
+                        + list(para[1:]))
+            paras.append(list(para))
+        return paras, hidden
+
     def _write(self, out_path, speakers, *, output_format=None,
                verified_by=None):
         try:
+            paragraphs, hide_ts = self._paragraphs_for_writing()
             write_paragraphs_to_file(
-                self.model.paragraphs, Path(out_path),
+                paragraphs, Path(out_path),
                 show_timestamp=self.show_timestamp,
                 title=self.title,
                 output_format=output_format or self.output_format,
                 speakers=speakers,
                 verified_by=verified_by,
                 audio_path=self.audio_path,
+                hide_ts=hide_ts,
             )
         except ImportError as e:
             raise ApiFail(500, "missing_dependency", str(e))
@@ -5434,7 +5766,8 @@ class ReviewSession:
                         output_format=fmt,
                         verified_by=self.verified_by)
             self._log_line(f"Exported: {export_path}\n")
-            _recent_add(export_path)
+            _recent_add(export_path, reviewed=True,
+                        verified=bool(self.verified_by))
             self.broker.publish("recents", {})
             return export_path
 
@@ -5528,7 +5861,8 @@ class ReviewSession:
         self.model.close()
         _autosave_clear()
         if out_path:
-            _recent_add(out_path)
+            _recent_add(out_path, reviewed=True,
+                        verified=bool(self.verified_by))
             self.broker.publish("recents", {})
         self.broker.publish("review_closed",
                             {"reason": reason, "out_path": out_path})
@@ -5561,6 +5895,7 @@ class WebBackend:
         self.controller.model_busy_check = self.models.is_busy
         self.review = None        # the open ReviewSession, if any
         self.audio = None         # AudioPrep for the open session
+        self.retrans = None       # RetransJob for the open session
         self.window = None        # pywebview window (web mode only)
         self.server = None        # set by serve()
         self.has_window = False   # True once a pywebview window owns us
@@ -5696,14 +6031,17 @@ class WebBackend:
 
         def _recents_payload():
             recents = []
-            for p in _recent_load():
+            for item in _recent_load():
+                p = item["path"]
                 try:
                     exists = Path(p).exists()
                 except OSError:
                     exists = False
                 if exists:
                     recents.append({"path": p, "name": Path(p).name,
-                                    "exists": True})
+                                    "exists": True,
+                                    "reviewed": item["reviewed"],
+                                    "verified": item["verified"]})
             return recents
 
         @app.get("/api/state")
@@ -5752,6 +6090,52 @@ class WebBackend:
             backend.controller._append_log(
                 f"\nLoaded transcript from: {path}\n")
             return {"review": session.payload()}
+
+        @app.post("/api/review/retranscribe")
+        def api_review_retranscribe():
+            body = bottle.request.json or {}
+            try:
+                session = backend._live_review()
+                job = backend.retrans
+                if job is not None and job.state == "running":
+                    raise ApiFail(409, "busy",
+                                  "A re-transcription is already "
+                                  "running.")
+                audio = session.audio_path
+                if not audio or not Path(audio).exists():
+                    raise ApiFail(
+                        400, "no_audio",
+                        "The source recording for this transcript "
+                        "isn't known, so the section can't be re-run. "
+                        "Use 'Locate audio…' on the Playback card "
+                        "first.")
+                lo = int(body.get("from", -1))
+                hi = int(body.get("to", lo))
+                with session.lock:
+                    if not (0 <= lo <= hi
+                            < len(session.model.paragraphs)):
+                        raise ApiFail(400, "bad_request",
+                                      "Bad paragraph range.")
+                    rev = int(body.get("rev", -1))
+                    session._check_rev(rev)
+                settings = dict(current_settings())
+                model = str(body.get("model") or "").strip()
+                if model:
+                    settings["model"] = model
+                settings["condition_on_previous_text"] = bool(
+                    body.get("condition"))
+                backend.retrans = RetransJob(backend, session,
+                                             settings, rev, lo, hi)
+            except ApiFail as e:
+                _fail(e)
+            return {"ok": True}
+
+        @app.post("/api/review/retranscribe/cancel")
+        def api_review_retranscribe_cancel():
+            job = backend.retrans
+            if job is not None:
+                job.cancel_event.set()
+            return {"ok": True}
 
         @app.post("/api/review/export")
         def api_review_export():

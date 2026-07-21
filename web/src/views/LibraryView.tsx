@@ -80,7 +80,18 @@ export default function LibraryView() {
                 title={`Open for review: ${r.path}`}
                 onClick={() => void openForReview(r.path)}
               >
-                {r.name}
+                <span className="flex items-center gap-2">
+                  <span className="truncate">{r.name}</span>
+                  {r.verified ? (
+                    <span className="shrink-0 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                      Verified
+                    </span>
+                  ) : r.reviewed ? (
+                    <span className="shrink-0 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-semibold text-accent">
+                      Reviewed
+                    </span>
+                  ) : null}
+                </span>
                 <span className="mt-0.5 block truncate text-xs font-normal text-muted">
                   {r.path}
                 </span>

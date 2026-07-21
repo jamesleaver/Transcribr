@@ -14,6 +14,11 @@ export interface ReviewParagraph {
   end: number;
   body: string;
   speaker: string | null;
+  /** Timestamp state: null = computed time, "hidden", or an amended
+   *  time in seconds. */
+  ts: "hidden" | number | null;
+  /** Human-approved: protected from the re-transcribe feature. */
+  reviewed: boolean;
   play: { start: number; end: number | null } | null;
   conf: [number, number, "low" | "med"][];
 }
@@ -99,6 +104,9 @@ interface ReviewSlice {
   setSaveShowTimestamp: (value: boolean) => void;
   /** Certifier name for the "verified by" disclaimer; empty = unverified. */
   verifyName: string;
+  /** Shift-click range selection for section-level actions. */
+  selRange: { from: number; to: number } | null;
+  retrans: { running: boolean; message: string };
   setVerifyName: (value: string) => void;
   exportAs: (fmt: "pdf") => Promise<void>;
 
@@ -107,6 +115,12 @@ interface ReviewSlice {
   findNext: () => void;
 
   setSpeaker: (index: number, slot: string | null) => Promise<void>;
+  setTimestamp: (index: number, value: "hidden" | number | null) => Promise<void>;
+  setReviewed: (index: number, value: boolean) => Promise<void>;
+  selectRangeTo: (index: number) => void;
+  retranscribe: (model: string, condition: boolean) => Promise<void>;
+  cancelRetranscribe: () => Promise<void>;
+  applyRetrans: (d: { state: string; message: string }) => void;
   setSpeakerName: (slot: string, name: string) => Promise<void>;
   addSpeaker: () => Promise<void>;
   commitEdit: (index: number, text: string) => Promise<void>;
@@ -204,6 +218,8 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       showConfidence: payload.has_word_conf,
       saveShowTimestamp: null,
       verifyName: payload.verified_by ?? "",
+      selRange: null,
+      retrans: { running: false, message: "" },
     }),
 
   closeDoc: () => {
@@ -219,6 +235,65 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   setSaveShowTimestamp: (value) => set({ saveShowTimestamp: value }),
   verifyName: "",
   setVerifyName: (value) => set({ verifyName: value }),
+
+  selRange: null,
+  retrans: { running: false, message: "" },
+
+  selectRangeTo: (index) =>
+    set((s) => {
+      const n = s.doc?.paragraphs.length ?? 0;
+      if (n === 0) return {};
+      const anchor = s.selRange
+        ? s.selRange.from === clamp(index, n)
+          ? s.selRange.to
+          : s.selRange.from
+        : s.selected;
+      const i = clamp(index, n);
+      return {
+        selRange: { from: Math.min(anchor, i), to: Math.max(anchor, i) },
+        selected: i,
+      };
+    }),
+
+  retranscribe: async (model, condition) => {
+    const s = get();
+    const doc = s.doc;
+    if (!doc || s.retrans.running) return;
+    const range = s.selRange ?? { from: s.selected, to: s.selected };
+    try {
+      set({ retrans: { running: true, message: "Starting…" } });
+      await api.post("/api/review/retranscribe", {
+        rev: doc.rev,
+        from: range.from,
+        to: range.to,
+        ...(model ? { model } : {}),
+        condition,
+      });
+    } catch (err) {
+      set({ retrans: { running: false, message: "" } });
+      if (err instanceof ApiError) {
+        void errorDialog("Cannot re-transcribe", err.message);
+      } else {
+        throw err;
+      }
+    }
+  },
+
+  cancelRetranscribe: async () => {
+    await api.post("/api/review/retranscribe/cancel", {}).catch(() => {});
+  },
+
+  applyRetrans: (d) => {
+    if (d.state === "running") {
+      set({ retrans: { running: true, message: d.message } });
+      return;
+    }
+    set({ retrans: { running: false, message: d.message } });
+    if (d.state === "done") {
+      set({ selRange: null });
+      void get().refetch();
+    }
+  },
 
   exportAs: async (fmt) => {
     const s = get();
@@ -312,7 +387,10 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   },
 
   select: (index) =>
-    set((s) => ({ selected: clamp(index, s.doc?.paragraphs.length ?? 0) })),
+    set((s) => ({
+      selected: clamp(index, s.doc?.paragraphs.length ?? 0),
+      selRange: null,
+    })),
 
   startEdit: (index) =>
     set((s) => ({
@@ -393,6 +471,14 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       return;
     }
     set({ searchHit: hit, selected: hit.index, findStatus: wrapped ? "Wrapped" : "" });
+  },
+
+  setTimestamp: async (index, value) => {
+    applyResult(await mutateApi("timestamp", { index, value }));
+  },
+
+  setReviewed: async (index, value) => {
+    applyResult(await mutateApi("reviewed", { index, value }));
   },
 
   setSpeaker: async (index, slot) => {

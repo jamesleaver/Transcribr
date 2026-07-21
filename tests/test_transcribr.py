@@ -580,7 +580,7 @@ class TestRecentList(unittest.TestCase):
             T._recent_add(b)
             T._recent_add(a)  # again: moves to front, no duplicate
             items = T._recent_load()
-            self.assertEqual(items[0], str(a.resolve()))
+            self.assertEqual(items[0]["path"], str(a.resolve()))
             self.assertEqual(len(items), 2)
 
     def test_capped_at_max(self):

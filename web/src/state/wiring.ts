@@ -61,6 +61,12 @@ onEvent("review_closed", () => {
   }
 });
 
+onEvent("retrans", (d) => {
+  useReview.getState().applyRetrans(
+    d as { state: string; message: string },
+  );
+});
+
 onEvent("audio_status", (d) => {
   useReview.getState().setAudioStatus(d as never);
 });

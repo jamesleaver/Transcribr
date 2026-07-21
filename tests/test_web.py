@@ -1414,6 +1414,253 @@ class TestReviewSession(unittest.TestCase):
             T.open_transcript_info(str(p))
         self.assertEqual(cm.exception.code, "too_many_speakers")
 
+    def test_timestamp_marks_hide_amend_undo(self):
+        session, out = self._fresh_session(fmt="txt")
+        rev = session.model.rev
+        rev = session.mutate(rev, "timestamp",
+                            {"index": 0, "value": "hidden"})["rev"]
+        session.mutate(rev, "timestamp", {"index": 1, "value": 125})
+        session.save(session.model.rev, "no_labels")
+        text = Path(out).read_text()
+        # Paragraph 0's stamp is gone; paragraph 1 shows the amended
+        # time; paragraph 2 keeps its computed stamp.
+        self.assertNotIn("[00:00]", text)
+        self.assertIn("[02:05]", text)
+        self.assertIn("Hello there.", text)
+
+    def test_reviewed_flag_undo_and_autosave(self):
+        session, _ = self._fresh_session(fmt="txt")
+        rev = session.mutate(session.model.rev, "reviewed",
+                             {"index": 1, "value": True})["rev"]
+        self.assertTrue(session.payload()["paragraphs"][1]["reviewed"])
+        # Carried in the autosave snapshot and restored.
+        session.model.flush_autosave()
+        data = T._autosave_load()
+        self.assertEqual(data["reviewed"], [False, True, False])
+        restored = T.autosave_restore_info(data)
+        s2 = T.ReviewSession(restored, self.broker)
+        self.assertTrue(s2.payload()["paragraphs"][1]["reviewed"])
+        # Undoable.
+        session.mutate(rev, "undo", {})
+        self.assertFalse(session.model.reviewed[1])
+
+    def test_timestamp_mark_is_undoable(self):
+        session, _ = self._fresh_session(fmt="txt")
+        rev = session.mutate(session.model.rev, "timestamp",
+                            {"index": 0, "value": "hidden"})["rev"]
+        self.assertEqual(session.model.ts_marks[0], "hidden")
+        session.mutate(rev, "undo", {})
+        self.assertIsNone(session.model.ts_marks[0])
+        session.mutate(session.model.rev, "redo", {})
+        self.assertEqual(session.model.ts_marks[0], "hidden")
+
+    def test_hidden_timestamp_survives_docx_roundtrip(self):
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        session, out = self._fresh_session(fmt="docx")
+        session.mutate(session.model.rev, "timestamp",
+                       {"index": 1, "value": "hidden"})
+        session.save(session.model.rev, "no_labels")
+        info = T.open_transcript_info(out)
+        marks = info["preset_ts_marks"]
+        self.assertEqual(marks[1], "hidden")
+        self.assertIsNone(marks[0])
+        # The hidden paragraph carries the previous start forward so
+        # playback lands nearby.
+        self.assertEqual(info["paragraphs"][1][0][0],
+                         info["paragraphs"][0][0][0])
+        reopened = T.ReviewSession(info, self.broker)
+        self.assertEqual(reopened.payload()["paragraphs"][1]["ts"],
+                         "hidden")
+
+    def test_apply_retranscribe_splices_and_undoes(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        rev = session.mutate(m.rev, "speaker",
+                            {"index": 2, "slot": "2"})["rev"]
+        before = [m.body(i) for i in range(len(m.paragraphs))]
+        segs = [(0.5, 2.0, "Corrected one."), (2.5, 4.5, "Corrected two.")]
+        kept = session.apply_retranscribe(rev, [(0, 1, segs)], gap=10.0)
+        self.assertEqual(kept, 1)
+        payload = session.payload()
+        bodies = [p["body"] for p in payload["paragraphs"]]
+        # 10s gap threshold folds both segments into one paragraph.
+        self.assertEqual(bodies[0], "Corrected one. Corrected two.")
+        self.assertEqual(bodies[-1], before[-1])   # outside untouched
+        # Replacements arrive unlabelled; the paragraph after the range
+        # keeps its speaker.
+        self.assertIsNone(payload["paragraphs"][0]["speaker"])
+        self.assertEqual(payload["paragraphs"][-1]["speaker"], "2")
+        # One undo restores the original text.
+        payload = session.mutate(session.model.rev, "undo", {})
+        self.assertEqual([p["body"] for p in payload["paragraphs"]],
+                         before)
+
+    def test_apply_retranscribe_refuses_stale_rev_and_empty(self):
+        session, _ = self._fresh_session(fmt="txt")
+        rev = session.model.rev
+        session.mutate(rev, "speaker", {"index": 0, "slot": "1"})
+        with self.assertRaises(T.ApiFail) as ctx:
+            session.apply_retranscribe(rev, [(0, 0, [(0.0, 1.0, "x")])],
+                                       gap=2.0)
+        self.assertEqual(ctx.exception.code, "stale_rev")
+        with self.assertRaises(T.ApiFail) as ctx:
+            session.apply_retranscribe(session.model.rev,
+                                       [(0, 0, [])], gap=2.0)
+        self.assertEqual(ctx.exception.code, "no_speech")
+
+    def test_retrans_preserves_reviewed_island(self):
+        # A reviewed paragraph inside the selection is kept verbatim;
+        # the runs on either side are re-transcribed independently.
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        # Three paragraphs at 0, 5, 10s; mark the middle one reviewed.
+        session.mutate(m.rev, "reviewed", {"index": 1, "value": True})
+        kept_body = m.body(1)
+        events = []
+        orig = self.broker.publish
+        self.broker.publish = lambda k, d: (events.append((k, d)),
+                                            orig(k, d))
+        orig_slice = T.retranscribe_slice
+        spans = []
+
+        def fake_slice(audio, start, end, settings, q, cancel):
+            spans.append((round(start, 2), end))
+            return [(start + 0.1, start + 0.9, f"Redone at {int(start)}.")]
+
+        T.retranscribe_slice = fake_slice
+        backend = type("B", (), {"broker": self.broker,
+                                 "retrans": None})()
+        try:
+            import time as _t
+            job = T.RetransJob(backend, session,
+                               dict(T.current_settings()),
+                               m.rev, 0, 2)
+            deadline = _t.monotonic() + 10
+            while job.state == "running":
+                if _t.monotonic() > deadline:
+                    raise AssertionError("stuck")
+                _t.sleep(0.02)
+        finally:
+            T.retranscribe_slice = orig_slice
+            self.broker.publish = orig
+        self.assertEqual(job.state, "done")
+        # Two runs re-transcribed (para 0 and para 2); the middle stays.
+        self.assertEqual(len(spans), 2)
+        bodies = [m.body(i) for i in range(len(m.paragraphs))]
+        self.assertEqual(bodies[0], "Redone at 0.")
+        self.assertEqual(m.body(1), kept_body)
+        self.assertTrue(m.reviewed[1])
+        self.assertTrue(bodies[-1].startswith("Redone at "))
+
+    def test_retrans_all_reviewed_is_refused(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        for i in range(len(m.paragraphs)):
+            session.mutate(m.rev, "reviewed", {"index": i, "value": True})
+        events = []
+        orig = self.broker.publish
+        self.broker.publish = lambda k, d: (events.append((k, d)),
+                                            orig(k, d))
+        called = {"n": 0}
+        orig_slice = T.retranscribe_slice
+
+        def fake_slice(*a, **k):
+            called["n"] += 1
+            return []
+
+        T.retranscribe_slice = fake_slice
+        backend = type("B", (), {"broker": self.broker,
+                                 "retrans": None})()
+        try:
+            import time as _t
+            job = T.RetransJob(backend, session,
+                               dict(T.current_settings()),
+                               m.rev, 0, len(m.paragraphs) - 1)
+            deadline = _t.monotonic() + 10
+            while job.state == "running":
+                if _t.monotonic() > deadline:
+                    raise AssertionError("stuck")
+                _t.sleep(0.02)
+        finally:
+            T.retranscribe_slice = orig_slice
+            self.broker.publish = orig
+        self.assertEqual(job.state, "failed")
+        self.assertEqual(called["n"], 0)   # engine never ran
+        self.assertTrue(any("reviewed" in d.get("message", "")
+                            for k, d in events if k == "retrans"))
+
+    def test_retrans_job_end_to_end_with_stub_engine(self):
+        import time as _time
+        session, _ = self._fresh_session(fmt="txt")
+        events = []
+        orig_publish = self.broker.publish
+        self.broker.publish = lambda kind, data: (
+            events.append((kind, data)), orig_publish(kind, data))
+        backend = type("B", (), {"broker": self.broker,
+                                 "retrans": None})()
+        orig = T.retranscribe_slice
+        calls = {}
+
+        def fake_slice(audio_path, start, end, settings, q, cancel):
+            calls["span"] = (start, end)
+            calls["condition"] = settings["condition_on_previous_text"]
+            calls["model"] = settings["model"]
+            return [(start + 0.1, start + 1.5, "Fixed text.")]
+
+        T.retranscribe_slice = fake_slice
+        expected_span = (session.model.paragraphs[1][0][0],
+                         session.model.paragraphs[2][0][0])
+        try:
+            settings = dict(T.current_settings())
+            settings["condition_on_previous_text"] = False
+            settings["model"] = "small"
+            job = T.RetransJob(backend, session, settings,
+                               session.model.rev, 1, 1)
+            deadline = _time.monotonic() + 10
+            while job.state == "running":
+                if _time.monotonic() > deadline:
+                    raise AssertionError("job stuck")
+                _time.sleep(0.02)
+        finally:
+            T.retranscribe_slice = orig
+            self.broker.publish = orig_publish
+        self.assertEqual(job.state, "done")
+        self.assertFalse(calls["condition"])
+        self.assertEqual(calls["model"], "small")
+        # Slice span: paragraph 1's start through paragraph 2's start.
+        self.assertEqual(calls["span"], expected_span)
+        self.assertIn("Fixed text.", session.model.body(1))
+        self.assertIn(("retrans", {"state": "done",
+                                   "message": "Done - the selection was "
+                                   "replaced (undo reverses it)."}),
+                      events)
+
+    def test_recents_reviewed_and_verified_flags(self):
+        T._recent_save([])
+        T._recent_add("/tmp/a.transcript.docx")
+        items = T._recent_load()
+        self.assertFalse(items[0]["reviewed"])
+        # A review-pane save marks it; re-opening later keeps it.
+        T._recent_add("/tmp/a.transcript.docx", reviewed=True,
+                      verified=True)
+        T._recent_add("/tmp/a.transcript.docx")
+        items = T._recent_load()
+        self.assertTrue(items[0]["reviewed"])
+        self.assertTrue(items[0]["verified"])
+        # A fresh transcription of the same output resets the badge.
+        T._recent_add("/tmp/a.transcript.docx", reviewed=False,
+                      verified=False)
+        self.assertFalse(T._recent_load()[0]["reviewed"])
+        # Pre-0.9.5 files stored bare strings.
+        import json
+        T._recent_file().write_text(json.dumps(["/tmp/old.txt"]))
+        items = T._recent_load()
+        self.assertEqual(items[0]["path"], "/tmp/old.txt")
+        self.assertFalse(items[0]["reviewed"])
+
     def test_autosave_schema_roundtrip(self):
         session, out = self._fresh_session()
         rev = session.mutate(session.model.rev, "speaker",
@@ -1425,8 +1672,8 @@ class TestReviewSession(unittest.TestCase):
             set(data.keys()),
             {"out_path", "show_timestamp", "title", "output_format",
              "loaded", "diarized", "verified_by", "audio_path",
-             "paragraphs", "speakers", "speaker_names",
-             "saved_at"})   # v0.6.0 schema + 0.9.0 additions
+             "paragraphs", "speakers", "speaker_names", "ts_marks",
+             "reviewed", "saved_at"})   # v0.6.0 schema + 0.9.x additions
         self.assertEqual(data["speakers"][0], "3")
         self.assertEqual(data["speaker_names"], {"3": "Q C"})
         restored = T.autosave_restore_info(data)
@@ -1813,16 +2060,22 @@ class TestHttpApi(unittest.TestCase):
 
         golden["out_path"] = out
         golden["saved_at"] = produced["saved_at"]
-        golden["diarized"] = False       # intentional 0.9.0 additions
+        golden["diarized"] = False       # intentional 0.9.x additions
         golden["verified_by"] = None
+        golden["ts_marks"] = [None, None, None]
+        golden["reviewed"] = [False, False, False]
         self.assertEqual(produced, golden)
 
         # A pre-0.9.0 autosave (neither new key) must still restore.
         del golden["diarized"]
         del golden["verified_by"]
+        del golden["ts_marks"]
+        del golden["reviewed"]
         restored = T.autosave_restore_info(golden)
         self.assertFalse(restored["diarized"])
         self.assertIsNone(restored["verified_by"])
+        self.assertEqual(restored["preset_ts_marks"], [])
+        self.assertEqual(restored["preset_reviewed"], [])
         session.model.close()
 
 

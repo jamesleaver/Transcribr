@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useReview, type ReviewParagraph } from "../../state/reviewStore";
 
 // The transcript document: one row per paragraph in three columns
@@ -10,6 +10,17 @@ import { useReview, type ReviewParagraph } from "../../state/reviewStore";
 // are inline spans.
 
 const WORD_CHARS = /[\p{L}\p{N}'’-]/u;
+
+/** Parse "MM:SS", "H:MM:SS" or bare seconds into seconds, else null. */
+function parseTimestamp(text: string): number | null {
+  const t = text.trim().replace(/^\[|\]$/g, "");
+  if (!t) return null;
+  if (/^\d+(\.\d+)?$/.test(t)) return parseFloat(t);
+  const m = t.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = m[1] ? parseInt(m[1], 10) : 0;
+  return h * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10);
+}
 
 function formatTimestamp(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
@@ -107,6 +118,106 @@ function caretOffset(container: HTMLElement, e: React.MouseEvent): number | null
   return null;
 }
 
+/** The clickable timestamp cell: shows the effective stamp; clicking
+ *  opens a small editor to amend the time, hide the stamp, or put it
+ *  back. Saved documents follow whatever is chosen here. */
+function TimestampCell({
+  para,
+  index,
+}: {
+  para: ReviewParagraph;
+  index: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const hidden = para.ts === "hidden";
+  const amended = typeof para.ts === "number";
+  const effective = amended ? (para.ts as number) : para.start;
+
+  const apply = () => {
+    const parsed = parseTimestamp(draft);
+    if (parsed !== null) {
+      void useReview.getState().setTimestamp(index, parsed);
+    }
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative pt-0.5">
+      <button
+        className="rounded font-mono text-[11px] hover:underline"
+        style={{
+          color: "var(--timestamp-fg)",
+          opacity: hidden ? 0.45 : 1,
+          fontStyle: amended ? "italic" : undefined,
+        }}
+        title={
+          hidden
+            ? "Timestamp hidden in saved documents — click to change"
+            : amended
+              ? "Amended timestamp — click to change"
+              : "Click to amend or hide this timestamp"
+        }
+        onClick={(e) => {
+          e.stopPropagation();
+          useReview.getState().select(index);
+          setDraft(formatTimestamp(effective).replace(/^\[|\]$/g, ""));
+          setOpen((v) => !v);
+        }}
+      >
+        {hidden ? "[–:––]" : formatTimestamp(effective)}
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 top-6 z-10 w-44 rounded-lg border border-edge bg-surface p-2 shadow-lg"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            className="w-full rounded border border-edge bg-surface px-2 py-1 font-mono text-xs focus:border-accent focus:outline-none"
+            value={draft}
+            autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") apply();
+              if (e.key === "Escape") setOpen(false);
+            }}
+          />
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            <button
+              className="rounded border border-edge px-2 py-0.5 text-[11px] font-medium hover:bg-surface-2"
+              onClick={apply}
+            >
+              Apply
+            </button>
+            <button
+              className="rounded border border-edge px-2 py-0.5 text-[11px] font-medium hover:bg-surface-2"
+              onClick={() => {
+                void useReview
+                  .getState()
+                  .setTimestamp(index, hidden ? null : "hidden");
+                setOpen(false);
+              }}
+            >
+              {hidden ? "Show" : "Hide"}
+            </button>
+            {(amended || hidden) && (
+              <button
+                className="rounded border border-edge px-2 py-0.5 text-[11px] font-medium hover:bg-surface-2"
+                onClick={() => {
+                  void useReview.getState().setTimestamp(index, null);
+                  setOpen(false);
+                }}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const Row = memo(function Row({
   para,
   index,
@@ -119,6 +230,12 @@ const Row = memo(function Row({
   showTimestamp: boolean;
 }) {
   const selected = useReview((s) => s.selected === index);
+  const inRange = useReview(
+    (s) =>
+      s.selRange !== null
+      && index >= s.selRange.from
+      && index <= s.selRange.to,
+  );
   const editing = useReview((s) => s.editing === index);
   const draft = useReview((s) => (s.editing === index ? s.editingDraft : ""));
   const showConf = useReview((s) => s.showConfidence);
@@ -155,7 +272,7 @@ const Row = memo(function Row({
 
   const rowBg = editing
     ? "var(--editing-bg)"
-    : selected
+    : selected || inRange
       ? "var(--selected-bg)"
       : para.speaker
         ? `var(--speaker-${para.speaker})`
@@ -172,20 +289,29 @@ const Row = memo(function Row({
     void useReview.getState().split(index, off);
   };
 
-  const onClick = () => {
+  const onClick = (e: React.MouseEvent) => {
     const st = useReview.getState();
     if (st.editing !== null && st.editing !== index) {
       void st.commitPendingEdit();
     }
-    st.select(index);
+    if (e.shiftKey) {
+      st.selectRangeTo(index);
+    } else {
+      st.select(index);
+    }
   };
 
   return (
     <div
       ref={ref}
       onClick={onClick}
-      className="grid cursor-default grid-cols-[130px_64px_1fr] gap-3 rounded-lg px-3 py-1.5"
-      style={{ background: rowBg }}
+      className="group grid cursor-default grid-cols-[130px_64px_1fr_24px] gap-3 rounded-lg px-3 py-1.5"
+      style={{
+        background: rowBg,
+        boxShadow: para.reviewed
+          ? "inset 3px 0 0 0 var(--accent)"
+          : undefined,
+      }}
     >
       <div className="pt-0.5">
         {label && (
@@ -204,12 +330,11 @@ const Row = memo(function Row({
           </span>
         )}
       </div>
-      <div
-        className="pt-0.5 font-mono text-[11px]"
-        style={{ color: "var(--timestamp-fg)" }}
-      >
-        {showTimestamp ? formatTimestamp(para.start) : ""}
-      </div>
+      {showTimestamp ? (
+        <TimestampCell para={para} index={index} />
+      ) : (
+        <div />
+      )}
       {editing ? (
         <textarea
           ref={textRef}
@@ -241,6 +366,25 @@ const Row = memo(function Row({
           {renderBody(para.body, showConf ? para.conf : [], hit)}
         </div>
       )}
+      <button
+        className={`self-start rounded pt-0.5 text-xs transition-opacity ${
+          para.reviewed
+            ? "opacity-100"
+            : "opacity-0 group-hover:opacity-60 hover:!opacity-100"
+        }`}
+        style={{ color: para.reviewed ? "var(--accent)" : "var(--muted)" }}
+        title={
+          para.reviewed
+            ? "Reviewed — protected from re-transcription. Click to unmark."
+            : "Mark this paragraph reviewed (protects it from re-transcription)"
+        }
+        onClick={(e) => {
+          e.stopPropagation();
+          void useReview.getState().setReviewed(index, !para.reviewed);
+        }}
+      >
+        {para.reviewed ? "✓" : "○"}
+      </button>
     </div>
   );
 });

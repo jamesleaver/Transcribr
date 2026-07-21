@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useReview } from "../../state/reviewStore";
+import { useApp } from "../../state/store";
 import { CheckField, inputCls } from "../fields";
 
 // Right rail: speakers panel, find & replace, confidence toggle.
@@ -250,11 +251,108 @@ function TimestampsCard() {
   );
 }
 
+function FixSectionCard() {
+  const selected = useReview((s) => s.selected);
+  const selRange = useReview((s) => s.selRange);
+  const retrans = useReview((s) => s.retrans);
+  const audioReady = useReview((s) => s.doc?.audio.state === "ready");
+  const meta = useApp((s) => s.meta);
+  const settings = useApp((s) => s.settings);
+  const [model, setModel] = useState("");
+  const [condition, setCondition] = useState(false);
+
+  const range = selRange ?? { from: selected, to: selected };
+  const paragraphs = useReview((s) => s.doc?.paragraphs ?? []);
+  let count = 0;
+  let reviewedInRange = 0;
+  for (let i = range.from; i <= range.to && i < paragraphs.length; i++) {
+    if (paragraphs[i]?.reviewed) reviewedInRange += 1;
+    else count += 1;
+  }
+  const english = settings?.language === "English";
+  const tiers = meta?.model_tiers ?? [];
+  const btn =
+    "rounded-lg border border-edge px-2.5 py-1.5 text-xs font-medium hover:bg-surface-2 disabled:opacity-40";
+
+  return (
+    <section className="rounded-xl border border-edge bg-surface p-4">
+      <h2 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">
+        Fix a section
+      </h2>
+      <p className="mb-3 text-[11px] leading-relaxed text-muted">
+        Re-run part of the recording through the engine — for repeated or
+        invented text. Shift-click extends the selection; only the
+        selected paragraphs are replaced, and undo reverses it.
+      </p>
+      <label className="mb-1 block text-[11px] font-medium text-muted">
+        Model for the re-run
+      </label>
+      <select
+        className={`${inputCls} mb-2 w-full py-1.5 text-xs`}
+        value={model}
+        disabled={retrans.running}
+        onChange={(e) => setModel(e.target.value)}
+      >
+        <option value="">Same as your current setting</option>
+        {tiers.map((t) => {
+          const m = english ? t.model_en : t.model;
+          return (
+            <option key={t.id} value={m}>
+              {t.label} ({m})
+            </option>
+          );
+        })}
+      </select>
+      <CheckField
+        label="Condition on previous text"
+        checked={condition}
+        onChange={setCondition}
+        note="Leave off for hallucinated sections — carrying context in is usually what caused them."
+      />
+      <div className="mt-3 flex items-center gap-2">
+        {retrans.running ? (
+          <button
+            className={btn}
+            onClick={() => void useReview.getState().cancelRetranscribe()}
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            className={`${btn} border-accent text-accent`}
+            disabled={!audioReady || count === 0}
+            onClick={() =>
+              void useReview.getState().retranscribe(model, condition)
+            }
+          >
+            Re-transcribe {count} paragraph{count === 1 ? "" : "s"}
+          </button>
+        )}
+      </div>
+      {reviewedInRange > 0 && count > 0 && (
+        <p className="mt-2 text-[11px] leading-relaxed text-muted">
+          {reviewedInRange} reviewed paragraph
+          {reviewedInRange === 1 ? "" : "s"} in the selection will be kept.
+        </p>
+      )}
+      {(retrans.message || !audioReady || count === 0) && (
+        <p className="mt-2 text-[11px] leading-relaxed text-muted">
+          {retrans.message
+            || (!audioReady
+              ? "Needs the source recording — use Locate audio… on the Playback card."
+              : "Every selected paragraph is marked reviewed — un-review one to re-transcribe it.")}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export default function ReviewRail() {
   return (
     <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
       <SpeakersPanel />
       <PlaybackCard />
+      <FixSectionCard />
       <TimestampsCard />
       <FindReplace />
       <VerifyCard />

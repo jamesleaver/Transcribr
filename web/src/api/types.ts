@@ -95,6 +95,8 @@ export interface RecentItem {
   path: string;
   name: string;
   exists: boolean;
+  reviewed: boolean;
+  verified: boolean;
 }
 
 export type RunPhase =
