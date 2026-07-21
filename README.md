@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.8.
+(c) James Leaver, 2026. Version 0.9.9.
 
 Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
 
@@ -497,6 +497,13 @@ the selected paragraphs are replaced, and one **Undo** reverses it. A
 progress bar and a live output box (the same engine output the
 Transcribe page shows) report how it is going. This needs the source
 recording, so use **Locate audio…** first if playback isn't available.
+
+While the engine runs, the paragraphs being re-transcribed are **greyed
+out and locked** so you don't waste effort editing text that is about
+to be replaced — but the rest of the transcript stays live, so you can
+keep labelling speakers and editing other paragraphs meanwhile. Those
+edits are kept: the new text is spliced back onto the exact paragraphs
+that were re-transcribed, so nothing you did elsewhere is lost.
 
 | Action | How |
 |---|---|

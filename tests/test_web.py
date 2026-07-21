@@ -1462,11 +1462,11 @@ class TestReviewSession(unittest.TestCase):
     def test_apply_retranscribe_splices_and_undoes(self):
         session, _ = self._fresh_session(fmt="txt")
         m = session.model
-        rev = session.mutate(m.rev, "speaker",
-                            {"index": 2, "slot": "2"})["rev"]
+        session.mutate(m.rev, "speaker", {"index": 2, "slot": "2"})
         before = [m.body(i) for i in range(len(m.paragraphs))]
+        ids = session.lock_paragraphs(0, 1)
         segs = [(0.5, 2.0, "Corrected one."), (2.5, 4.5, "Corrected two.")]
-        kept = session.apply_retranscribe(rev, [(0, 1, segs)], gap=10.0)
+        kept = session.apply_retranscribe(ids, segs, gap=10.0)
         self.assertEqual(kept, 1)
         payload = session.payload()
         bodies = [p["body"] for p in payload["paragraphs"]]
@@ -1477,22 +1477,65 @@ class TestReviewSession(unittest.TestCase):
         # keeps its speaker.
         self.assertIsNone(payload["paragraphs"][0]["speaker"])
         self.assertEqual(payload["paragraphs"][-1]["speaker"], "2")
+        # The lock is cleared once applied.
+        self.assertFalse(any(p["locked"] for p in payload["paragraphs"]))
         # One undo restores the original text.
         payload = session.mutate(session.model.rev, "undo", {})
         self.assertEqual([p["body"] for p in payload["paragraphs"]],
                          before)
 
-    def test_apply_retranscribe_refuses_stale_rev_and_empty(self):
+    def test_apply_retranscribe_survives_edits_elsewhere(self):
+        # The regression: editing paragraphs OUTSIDE the locked range
+        # while the engine runs must not discard the result. The splice
+        # re-finds its target by identity.
         session, _ = self._fresh_session(fmt="txt")
-        rev = session.model.rev
-        session.mutate(rev, "speaker", {"index": 0, "slot": "1"})
+        m = session.model
+        ids = session.lock_paragraphs(0, 0)   # re-transcribing para 0
+        # Meanwhile the reviewer edits the LAST paragraph.
+        last = len(m.paragraphs) - 1
+        session.mutate(m.rev, "edit",
+                       {"index": last, "text": "My careful edit."})
+        # The re-transcription now completes and still applies.
+        kept = session.apply_retranscribe(
+            ids, [(0.1, 0.9, "Re-done paragraph zero.")], gap=2.0)
+        self.assertEqual(kept, 1)
+        self.assertIn("Re-done paragraph zero.", m.body(0))
+        self.assertEqual(m.body(len(m.paragraphs) - 1),
+                         "My careful edit.")   # the edit survived
+
+    def test_locked_paragraph_cannot_be_edited(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        session.lock_paragraphs(1, 1)
         with self.assertRaises(T.ApiFail) as ctx:
-            session.apply_retranscribe(rev, [(0, 0, [(0.0, 1.0, "x")])],
-                                       gap=2.0)
-        self.assertEqual(ctx.exception.code, "stale_rev")
+            session.mutate(m.rev, "edit",
+                           {"index": 1, "text": "nope"})
+        self.assertEqual(ctx.exception.code, "locked")
+        # A merge that would fold in the locked paragraph is refused too.
         with self.assertRaises(T.ApiFail) as ctx:
-            session.apply_retranscribe(session.model.rev,
-                                       [(0, 0, [])], gap=2.0)
+            session.mutate(m.rev, "merge", {"index": 2})
+        self.assertEqual(ctx.exception.code, "locked")
+        # But an unlocked paragraph is still editable.
+        session.mutate(m.rev, "edit", {"index": 0, "text": "Fine edit."})
+        self.assertEqual(m.body(0), "Fine edit.")
+
+    def test_apply_retranscribe_conflict_when_section_gone(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        ids = session.lock_paragraphs(0, 0)
+        # Simulate the locked paragraph itself vanishing (e.g. an undo
+        # reached across it): clear the lock so an edit can remove it.
+        session.clear_lock()
+        session.mutate(m.rev, "merge", {"index": 1})   # removes id at 1
+        # Re-point the "locked" set at an id that no longer forms a run.
+        gone = frozenset([max(m.ids) + 999])
+        with self.assertRaises(T.ApiFail) as ctx:
+            session.apply_retranscribe(gone, [(0.0, 1.0, "x")], gap=2.0)
+        self.assertEqual(ctx.exception.code, "conflict")
+        # No speech is its own refusal.
+        ids2 = session.lock_paragraphs(0, 0)
+        with self.assertRaises(T.ApiFail) as ctx:
+            session.apply_retranscribe(ids2, [], gap=2.0)
         self.assertEqual(ctx.exception.code, "no_speech")
 
     def test_retrans_whole_selection_replaced(self):
@@ -1513,8 +1556,7 @@ class TestReviewSession(unittest.TestCase):
         try:
             import time as _t
             job = T.RetransJob(backend, session,
-                               dict(T.current_settings()),
-                               m.rev, 0, 1)
+                               dict(T.current_settings()), 0, 1)
             deadline = _t.monotonic() + 10
             while job.state == "running":
                 if _t.monotonic() > deadline:
@@ -1560,8 +1602,7 @@ class TestReviewSession(unittest.TestCase):
             settings = dict(T.current_settings())
             settings["condition_on_previous_text"] = False
             settings["model"] = "small"
-            job = T.RetransJob(backend, session, settings,
-                               session.model.rev, 1, 1)
+            job = T.RetransJob(backend, session, settings, 1, 1)
             deadline = _time.monotonic() + 10
             while job.state == "running":
                 if _time.monotonic() > deadline:

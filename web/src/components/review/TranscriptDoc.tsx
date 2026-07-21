@@ -279,7 +279,7 @@ const Row = memo(function Row({
         : undefined;
 
   const onDoubleClick = (e: React.MouseEvent) => {
-    if (editing) return;
+    if (editing || para.locked) return;
     const container = e.currentTarget as HTMLElement;
     let off = caretOffset(container, e);
     if (off === null) return;
@@ -306,16 +306,21 @@ const Row = memo(function Row({
       ref={ref}
       onClick={onClick}
       title={
-        para.suspect
-          ? "This looks like repeated or low-confidence text — consider re-transcribing it (Fix a section)."
-          : undefined
+        para.locked
+          ? "Being re-transcribed — this section updates when the engine finishes."
+          : para.suspect
+            ? "This looks like repeated or low-confidence text — consider re-transcribing it (Fix a section)."
+            : undefined
       }
-      className="grid cursor-default grid-cols-[130px_64px_1fr] gap-3 rounded-lg px-3 py-1.5"
+      className="grid cursor-default grid-cols-[130px_64px_1fr] gap-3 rounded-lg px-3 py-1.5 transition-opacity"
       style={{
         background: rowBg,
-        boxShadow: para.suspect
-          ? "inset 3px 0 0 0 #d97706"
-          : undefined,
+        opacity: para.locked ? 0.45 : 1,
+        boxShadow: para.locked
+          ? "inset 3px 0 0 0 var(--accent)"
+          : para.suspect
+            ? "inset 3px 0 0 0 #d97706"
+            : undefined,
       }}
     >
       <div className="pt-0.5">

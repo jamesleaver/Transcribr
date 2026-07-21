@@ -27,6 +27,8 @@ export interface ReviewParagraph {
   ts: "hidden" | number | null;
   /** Looks like engine hallucination (repeated/looping text). */
   suspect: boolean;
+  /** Being re-transcribed right now: greyed out and un-editable. */
+  locked: boolean;
   play: { start: number; end: number | null } | null;
   conf: [number, number, "low" | "med"][];
 }
@@ -185,7 +187,12 @@ async function mutateApi(
       ...body,
     });
   } catch (err) {
-    if (err instanceof ApiError && err.code === "stale_rev") {
+    if (
+      err instanceof ApiError &&
+      (err.code === "stale_rev" || err.code === "locked")
+    ) {
+      // The doc moved under us, or the paragraph is mid re-transcription
+      // — resync and drop this edit rather than erroring.
       await useReview.getState().refetch();
       return null;
     }
@@ -441,11 +448,15 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     })),
 
   startEdit: (index) =>
-    set((s) => ({
-      editing: index,
-      editingDraft: s.doc?.paragraphs[index]?.body ?? "",
-      selected: index,
-    })),
+    set((s) => {
+      // Can't edit a paragraph that is being re-transcribed.
+      if (s.doc?.paragraphs[index]?.locked) return {};
+      return {
+        editing: index,
+        editingDraft: s.doc?.paragraphs[index]?.body ?? "",
+        selected: index,
+      };
+    }),
 
   cancelEdit: () => set({ editing: null, editingDraft: "" }),
 

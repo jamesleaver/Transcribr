@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.8"
+__version__ = "0.9.9"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -3276,6 +3276,13 @@ class TranscriptModel:
     def can_redo(self):
         return bool(self._redo_stack)
 
+    def touch_rev(self):
+        """Bump the revision without changing content - so a metadata
+        change (e.g. a paragraph being locked for re-transcription)
+        prompts clients to refetch the payload."""
+        self.rev += 1
+        return self.rev
+
     def label_counts(self):
         labelled = sum(1 for s in self.speakers if s is not None)
         return labelled, len(self.speakers)
@@ -5252,11 +5259,10 @@ class RetransJob:
     result is applied to the session only if the client's revision is
     still current, so edits made meanwhile are never clobbered."""
 
-    def __init__(self, backend, session, settings, rev, lo, hi):
+    def __init__(self, backend, session, settings, lo, hi):
         self.backend = backend
         self.session = session
         self.settings = settings
-        self.rev = rev
         self.lo = lo
         self.hi = hi
         self.state = "running"
@@ -5271,6 +5277,11 @@ class RetransJob:
         end = (float(m.paragraphs[hi + 1][0][0])
                if hi + 1 < len(m.paragraphs) else None)
         self.span = (start, end)
+        # Lock the target paragraphs by identity: they grey out and
+        # can't be edited, but the rest of the transcript stays live,
+        # and the result splices back onto these ids wherever they end
+        # up after edits elsewhere.
+        self.locked_ids = session.lock_paragraphs(lo, hi)
         threading.Thread(target=self._run, daemon=True,
                          name="transcribr-retrans").start()
 
@@ -5355,8 +5366,7 @@ class RetransJob:
                 self.session.audio_path, start, end,
                 self.settings, self.q, self.cancel_event)
             self.session.apply_retranscribe(
-                self.rev, [(self.lo, self.hi, segments)],
-                self.settings["gap"])
+                self.locked_ids, segments, self.settings["gap"])
             self._publish("done",
                           "Done - the selection was replaced (undo "
                           "reverses it).", pct=100.0)
@@ -5365,16 +5375,14 @@ class RetransJob:
         except _EngineNotAvailable as e:
             self._publish("failed", str(e))
         except ApiFail as e:
-            if e.code == "stale_rev":
-                self._publish("failed",
-                              "The transcript changed while the engine "
-                              "ran - nothing was replaced. Try again.")
-            else:
-                self._publish("failed", str(e))
+            self._publish("failed", str(e))
         except Exception as e:
             _log("retranscribe failed:\n" + traceback.format_exc())
             self._publish("failed", f"{type(e).__name__}: {e}")
         finally:
+            # apply_retranscribe clears the lock on success; make sure a
+            # failed/cancelled run un-greys the section too.
+            self.session.clear_lock()
             self._done.set()
 
 
@@ -5588,6 +5596,11 @@ class ReviewSession:
         self.lock = threading.RLock()
         self.closed = False
         self.audio_status_fn = None   # set by the backend (AudioPrep)
+        # Paragraph ids currently being re-transcribed. Those paragraphs
+        # are locked (greyed out, un-editable) while the engine runs;
+        # editing elsewhere stays free, and the result is spliced back
+        # by identity so those edits survive.
+        self._locked_ids = frozenset()
         preset_speakers = info.get("preset_speakers") or None
         self.model = TranscriptModel(
             info["paragraphs"],
@@ -5668,6 +5681,7 @@ class ReviewSession:
                     "speaker": m.speakers[i],
                     "ts": m.ts_marks[i],
                     "suspect": i in suspect,
+                    "locked": m.ids[i] in self._locked_ids,
                     "play": play,
                     "conf": [list(s) for s in conf[i]],
                 })
@@ -5708,11 +5722,37 @@ class ReviewSession:
                           "The document changed under you - refetch.",
                           rev=self.model.rev)
 
+    def _guard_not_locked(self, action, body):
+        """Refuse edits that touch a paragraph currently being
+        re-transcribed. Structural edits elsewhere are fine - the
+        splice re-finds its target by identity afterwards."""
+        if not self._locked_ids:
+            return
+        m = self.model
+        idx = None
+        if action in ("speaker", "edit", "split", "timestamp", "merge"):
+            idx = int(body.get("index", -1))
+        if idx is None:
+            return
+        touched = []
+        if 0 <= idx < len(m.ids):
+            touched.append(m.ids[idx])
+        # A merge also folds in the previous paragraph.
+        if action == "merge" and 0 <= idx - 1 < len(m.ids):
+            touched.append(m.ids[idx - 1])
+        if any(pid in self._locked_ids for pid in touched):
+            raise ApiFail(
+                409, "locked",
+                "That paragraph is being re-transcribed. You can edit "
+                "the rest of the transcript meanwhile; this section "
+                "updates when it finishes.")
+
     def mutate(self, rev, action, body):
         """Apply one named mutation; returns a slim delta for hot ops
         and the full payload for structural ones."""
         with self.lock:
             self._check_rev(rev)
+            self._guard_not_locked(action, body)
             m = self.model
             if action == "speaker":
                 idx = int(body.get("index", -1))
@@ -5765,32 +5805,59 @@ class ReviewSession:
             self.broker.publish("review_changed", {"rev": m.rev})
             return result
 
-    def apply_retranscribe(self, rev, results, gap):
-        """Splice re-transcribed segments back into the model. `results`
-        is a list of (lo, hi, segments) runs to splice, each
-        paragraphified with the current gap threshold, applied as one
-        undo step. A run whose audio yields no speech is left unchanged
-        rather than deleted. Returns the number of runs actually
-        replaced. Refused when the session moved on or closed."""
+    def lock_paragraphs(self, lo, hi):
+        """Mark paragraphs lo..hi as being re-transcribed, by identity,
+        and return their ids so the caller can splice them back even
+        after edits elsewhere shift their indices."""
         with self.lock:
-            if self.closed:
-                raise ApiFail(409, "closed", "The review has closed.")
-            self._check_rev(rev)
-            runs = []
-            for lo, hi, segments in results:
-                paras = paragraphify(segments, gap)
-                if paras:
-                    runs.append((lo, hi, paras))
-            if not runs:
-                raise ApiFail(
-                    422, "no_speech",
-                    "No speech was detected in the selected audio - the "
-                    "original paragraphs were left unchanged.")
-            if not self.model.replace_runs(runs):
-                raise ApiFail(400, "bad_request", "Bad paragraph range.")
+            ids = frozenset(self.model.ids[lo:hi + 1])
+            self._locked_ids = ids
             self.broker.publish("review_changed",
-                                {"rev": self.model.rev})
-            return len(runs)
+                                {"rev": self.model.touch_rev()})
+            return ids
+
+    def clear_lock(self):
+        with self.lock:
+            if self._locked_ids:
+                self._locked_ids = frozenset()
+                self.broker.publish("review_changed",
+                                    {"rev": self.model.touch_rev()})
+
+    def apply_retranscribe(self, locked_ids, segments, gap):
+        """Splice re-transcribed segments back over the paragraphs whose
+        ids are `locked_ids`, wherever they now sit (edits elsewhere may
+        have shifted them). One undo step. Refused only if that section
+        itself no longer exists as a contiguous block - i.e. it really
+        did change - not because unrelated paragraphs were edited."""
+        with self.lock:
+            try:
+                if self.closed:
+                    raise ApiFail(409, "closed", "The review has closed.")
+                m = self.model
+                positions = [i for i, pid in enumerate(m.ids)
+                             if pid in locked_ids]
+                if (not positions
+                        or positions != list(range(positions[0],
+                                                    positions[-1] + 1))):
+                    raise ApiFail(
+                        409, "conflict",
+                        "The re-transcribed section itself changed while "
+                        "the engine ran - nothing was replaced.")
+                paras = paragraphify(segments, gap)
+                if not paras:
+                    raise ApiFail(
+                        422, "no_speech",
+                        "No speech was detected in the selected audio - "
+                        "the original paragraphs were left unchanged.")
+                if not m.replace_runs([(positions[0], positions[-1],
+                                        paras)]):
+                    raise ApiFail(400, "bad_request", "Bad paragraph range.")
+                self.broker.publish("review_changed", {"rev": m.rev})
+                return 1
+            finally:
+                # Whatever the outcome, the section is no longer locked.
+                if self._locked_ids:
+                    self._locked_ids = frozenset()
 
     # ----- Autosave -------------------------------------------------------
 
@@ -6247,7 +6314,7 @@ class WebBackend:
                 settings["condition_on_previous_text"] = bool(
                     body.get("condition"))
                 backend.retrans = RetransJob(backend, session,
-                                             settings, rev, lo, hi)
+                                             settings, lo, hi)
             except ApiFail as e:
                 _fail(e)
             return {"ok": True}
