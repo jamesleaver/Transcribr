@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -1260,14 +1260,21 @@ def _parse_docx_transcript(path):
         )
 
     # The writer embeds Transcribr metadata (comments): the source
-    # audio for playback, and who verified the transcript.
+    # audio for playback (absolute and/or transcript-relative, the
+    # latter surviving a moved folder), and who verified the
+    # transcript.
     embedded_audio = None
+    embedded_audio_rel = None
     embedded_verified = None
     try:
         import json as _json
         meta = (_json.loads(doc.core_properties.comments or "")
                 .get("transcribr") or {})
         embedded_audio = meta.get("audio")
+        rel = meta.get("audio_rel")
+        if rel:
+            embedded_audio_rel = os.path.normpath(
+                str(Path(path).parent / rel))
         embedded_verified = meta.get("verified_by")
     except Exception:
         pass
@@ -1278,6 +1285,7 @@ def _parse_docx_transcript(path):
         "title": title,
         "show_timestamp": saw_timestamp,
         "audio_path": embedded_audio,
+        "audio_path_rel": embedded_audio_rel,
         "verified_by": embedded_verified,
     }
 
@@ -2593,15 +2601,40 @@ def _write_docx(paragraphs, out_path, *, show_timestamp=True, title=None,
     # Embed Transcribr's own metadata in the document: the source-audio
     # location (so playback works when the transcript is re-opened) and
     # who verified it (so the review pane's Verify field comes back
-    # filled in).
-    if audio_path or verified_by:
+    # filled in). Document properties are hard-capped at 255 characters,
+    # so the record sheds detail until it fits - the relative audio path
+    # is kept in preference to the absolute one because it also survives
+    # a whole case folder being moved. Metadata is best-effort: a
+    # transcript must never fail to save over it.
+    try:
         import json as _json
-        meta = {}
-        if audio_path:
-            meta["audio"] = str(audio_path)
+        base = {}
         if verified_by:
-            meta["verified_by"] = str(verified_by)
-        doc.core_properties.comments = _json.dumps({"transcribr": meta})
+            base["verified_by"] = str(verified_by)
+        audio = str(audio_path) if audio_path else None
+        rel = None
+        if audio:
+            try:
+                rel = os.path.relpath(
+                    audio, os.path.dirname(str(out_path)) or ".")
+            except ValueError:      # e.g. different drive on Windows
+                pass
+        candidates = []
+        for extra in ({"audio": audio, "audio_rel": rel},
+                      {"audio_rel": rel},
+                      {"audio": audio},
+                      {}):
+            meta = dict(base)
+            meta.update({k: v for k, v in extra.items() if v})
+            if meta and meta not in candidates:
+                candidates.append(meta)
+        for meta in candidates:
+            encoded = _json.dumps({"transcribr": meta})
+            if len(encoded) <= 255:
+                doc.core_properties.comments = encoded
+                break
+    except Exception:
+        pass
 
     # Footer: "Page X of Y" right-aligned, in Courier New so it matches
     # the body font. python-docx doesn't expose Word field codes
@@ -4966,13 +4999,15 @@ def open_transcript_info(path):
         "verified_by": parsed.get("verified_by"),
         "loaded": True,
         # Prefer the audio location embedded in the .docx metadata
-        # (when it still exists on disk); fall back to the
-        # filename-sibling guess.
-        "audio_path": (
-            parsed.get("audio_path")
-            if parsed.get("audio_path")
-            and Path(parsed["audio_path"]).exists()
-            else _guess_audio_for_transcript(path)),
+        # (when it still exists on disk) - absolute first, then the
+        # transcript-relative one, which keeps working after the whole
+        # folder has been moved; fall back to the filename-sibling
+        # guess.
+        "audio_path": next(
+            (p for p in (parsed.get("audio_path"),
+                         parsed.get("audio_path_rel"))
+             if p and Path(p).exists()),
+            _guess_audio_for_transcript(path)),
     }
 
 

@@ -1225,6 +1225,65 @@ class TestReviewSession(unittest.TestCase):
         self.assertIsNone(
             T.open_transcript_info(out2)["verified_by"])
 
+    def test_long_path_metadata_never_kills_save(self):
+        # Regression: a long audio path plus a verified name pushed
+        # the embedded metadata past python-docx's 255-character
+        # property cap and the save crashed. The record must shed
+        # detail (keeping the name and a relative audio path) and the
+        # save must always succeed.
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        deep = (Path(self.tmp.name) / ("d" * 110) / ("e" * 110))
+        deep.mkdir(parents=True)
+        audio = deep / "evidence.mp3"   # stem differs from transcript
+        audio.write_bytes(b"\x00" * 32)
+        out = deep / "doc.transcript.docx"
+        self.assertGreater(len(str(audio)), 255)
+        T.write_paragraphs_to_file(
+            _doc(), out, show_timestamp=True, title="T",
+            output_format="docx", verified_by="J. Leaver",
+            audio_path=str(audio))
+        info = T.open_transcript_info(str(out))
+        self.assertEqual(info["verified_by"], "J. Leaver")
+        # The relative entry still finds the audio (the filename
+        # guess cannot - the stems differ).
+        self.assertEqual(info["audio_path"], str(audio))
+
+    def test_relative_audio_survives_folder_move(self):
+        # Moving a whole case folder keeps playback working: the
+        # transcript-relative path resolves at the new location.
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        before = Path(self.tmp.name) / "case-a"
+        before.mkdir()
+        audio = before / "evidence.mp3"
+        audio.write_bytes(b"\x00" * 32)
+        out = before / "doc.transcript.docx"
+        T.write_paragraphs_to_file(
+            _doc(), out, show_timestamp=True, title="T",
+            output_format="docx", audio_path=str(audio))
+        after = Path(self.tmp.name) / "case-b"
+        before.rename(after)
+        info = T.open_transcript_info(str(after / out.name))
+        self.assertEqual(info["audio_path"],
+                         str(after / "evidence.mp3"))
+
+    def test_absurd_verified_name_skips_metadata_not_save(self):
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("needs python-docx")
+        out = Path(self.tmp.name) / "big.transcript.docx"
+        T.write_paragraphs_to_file(
+            _doc(), out, show_timestamp=True, title="T",
+            output_format="docx", verified_by="N" * 300)
+        info = T.open_transcript_info(str(out))
+        self.assertIsNone(info["verified_by"])
+
     def test_extra_formats_follow_reviewed_text(self):
         # SRT/VTT/TSV reflect the user's edits; JSON keeps the raw
         # engine result.
