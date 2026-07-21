@@ -1872,7 +1872,19 @@ class TestAudioPrep(unittest.TestCase):
         self._wait(prep)
         self.assertEqual(prep.state, "ready")
         self.assertEqual(prep.serve_path, str(wav))
-        self.assertEqual(prep.status()["url"], "/audio/current")
+        self.assertEqual(prep.status()["url"],
+                         f"/audio/current?v={prep.version}")
+
+    def test_each_session_gets_a_distinct_audio_url(self):
+        # Regression: the URL used to be the same fixed string for
+        # every review, so the browser kept playing the previously
+        # loaded recording when the next transcript was opened.
+        wav = self._tiny_wav()
+        a = T.AudioPrep(str(wav), self.broker)
+        b = T.AudioPrep(str(wav), self.broker)
+        self._wait(a)
+        self._wait(b)
+        self.assertNotEqual(a.status()["url"], b.status()["url"])
 
     @unittest.skipUnless(T.shutil.which("ffmpeg"), "needs ffmpeg")
     def test_extracts_non_passthrough_and_caches(self):

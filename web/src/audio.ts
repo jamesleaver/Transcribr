@@ -61,7 +61,9 @@ export function playSpan(
   onStopped: () => void,
 ): void {
   const audio = ensure();
-  const src = `${url}?${tokenQuery()}`;
+  // The server varies the URL per review session (?v=...), so the
+  // same-src reuse below can never replay a previous session's file.
+  const src = `${url}${url.includes("?") ? "&" : "?"}${tokenQuery()}`;
   finish();                       // stop + notify any previous span
   const session: Session = { stopAt: span.end, cb: onStopped };
   active = session;

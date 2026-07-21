@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -294,6 +294,11 @@ _RECENT_MAX = 10
 
 
 def _config_dir():
+    override = os.environ.get("TRANSCRIBR_CONFIG_DIR", "").strip()
+    if override:
+        base = Path(override)
+        base.mkdir(parents=True, exist_ok=True)
+        return base
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "Transcribr"
     elif sys.platform == "win32":
@@ -2141,49 +2146,178 @@ def transcribe_worker(params, q, cancel_event):
     q.put(("done", str(out_path)))
 
 
+# --- dead-air detection -----------------------------------------------
+# True "no recorded audio" (a camera whose microphone switches on late,
+# a muted channel) sits at or near digital silence - far below even a
+# quiet room's noise floor - so a conservative RMS gate separates it
+# from soft speech. Only spans long enough to matter are reported.
+
+SILENCE_WINDOW_SECS = 0.5
+SILENCE_RMS = 1e-3            # about -60 dBFS
+SILENCE_MIN_SPAN_SECS = 5.0
+
+
+def detect_silences(audio, rate=AUDIO_SAMPLE_RATE,
+                    min_span=SILENCE_MIN_SPAN_SECS,
+                    threshold=SILENCE_RMS):
+    """Scan a mono float sample array for spans with essentially no
+    recorded audio. Returns [(start_sec, end_sec), ...] of merged spans
+    at least min_span long; a trailing span runs to the file's end."""
+    import numpy as np
+    samples = np.asarray(audio, dtype=np.float32)
+    n = int(samples.shape[0])
+    w = max(1, int(rate * SILENCE_WINDOW_SECS))
+    m = n // w
+    if m == 0:
+        return []
+    rms = np.sqrt(np.mean(np.square(samples[:m * w].reshape(m, w)),
+                          axis=1))
+    quiet = rms < threshold
+    runs = []
+    start = None
+    for i, flag in enumerate(quiet):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, m))
+    win = w / float(rate)
+    total = n / float(rate)
+    out = []
+    for a, b in runs:
+        s = a * win
+        e = total if b == m else b * win
+        if e - s >= min_span:
+            out.append((round(s, 2), round(e, 2)))
+    return out
+
+
+def _drop_segments_in_silence(segments, spans):
+    """Whisper models invent text inside dead air. Drop segments whose
+    time range lies (almost) entirely inside a detected no-audio span -
+    at least 90% overlap, so real speech brushing a span's edge is
+    never touched. Returns (kept_segments, dropped_count)."""
+    kept = []
+    dropped = 0
+    for seg in segments:
+        s, e = float(seg[0]), float(seg[1])
+        length = max(e - s, 1e-6)
+        phantom = any(
+            (min(e, b) - max(s, a)) / length >= 0.9
+            for a, b in spans)
+        if phantom:
+            dropped += 1
+        else:
+            kept.append(seg)
+    return kept, dropped
+
+
+def _splice_no_audio_markers(paragraphs, letters, spans):
+    """Weave "[No audio from A to B]" marker paragraphs (single
+    pseudo-segments spanning the dead air) into the paragraph list in
+    time order. `letters` (per-paragraph speaker labels, possibly None)
+    stays parallel; markers never get a speaker."""
+    if not spans:
+        return paragraphs, letters
+
+    def plain(t):
+        return format_timestamp(t)[1:-1]
+
+    markers = [
+        [(a, b, f"[No audio from {plain(a)} to {plain(b)}]")]
+        for a, b in spans]
+    lts = letters if letters is not None else [None] * len(paragraphs)
+    merged = []
+    mlts = []
+    pi = mi = 0
+    while pi < len(paragraphs) or mi < len(markers):
+        take_marker = (
+            mi < len(markers)
+            and (pi >= len(paragraphs)
+                 or markers[mi][0][0] <= paragraphs[pi][0][0]))
+        if take_marker:
+            merged.append(markers[mi])
+            mlts.append(None)
+            mi += 1
+        else:
+            merged.append(paragraphs[pi])
+            mlts.append(lts[pi])
+            pi += 1
+    return merged, (mlts if letters is not None else None)
+
+
 def _paragraphs_with_speakers(segments, result, params, q, cancel_event):
     """Group segments into paragraphs with the programmatic heuristics,
     then - when the experimental speaker detection is on - suggest a
     label for each paragraph. The paragraphs are identical either way:
     detection only labels them, never reshapes them, and any failure
-    just leaves the labels off with a logged warning."""
-    words = _extract_word_conf(result) if result else []
-    paragraphs = paragraphify(segments, params["gap"], words=words)
-    if not params.get("diarize"):
-        return paragraphs, None
+    just leaves the labels off with a logged warning.
+
+    Before grouping, the recording is scanned for dead air (no recorded
+    audio at all): phantom text transcribed inside those spans is
+    removed and each span becomes a "[No audio from A to B]" marker
+    paragraph, so the transcript states plainly where the recording has
+    sound and where it doesn't."""
+    spans = []
     try:
         audio = params.get("_audio")
         if audio is None:
             audio = decode_audio_16k(params["input"])
-        if audio is None:
-            raise DiarizationUnavailable(
-                "the audio could not be decoded for speaker detection "
-                "(the 'av' package is required).")
-        voice_id = params.get("diarize_model") or DIARIZE_DEFAULT_VOICE_MODEL
-        if not diarize_models_ready(voice_id):
-            ensure_diarize_models(q, cancel_event, voice_id)
-        q.put(("log", "\nIdentifying speakers (experimental)...\n"))
-        turns = _run_diarization(
-            audio, params.get("num_speakers") or 0, q, cancel_event,
-            voice_id=voice_id,
-            threshold=params.get("diarize_threshold"))
-        para_letters = label_paragraphs(paragraphs, turns)
-        labelled = sum(1 for L in para_letters if L)
+            if audio is not None:
+                params["_audio"] = audio
+        if audio is not None:
+            spans = detect_silences(audio)
+    except Exception:
+        _log("dead-air scan failed:\n" + traceback.format_exc())
+    if spans:
+        segments, dropped = _drop_segments_in_silence(segments, spans)
         q.put(("log",
-               f"  labelled {labelled} of {len(paragraphs)} "
-               "paragraphs (uncertain ones are left for review)\n"))
-        return paragraphs, para_letters
-    except _CancelledByUser:
-        q.put(("log", "\n[Speaker detection skipped - stopped by "
-                      "user]\n"))
-    except DiarizationUnavailable as e:
-        q.put(("log", f"\nSpeaker detection skipped: {e}\n"))
-    except Exception as e:
-        _log("diarization failed:\n" + traceback.format_exc())
-        q.put(("log",
-               f"\nSpeaker detection failed - continuing without it.\n"
-               f"  {type(e).__name__}: {e}\n"))
-    return paragraphs, None
+               f"\nFound {len(spans)} span(s) with no recorded audio - "
+               "marking them in the transcript.\n"))
+        if dropped:
+            q.put(("log",
+                   f"  removed {dropped} phantom segment(s) the model "
+                   "invented inside the silence\n"))
+
+    words = _extract_word_conf(result) if result else []
+    paragraphs = paragraphify(segments, params["gap"], words=words)
+    para_letters = None
+    if params.get("diarize"):
+        try:
+            audio = params.get("_audio")
+            if audio is None:
+                audio = decode_audio_16k(params["input"])
+            if audio is None:
+                raise DiarizationUnavailable(
+                    "the audio could not be decoded for speaker detection "
+                    "(the 'av' package is required).")
+            voice_id = (params.get("diarize_model")
+                        or DIARIZE_DEFAULT_VOICE_MODEL)
+            if not diarize_models_ready(voice_id):
+                ensure_diarize_models(q, cancel_event, voice_id)
+            q.put(("log", "\nIdentifying speakers (experimental)...\n"))
+            turns = _run_diarization(
+                audio, params.get("num_speakers") or 0, q, cancel_event,
+                voice_id=voice_id,
+                threshold=params.get("diarize_threshold"))
+            para_letters = label_paragraphs(paragraphs, turns)
+            labelled = sum(1 for L in para_letters if L)
+            q.put(("log",
+                   f"  labelled {labelled} of {len(paragraphs)} "
+                   "paragraphs (uncertain ones are left for review)\n"))
+        except _CancelledByUser:
+            q.put(("log", "\n[Speaker detection skipped - stopped by "
+                          "user]\n"))
+        except DiarizationUnavailable as e:
+            q.put(("log", f"\nSpeaker detection skipped: {e}\n"))
+        except Exception as e:
+            _log("diarization failed:\n" + traceback.format_exc())
+            q.put(("log",
+                   f"\nSpeaker detection failed - continuing without "
+                   f"it.\n  {type(e).__name__}: {e}\n"))
+    return _splice_no_audio_markers(paragraphs, para_letters, spans)
 
 
 def _run_openai_whisper(params, q, cancel_event):
@@ -4869,6 +5003,9 @@ class AudioPrep:
         self.serve_path = None
         self.duration = None
         self.error = None
+        # Distinguishes this session's audio URL from earlier sessions'
+        # so the browser can never reuse the previously loaded file.
+        self.version = os.urandom(4).hex()
         if audio_path:
             threading.Thread(target=self._run, daemon=True,
                              name="transcribr-audio").start()
@@ -4876,7 +5013,7 @@ class AudioPrep:
     def status(self):
         out = {"state": self.state}
         if self.state == "ready":
-            out["url"] = "/audio/current"
+            out["url"] = f"/audio/current?v={self.version}"
             out["duration"] = self.duration
         if self.error:
             out["error"] = self.error
@@ -5734,8 +5871,12 @@ class WebBackend:
             p = Path(prep.serve_path)
             mimetype = ("audio/mp4" if p.suffix.lower() == ".m4a"
                         else "auto")
-            return bottle.static_file(p.name, root=str(p.parent),
+            resp = bottle.static_file(p.name, root=str(p.parent),
                                       mimetype=mimetype)
+            # The URL names the *current* session's audio, which
+            # changes between reviews - never let the browser cache it.
+            resp.set_header("Cache-Control", "no-store")
+            return resp
 
         # -- run / batch -------------------------------------------------
 

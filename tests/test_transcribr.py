@@ -722,6 +722,103 @@ class TestPdfWriter(unittest.TestCase):
             self.assertTrue(out.read_bytes().startswith(b"%PDF"))
 
 
+def _have_numpy():
+    try:
+        import numpy  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class TestDeadAirDetection(unittest.TestCase):
+    RATE = 16000
+
+    def _samples(self, *parts):
+        """Build a mono array from (seconds, amplitude) parts."""
+        import numpy as np
+        rng = np.random.default_rng(7)
+        chunks = []
+        for secs, amp in parts:
+            n = int(secs * self.RATE)
+            if amp == 0.0:
+                chunks.append(np.zeros(n, dtype=np.float32))
+            else:
+                chunks.append(
+                    (rng.standard_normal(n) * amp).astype(np.float32))
+        return np.concatenate(chunks)
+
+    @unittest.skipUnless(_have_numpy(), "needs numpy")
+    def test_detects_leading_and_middle_silence(self):
+        audio = self._samples((6, 0.0), (4, 0.1), (7, 0.0), (3, 0.1))
+        spans = T.detect_silences(audio, self.RATE)
+        self.assertEqual(spans, [(0.0, 6.0), (10.0, 17.0)])
+
+    @unittest.skipUnless(_have_numpy(), "needs numpy")
+    def test_trailing_silence_runs_to_end_of_file(self):
+        audio = self._samples((4, 0.1), (6.3, 0.0))
+        self.assertEqual(T.detect_silences(audio, self.RATE),
+                         [(4.0, 10.3)])
+
+    @unittest.skipUnless(_have_numpy(), "needs numpy")
+    def test_short_gaps_and_quiet_speech_are_not_dead_air(self):
+        # A 3s gap is an ordinary pause; a quiet-but-live channel
+        # (soft speech, room tone) sits well above the -60 dBFS gate.
+        audio = self._samples((5, 0.1), (3, 0.0), (5, 0.1))
+        self.assertEqual(T.detect_silences(audio, self.RATE), [])
+        audio = self._samples((6, 0.01), (6, 0.1))
+        self.assertEqual(T.detect_silences(audio, self.RATE), [])
+
+    def test_phantom_segments_inside_silence_are_dropped(self):
+        spans = [(0.0, 40.0)]
+        segments = [
+            (2.0, 6.0, "Thanks for watching!"),
+            (38.5, 43.0, "Real speech."),
+            (45.0, 50.0, "More speech."),
+        ]
+        kept, dropped = T._drop_segments_in_silence(segments, spans)
+        self.assertEqual(dropped, 1)
+        self.assertEqual([s[2] for s in kept],
+                         ["Real speech.", "More speech."])
+
+    def test_markers_are_spliced_in_time_order(self):
+        paragraphs = [
+            [(41.0, 44.0, "Hello there.")],
+            [(50.0, 53.0, "How are you?")],
+        ]
+        spans = [(0.0, 40.0), (45.0, 49.5)]
+        merged, letters = T._splice_no_audio_markers(
+            paragraphs, ["1", "2"], spans)
+        self.assertEqual(
+            [p[0][2] for p in merged],
+            ["[No audio from 00:00 to 00:40]",
+             "Hello there.",
+             "[No audio from 00:45 to 00:49]",
+             "How are you?"])
+        self.assertEqual(letters, [None, "1", None, "2"])
+        # Without diarisation the labels stay absent entirely.
+        merged, letters = T._splice_no_audio_markers(
+            paragraphs, None, spans)
+        self.assertEqual(len(merged), 4)
+        self.assertIsNone(letters)
+
+    @unittest.skipUnless(_have_numpy(), "needs numpy")
+    def test_pipeline_marks_dead_air_and_drops_phantoms(self):
+        import queue as queue_mod
+        audio = self._samples((10, 0.0), (10, 0.1))
+        segments = [
+            (1.0, 4.0, "Phantom text."),
+            (11.0, 14.0, "Real speech."),
+        ]
+        params = {"_audio": audio, "input": "unused", "gap": 2.0}
+        q = queue_mod.Queue()
+        paragraphs, letters = T._paragraphs_with_speakers(
+            segments, None, params, q, None)
+        self.assertEqual(
+            [p[0][2] for p in paragraphs],
+            ["[No audio from 00:00 to 00:10]", "Real speech."])
+        self.assertIsNone(letters)
+
+
 class TestUnknownFormatFallsBackToTxt(unittest.TestCase):
     def test_unknown_format_writes_text(self):
         with tempfile.TemporaryDirectory() as d:
