@@ -293,18 +293,23 @@ APP="/Applications/Transcribr.app"
 
 if [ -e "$APP" ]; then
     info "Existing app at: $APP"
-    rm -rf "$APP" || fail "Could not remove existing app (permission denied?)"
+    if ! rm -rf "$APP" 2>/dev/null || [ -e "$APP" ]; then
+        # A bundle installed by another macOS account (even a deleted
+        # one) can't be removed with this user's permissions alone -
+        # ask for an administrator password the standard way.
+        info "It was installed by another user - macOS will ask for an"
+        info "administrator password to replace it."
+        /usr/bin/osascript -e 'do shell script "rm -rf /Applications/Transcribr.app" with administrator privileges' \
+            || fail "Could not replace it. Delete Transcribr in the Applications folder yourself, then re-run this installer."
+    fi
 fi
 
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 
-# Render the launcher template, substituting the venv and script paths.
-sed \
-    -e "s|@VENV@|$VENV|g" \
-    -e "s|@SCRIPT@|$APP_SUPPORT/transcribr.py|g" \
-    "$INSTALLER_DIR/app_template/launcher" \
-    > "$APP/Contents/MacOS/launcher"
+# The launcher finds the current user's venv at launch time, so it is
+# copied verbatim - one bundle works for every account on the Mac.
+cp "$INSTALLER_DIR/app_template/launcher" "$APP/Contents/MacOS/launcher"
 chmod +x "$APP/Contents/MacOS/launcher"
 
 cp "$INSTALLER_DIR/app_template/Info.plist" "$APP/Contents/Info.plist"
