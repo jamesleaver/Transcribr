@@ -307,7 +307,7 @@ const Row = memo(function Row({
       onClick={onClick}
       title={
         para.suspect
-          ? "This looks like repeated or hallucinated text — consider re-transcribing it (Fix a section)."
+          ? "This looks like repeated or low-confidence text — consider re-transcribing it (Fix a section)."
           : undefined
       }
       className="grid cursor-default grid-cols-[130px_64px_1fr] gap-3 rounded-lg px-3 py-1.5"

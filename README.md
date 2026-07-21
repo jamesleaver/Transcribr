@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.0.
+(c) James Leaver, 2026. Version 0.9.8.
 
 Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
 
@@ -9,10 +9,21 @@ Windows. A Whisper engine (faster-whisper by default; mlx-whisper and
 openai-whisper where installed) does the transcription, an optional
 speaker-detection pass works out who is speaking, the result is grouped
 into likely paragraphs, and a built-in review pane lets you check and
-label speakers, edit text, search and replace, and specifically play
-each paragraph from the source audio before saving as Word (`.docx`),
-PDF, or plain text. Several files can be queued and transcribed in one
-unattended batch.
+label speakers, edit text, search and replace, and play each paragraph
+from the source audio before saving as Word (`.docx`), PDF, or plain
+text. Several files can be queued and transcribed in one unattended
+batch.
+
+The review pane also lets you **edit or hide the timestamp** on any
+paragraph, and it does two things automatically to help with poor
+recordings: stretches of a file with **no recorded audio** (a
+microphone that switches on late, a muted channel) are marked in the
+transcript instead of being filled with invented text, and paragraphs
+that look like engine **hallucination** — runaway repeated words, or
+text the engine itself scored as very low confidence — are flagged for
+your attention. Where a passage did come out garbled, you can select
+those paragraphs and **re-transcribe just that section** of the
+recording with different settings.
 
 **Everything runs locally on your computer — no audio, video, or
 transcripts are uploaded to the internet.** This may be particularly
@@ -141,6 +152,14 @@ is needed at all — the PyAV package bundles the decoding libraries).
    The reference **openai-whisper** engine isn't installed up front
    (it pulls in PyTorch, ~2 GB). Add it any time from the **Models** tab
    in the app if you want it — see [Models](#models) below.
+
+   `Transcribr.app` in `/Applications` is shared by every user account
+   on the Mac, but each account keeps its own environment under its own
+   `~/Library/Application Support/Transcribr/`. If more than one person
+   uses the computer, each runs the installer once while logged in as
+   themselves; if an existing app was installed by another (or a
+   deleted) account, the installer asks for an administrator password
+   to replace it.
 
 ### Windows
 
@@ -350,12 +369,29 @@ disk. Whether timestamps appear in the saved file (`[MM:SS]` at each
 paragraph) is chosen on the Review pane's Saving card, on by
 default.
 
+**No-audio markers.** Some recordings have long stretches with no
+sound at all — a body-worn camera whose microphone switches on part
+way through, a muted conference line, a video whose audio track starts
+late. Whisper tends to invent text over that silence ("Thank you.
+Thank you…", "Thanks for watching."). Transcribr scans the decoded
+audio for these dead stretches (five seconds or more of essentially
+digital silence, well below even a quiet room), removes the phantom
+text the model produced inside them, and inserts a marker paragraph
+in its place — for example `[No audio from 00:00 to 04:12]` — so the
+transcript states plainly where the recording has sound and where it
+does not. The markers are ordinary paragraphs: you can reword or
+delete them in Review like anything else.
+
 ### Recent
 
 The last ten transcripts you produced or opened, with their locations.
 Click one (or its **Review** button) to re-open it for speaker
 labelling and editing; **Open transcript…** browses for any other
-`.docx`/`.txt` transcript.
+`.docx`/`.txt` transcript. A transcript you have saved from the review
+pane is tagged **Reviewed**, or **Verified** when you named a verifier
+on it (see **Verify transcript** below), so you can tell at a glance
+which recordings still need checking. Re-transcribing a file afresh
+clears the tag.
 
 ### Models
 
@@ -411,21 +447,61 @@ arrive pre-filled ("speakers suggested automatically — please verify"
 appears in the header) and your job is to check them, name the
 speakers, and fill in whatever was left unlabelled.
 
-The right rail also holds: **Playback** (P plays just the selected
-paragraph, ⌘P plays on from it; **Locate audio…** points at the
-recording if it can't be found — saved `.docx` transcripts embed the
-recording's location so playback survives re-opening), **Timestamps /
-uncertain words** (whether timestamps appear in the saved file, and
-confidence shading), and **Verify transcript** — type your name to
-certify you have checked the transcript, which switches the appended
-disclaimer from the accuracy warning to *"This transcript has been
-verified by <your name>."* The save format (`.docx`/`.txt`) is set on
-the Settings page; **Export PDF** in the header writes a one-off PDF
-copy without closing the review.
+The right rail also holds:
+
+- **Playback** — `P` plays just the selected paragraph, `⌘P` plays on
+  from it; **Locate audio…** points at the recording if it can't be
+  found. Saved `.docx` transcripts embed the recording's location (both
+  an absolute and a transcript-relative path, so playback keeps working
+  even after the whole case folder is moved) so it survives re-opening.
+- **Fix a section** — re-transcribe a stretch of the recording that
+  came out badly; see below.
+- **Timestamps / uncertain words** — whether timestamps appear in the
+  saved file, and confidence shading.
+- **Find & replace.**
+- **Verify transcript** — type your name to certify you have checked
+  the transcript, which switches the appended disclaimer from the
+  accuracy warning to *"This transcript has been verified by <your
+  name>."* The name is remembered in the saved `.docx`'s metadata, so
+  re-opening that document brings your name back and pre-fills this
+  field.
+
+The save format (`.docx`/`.txt`) is set on the Settings page;
+**Export PDF** in the header writes a one-off PDF copy without closing
+the review.
+
+**Editing a timestamp.** Click a paragraph's `[MM:SS]` chip to open a
+small editor. You can type a corrected time, **Hide** the stamp so it
+does not appear in the saved document (it shows as `[–:––]` in the
+pane), or **Reset** it back to the computed time. Amended and hidden
+stamps are remembered and applied to whatever you save; playback still
+uses the true position in the recording.
+
+**Flagged paragraphs.** Passages that look like engine hallucination
+are marked with an amber stripe down the left edge — either runaway
+repetition (a word or phrase looping, or a line repeated across
+paragraphs) or, when the run recorded word confidence, a paragraph the
+engine itself scored mostly very low. The **Fix a section** card shows
+how many were found and a **Jump to next** button that selects the
+flagged run ready to re-transcribe. Ordinary courtroom repetition
+("Yes. Yes.", "Thank you. Thank you.") is deliberately left alone.
+
+**Fix a section (re-transcribing part of a recording).** When a
+stretch came out as a hallucinated loop or garble, select the
+paragraph(s) — click one, then Shift-click another to extend the
+range — and use the **Fix a section** card. Leave **Condition on
+previous text** off (carrying context in is usually what caused the
+loop), optionally pick a different model for the re-run, and press
+**Re-transcribe**. Only that section of the audio is run again, only
+the selected paragraphs are replaced, and one **Undo** reverses it. A
+progress bar and a live output box (the same engine output the
+Transcribe page shows) report how it is going. This needs the source
+recording, so use **Locate audio…** first if playback isn't available.
 
 | Action | How |
 |---|---|
 | Select a paragraph | Click it, or Up/Down arrows |
+| Extend the selection | Shift-click another paragraph |
 | Assign a speaker | Press `1`–`9` (auto-advances to the next paragraph) |
 | Clear a speaker | Press `0` |
 | Jump to the next unlabelled paragraph | Press `N` |
@@ -433,6 +509,7 @@ copy without closing the review.
 | Merge with the previous paragraph | Press `M` |
 | Split a paragraph | Double-click the word to split before |
 | Edit the text | Enter (or F2), then Enter to commit / Esc to cancel |
+| Amend or hide a timestamp | Click the `[MM:SS]` chip |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Cmd on Mac), or the buttons |
 | Find / replace | Ctrl+F (Cmd+F), then *Find next* / *Replace all* |
 

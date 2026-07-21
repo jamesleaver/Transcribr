@@ -299,7 +299,7 @@ function FixSectionCard() {
           <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
             ⚠ {suspectCount} paragraph{suspectCount === 1 ? "" : "s"}{" "}
             {suspectCount === 1 ? "looks" : "look"} like repeated or
-            hallucinated text.
+            low-confidence text.
           </p>
           <button
             className="mt-1.5 rounded border border-amber-500/50 px-2 py-0.5 text-[11px] font-medium text-amber-700 hover:bg-amber-500/15 dark:text-amber-400"

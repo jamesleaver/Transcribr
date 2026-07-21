@@ -875,6 +875,29 @@ class TestHallucinationDetection(unittest.TestCase):
         self.assertEqual(
             T.detect_hallucinations(self._paras("Thank you.")), [])
 
+    def test_low_confidence_paragraph_flagged(self):
+        # The engine's own confidence is a second hint: a paragraph
+        # most of whose words scored very low is flagged even without
+        # any repetition.
+        paras = self._paras("A clearly spoken sentence here.",
+                            "garbled indistinct crosstalk mumble noise",
+                            "Another clear sentence follows on.")
+        confidences = [[0.9, 0.9, 0.9, 0.9, 0.9],
+                       [0.1, 0.2, 0.15, 0.3, 0.25],
+                       [0.9, 0.9, 0.9, 0.9]]
+        self.assertEqual(
+            T.detect_hallucinations(paras, confidences=confidences), [1])
+        # Without the confidence hint the text alone reads fine.
+        self.assertEqual(T.detect_hallucinations(paras), [])
+
+    def test_soft_but_confident_passage_not_flagged(self):
+        # Medium confidence (a soft-spoken but genuine passage) is left
+        # alone - only the strong low band counts.
+        paras = self._paras("A quietly spoken but real sentence.")
+        self.assertEqual(
+            T.detect_hallucinations(paras, confidences=[[0.5, 0.5, 0.5,
+                                                         0.5, 0.5]]), [])
+
 
 class TestUnknownFormatFallsBackToTxt(unittest.TestCase):
     def test_unknown_format_writes_text(self):

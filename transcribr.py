@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.7"
+__version__ = "0.9.8"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -2203,6 +2203,15 @@ _WORD_RE = re.compile(r"\w+(?:['’]\w+)?", re.UNICODE)
 HALLUCINATION_MIN_REPEATS = 3
 HALLUCINATION_COVERAGE = 0.6
 
+# The engine's own confidence as a second hint: a paragraph most of
+# whose words the engine scored very low (the same < 0.35 band the
+# review pane shades red) is likely garbled or invented. Kept
+# conservative - a solid majority of several words - so a soft-spoken
+# but genuine passage isn't flagged.
+HALLUCINATION_LOWCONF_PROB = 0.35
+HALLUCINATION_LOWCONF_FRACTION = 0.6
+HALLUCINATION_LOWCONF_MINWORDS = 4
+
 
 def _normalise_words(text):
     return _WORD_RE.findall((text or "").lower())
@@ -2249,15 +2258,30 @@ def _has_repetition_loop(text):
     return False
 
 
-def detect_hallucinations(paragraphs):
+def _mostly_low_confidence(word_probs):
+    """True if a solid majority of a paragraph's words carry very low
+    engine confidence - a hint the passage is garbled or invented."""
+    probs = [p for p in (word_probs or []) if p is not None]
+    if len(probs) < HALLUCINATION_LOWCONF_MINWORDS:
+        return False
+    low = sum(1 for p in probs if p < HALLUCINATION_LOWCONF_PROB)
+    return low / len(probs) >= HALLUCINATION_LOWCONF_FRACTION
+
+
+def detect_hallucinations(paragraphs, confidences=None):
     """Return the sorted indices of paragraphs that look like engine
-    hallucination: a runaway repeated word/phrase within a paragraph,
-    or a non-trivial line repeated verbatim across adjacent paragraphs."""
+    hallucination: a runaway repeated word/phrase within a paragraph, a
+    non-trivial line repeated verbatim across adjacent paragraphs, or
+    (when `confidences` - a per-paragraph list of word probabilities -
+    is given) a paragraph the engine itself scored mostly very low."""
     bodies = [" ".join(seg[2] for seg in para).strip()
               for para in paragraphs]
     flagged = set()
     for i, body in enumerate(bodies):
         if _has_repetition_loop(body):
+            flagged.add(i)
+        elif confidences is not None and i < len(confidences) \
+                and _mostly_low_confidence(confidences[i]):
             flagged.add(i)
     # Consecutive (normalised-)identical, non-trivial paragraphs.
     for i in range(1, len(bodies)):
@@ -5621,7 +5645,12 @@ class ReviewSession:
         with self.lock:
             m = self.model
             conf = m.confidence_spans()
-            suspect = set(detect_hallucinations(m.paragraphs))
+            confidences = (
+                [[p for _w, p in bucket]
+                 for bucket in m._bucket_words_by_paragraph()]
+                if m.word_conf else None)
+            suspect = set(detect_hallucinations(m.paragraphs,
+                                                confidences=confidences))
             paragraphs = []
             for i, para in enumerate(m.paragraphs):
                 span = m.playback_span(i)
