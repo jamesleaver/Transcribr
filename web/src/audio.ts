@@ -15,6 +15,7 @@ import { tokenQuery } from "./api/client";
 interface Session {
   stopAt: number | null;
   cb: () => void;
+  onTick?: (currentSec: number) => void;
 }
 
 let el: HTMLAudioElement | null = null;
@@ -36,8 +37,9 @@ function ensure(): HTMLAudioElement {
   el = new Audio();
   el.preload = "auto";
   el.addEventListener("timeupdate", () => {
-    if (el && active && active.stopAt !== null
-        && el.currentTime >= active.stopAt) {
+    if (!el || !active) return;
+    active.onTick?.(el.currentTime);
+    if (active.stopAt !== null && el.currentTime >= active.stopAt) {
       finish();
     }
   });
@@ -59,13 +61,14 @@ export function playSpan(
   url: string,
   span: { start: number; end: number | null },
   onStopped: () => void,
+  onTick?: (currentSec: number) => void,
 ): void {
   const audio = ensure();
   // The server varies the URL per review session (?v=...), so the
   // same-src reuse below can never replay a previous session's file.
   const src = `${url}${url.includes("?") ? "&" : "?"}${tokenQuery()}`;
   finish();                       // stop + notify any previous span
-  const session: Session = { stopAt: span.end, cb: onStopped };
+  const session: Session = { stopAt: span.end, cb: onStopped, onTick };
   active = session;
   const begin = () => {
     if (active !== session) return;   // superseded while loading

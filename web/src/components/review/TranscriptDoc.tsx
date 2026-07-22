@@ -134,6 +134,12 @@ function TimestampCell({
   const amended = typeof para.ts === "number";
   const effective = amended ? (para.ts as number) : para.start;
 
+  // While this paragraph is playing, the stamp turns green and shows
+  // the live position ticking up as the recording plays.
+  const playingHere = useReview((s) => s.playing === index);
+  const playHeadSec = useReview((s) => s.playHeadSec);
+  const live = playingHere && playHeadSec !== null;
+
   const apply = () => {
     const parsed = parseTimestamp(draft);
     if (parsed !== null) {
@@ -145,11 +151,14 @@ function TimestampCell({
   return (
     <div className="relative pt-0.5">
       <button
-        className="rounded font-mono text-[11px] hover:underline"
+        className={`rounded font-mono text-[11px] hover:underline ${
+          live ? "animate-pulse" : ""
+        }`}
         style={{
-          color: "var(--timestamp-fg)",
-          opacity: hidden ? 0.45 : 1,
-          fontStyle: amended ? "italic" : undefined,
+          color: live ? "#16a34a" : "var(--timestamp-fg)",
+          fontWeight: live ? 700 : undefined,
+          opacity: hidden && !live ? 0.45 : 1,
+          fontStyle: amended && !live ? "italic" : undefined,
         }}
         title={
           hidden
@@ -165,7 +174,11 @@ function TimestampCell({
           setOpen((v) => !v);
         }}
       >
-        {hidden ? "[–:––]" : formatTimestamp(effective)}
+        {live
+          ? `▶ ${formatTimestamp(playHeadSec)}`
+          : hidden
+            ? "[–:––]"
+            : formatTimestamp(effective)}
       </button>
       {open && (
         <div
@@ -312,7 +325,7 @@ const Row = memo(function Row({
             ? "This looks like repeated or low-confidence text — consider re-transcribing it (Fix a section)."
             : undefined
       }
-      className="grid cursor-default grid-cols-[130px_64px_1fr] gap-3 rounded-lg px-3 py-1.5 transition-opacity"
+      className="group grid cursor-default grid-cols-[130px_64px_1fr_28px] gap-3 rounded-lg px-3 py-1.5 transition-opacity"
       style={{
         background: rowBg,
         opacity: para.locked ? 0.45 : 1,
@@ -375,6 +388,18 @@ const Row = memo(function Row({
         >
           {renderBody(para.body, showConf ? para.conf : [], hit)}
         </div>
+      )}
+      {!editing && !para.locked && (
+        <button
+          className="self-start pt-0.5 text-xs text-muted opacity-0 transition-opacity hover:!text-red-500 group-hover:opacity-60 hover:!opacity-100"
+          title="Delete this paragraph (e.g. a hallucination). Undo restores it."
+          onClick={(e) => {
+            e.stopPropagation();
+            void useReview.getState().deleteParagraph(index);
+          }}
+        >
+          ✕
+        </button>
       )}
     </div>
   );

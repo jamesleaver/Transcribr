@@ -104,6 +104,8 @@ interface ReviewSlice {
   playing: number | null;
   /** True while the active playback runs on past its paragraph. */
   playingThrough: boolean;
+  /** Live playback position (seconds) while a paragraph plays. */
+  playHeadSec: number | null;
   setAudioStatus: (status: AudioStatus) => void;
   /** `through` plays on past the paragraph to the end of the audio. */
   togglePlay: (index: number, through?: boolean) => void;
@@ -148,6 +150,7 @@ interface ReviewSlice {
   commitEdit: (index: number, text: string) => Promise<void>;
   split: (index: number, offset: number) => Promise<void>;
   merge: (index: number) => Promise<void>;
+  deleteParagraph: (index: number) => Promise<void>;
   replaceAll: () => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
@@ -252,11 +255,12 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   closeDoc: () => {
     stopPlayback();
     set({ doc: null, editing: null, searchHit: null, playing: null,
-      playingThrough: false });
+      playingThrough: false, playHeadSec: null });
   },
 
   playing: null,
   playingThrough: false,
+  playHeadSec: null,
 
   saveShowTimestamp: null,
   setSaveShowTimestamp: (value) => set({ saveShowTimestamp: value }),
@@ -398,7 +402,10 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   setAudioStatus: (status) =>
     set((s) => {
       if (!s.doc) return {};
-      if (status.state !== "ready" && s.playing !== null) stopPlayback();
+      if (status.state !== "ready" && s.playing !== null) {
+        stopPlayback();
+        set({ playing: null, playingThrough: false, playHeadSec: null });
+      }
       return { doc: { ...s.doc, audio: status } };
     }),
 
@@ -409,19 +416,23 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     // Pressing the same control again stops that mode of playback.
     if (s.playing === index && s.playingThrough === through) {
       stopPlayback();
-      set({ playing: null, playingThrough: false });
+      set({ playing: null, playingThrough: false, playHeadSec: null });
       return;
     }
     const span = doc.paragraphs[index]?.play;
     if (!span || doc.audio.state !== "ready" || !doc.audio.url) return;
     stopPlayback();
-    set({ playing: index, playingThrough: through });
+    set({ playing: index, playingThrough: through, playHeadSec: span.start });
     playSpan(
       doc.audio.url,
       through ? { start: span.start, end: null } : span,
       () => {
         if (useReview.getState().playing === index)
-          set({ playing: null, playingThrough: false });
+          set({ playing: null, playingThrough: false, playHeadSec: null });
+      },
+      (currentSec) => {
+        if (useReview.getState().playing === index)
+          set({ playHeadSec: currentSec });
       },
     );
   },
@@ -596,6 +607,17 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     set({ selected: index - 1 });
   },
 
+  deleteParagraph: async (index) => {
+    const s = get();
+    const n = s.doc?.paragraphs.length ?? 0;
+    if (n <= 1 || s.doc?.paragraphs[index]?.locked) return;
+    applyResult(await mutateApi("delete", { index }));
+    // Keep the selection near where the paragraph was.
+    set((st) => ({
+      selected: clamp(index, st.doc?.paragraphs.length ?? 0),
+    }));
+  },
+
   replaceAll: async () => {
     const s = get();
     if (!s.findTerm) return;
@@ -668,7 +690,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     if (!doc) return;
     const ok = await confirmDialog({
       title: "Close without saving?",
-      body: "Your speaker labels and edits will be discarded. The file on disk stays as it was.",
+      body: "Any unsaved labels and edits will be discarded. The last saved version of the file on disk stays as it was.",
       confirmLabel: "Close without saving",
       defaultAnswer: false,
     });

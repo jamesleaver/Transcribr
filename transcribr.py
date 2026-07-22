@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.9"
+__version__ = "0.9.10"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -3550,6 +3550,22 @@ class TranscriptModel:
         self.rev += 1
         return True
 
+    def delete_paragraph(self, idx):
+        """Remove paragraph idx entirely - for a hallucination or other
+        text that isn't real speech. Refused if it is the last remaining
+        paragraph (a transcript needs at least one). One undo step."""
+        if not (0 <= idx < len(self.paragraphs)):
+            return False
+        if len(self.paragraphs) <= 1:
+            return False
+        self._push_undo()
+        del self.paragraphs[idx]
+        del self.speakers[idx]
+        del self.ids[idx]
+        del self.ts_marks[idx]
+        self.rev += 1
+        return True
+
     def split(self, idx, offset):
         """Split paragraphs[idx] at character `offset` within body().
         Both halves get real start/end times: preferring the engine's
@@ -5730,7 +5746,8 @@ class ReviewSession:
             return
         m = self.model
         idx = None
-        if action in ("speaker", "edit", "split", "timestamp", "merge"):
+        if action in ("speaker", "edit", "split", "timestamp", "merge",
+                      "delete"):
             idx = int(body.get("index", -1))
         if idx is None:
             return
@@ -5781,6 +5798,11 @@ class ReviewSession:
                 if not m.merge_with_previous(int(body.get("index", -1))):
                     raise ApiFail(400, "bad_request",
                                   "Can't merge the first paragraph.")
+                result = self.payload()
+            elif action == "delete":
+                if not m.delete_paragraph(int(body.get("index", -1))):
+                    raise ApiFail(400, "bad_request",
+                                  "Can't delete the last paragraph.")
                 result = self.payload()
             elif action == "timestamp":
                 if not m.set_ts_mark(int(body.get("index", -1)),

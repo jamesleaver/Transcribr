@@ -68,6 +68,10 @@ export function useReviewHotkeys(): void {
           e.preventDefault();
           void st.merge(st.selected);
           return;
+        case "Delete": case "Backspace":
+          e.preventDefault();
+          void st.deleteParagraph(st.selected);
+          return;
         case "n": case "N":
           e.preventDefault();
           st.jumpNextAttention();

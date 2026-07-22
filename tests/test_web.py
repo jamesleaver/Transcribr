@@ -1428,6 +1428,36 @@ class TestReviewSession(unittest.TestCase):
         self.assertIn("[02:05]", text)
         self.assertIn("Hello there.", text)
 
+    def test_delete_paragraph_and_undo(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        n0 = len(m.paragraphs)
+        second = m.body(1)
+        payload = session.mutate(m.rev, "delete", {"index": 1})
+        self.assertEqual(len(payload["paragraphs"]), n0 - 1)
+        self.assertNotIn(second, [p["body"] for p in payload["paragraphs"]])
+        # Undo brings it back in place.
+        payload = session.mutate(session.model.rev, "undo", {})
+        self.assertEqual(len(payload["paragraphs"]), n0)
+        self.assertEqual(payload["paragraphs"][1]["body"], second)
+
+    def test_delete_last_paragraph_refused(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        while len(m.paragraphs) > 1:
+            session.mutate(m.rev, "delete", {"index": 0})
+        with self.assertRaises(T.ApiFail) as ctx:
+            session.mutate(session.model.rev, "delete", {"index": 0})
+        self.assertEqual(ctx.exception.code, "bad_request")
+
+    def test_delete_locked_paragraph_refused(self):
+        session, _ = self._fresh_session(fmt="txt")
+        m = session.model
+        session.lock_paragraphs(1, 1)
+        with self.assertRaises(T.ApiFail) as ctx:
+            session.mutate(m.rev, "delete", {"index": 1})
+        self.assertEqual(ctx.exception.code, "locked")
+
     def test_timestamp_mark_is_undoable(self):
         session, _ = self._fresh_session(fmt="txt")
         rev = session.mutate(session.model.rev, "timestamp",
