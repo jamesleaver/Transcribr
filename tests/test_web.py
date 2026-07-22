@@ -2128,6 +2128,88 @@ class TestAudioPrep(unittest.TestCase):
             w.writeframes(b"\x00\x00" * 4000)   # 0.5s of silence
         return p
 
+    def test_media_extension_sets_are_unified_and_broad(self):
+        # Locate-audio, the file picker and the output-safety guard all
+        # share one list - and it covers the formats legal sources
+        # actually arrive in (ERISP .wma/.wmv, dictaphone .dss/.ds2,
+        # phone .amr/.3gp, disc .vob).
+        for ext in (".wma", ".wmv", ".amr", ".3gp", ".dss", ".ds2",
+                    ".vob", ".mpg", ".aiff"):
+            self.assertIn(ext, T._AUDIO_EXTENSIONS)
+            self.assertIn(ext, T._MEDIA_EXTENSIONS)
+        self.assertEqual(T._MEDIA_EXTENSIONS, set(T._AUDIO_EXTENSIONS))
+
+    def test_unavailable_message_names_the_real_cause(self):
+        # A non-passthrough file that PyAV can't read, with no ffmpeg:
+        # the message must say what actually went wrong, not a generic
+        # "needs the 'av' package".
+        import shutil as _shutil
+        import sys as _sys
+        bad = Path(self.tmp.name) / "interview.wma"
+        bad.write_bytes(b"\x00" * 64)          # not real audio
+        orig_which = _shutil.which
+        _shutil.which = lambda name: None       # pretend no ffmpeg
+        try:
+            # Case 1: PyAV importable but the file is undecodable.
+            _sys.modules.setdefault("av", type(_sys)("av"))
+            prep = T.AudioPrep(str(bad), self.broker)
+            self._wait(prep)
+            self.assertEqual(prep.state, "unavailable")
+            self.assertIn("Couldn't read this file's audio", prep.error)
+            self.assertIn(".mp3/.wav", prep.error)
+            # Case 2: PyAV itself missing/broken -> reinstall advice.
+            _sys.modules.pop("av", None)
+            import builtins as _b
+            orig_import = _b.__import__
+
+            def no_av(name, *a, **k):
+                if name == "av":
+                    raise ImportError("No module named 'av'")
+                return orig_import(name, *a, **k)
+
+            _b.__import__ = no_av
+            try:
+                prep2 = T.AudioPrep(str(bad), self.broker)
+                self._wait(prep2)
+            finally:
+                _b.__import__ = orig_import
+            self.assertEqual(prep2.state, "unavailable")
+            self.assertIn("re-running the Transcribr installer",
+                          prep2.error)
+        finally:
+            _shutil.which = orig_which
+            _sys.modules.pop("av", None)
+
+    def test_wav_fallback_serves_when_extraction_fails(self):
+        # If the AAC extract and ffmpeg both fail but the file CAN be
+        # decoded (the same path transcription uses), playback falls
+        # back to a 16 kHz WAV instead of giving up.
+        import shutil as _shutil
+        import numpy as np
+        src = Path(self.tmp.name) / "interview.wma"
+        src.write_bytes(b"\x00" * 64)
+        orig_which = _shutil.which
+        orig_extract = T._extract_audio_m4a_pyav
+        orig_decode = T.decode_audio_16k
+        _shutil.which = lambda name: None
+        T._extract_audio_m4a_pyav = lambda s, t: (_ for _ in ()).throw(
+            ValueError("codec not supported"))
+        T.decode_audio_16k = lambda p: np.zeros(
+            T.AUDIO_SAMPLE_RATE, dtype=np.float32) + 0.01
+        try:
+            prep = T.AudioPrep(str(src), self.broker)
+            self._wait(prep)
+        finally:
+            _shutil.which = orig_which
+            T._extract_audio_m4a_pyav = orig_extract
+            T.decode_audio_16k = orig_decode
+        self.assertEqual(prep.state, "ready")
+        self.assertTrue(prep.serve_path.endswith(".wav"))
+        import wave
+        with wave.open(prep.serve_path, "rb") as w:
+            self.assertEqual(w.getframerate(), T.AUDIO_SAMPLE_RATE)
+            self.assertEqual(w.getnchannels(), 1)
+
     def test_no_source_is_unavailable(self):
         prep = T.AudioPrep(None, self.broker)
         self.assertEqual(prep.state, "unavailable")

@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.9.
+(c) James Leaver, 2026. Version 0.9.11.
 
 Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
 
@@ -202,9 +202,13 @@ panel (or anywhere on the window), or click it to browse. Dropping a
 single file sets it as the Input; dropping several adds them all to
 the batch queue.
 
-**Input.** The audio or video file to transcribe. Anything ffmpeg can
-read works: `.mp3`, `.wav`, `.m4a`, `.mp4`, `.mov`, `.aac`, `.flac`,
-`.ogg`, `.opus`, `.webm`, etc.
+**Input.** The audio or video file to transcribe. Anything FFmpeg can
+read works — the everyday formats (`.mp3`, `.wav`, `.m4a`, `.mp4`,
+`.mov`, `.aac`, `.flac`, `.ogg`, `.opus`, `.webm`) plus the ones legal
+source material actually arrives in: police-interview exports (`.wma`,
+`.wmv`, `.asf`), dictaphone files (`.dss`, `.ds2`), phone recordings
+(`.amr`, `.3gp`), and disc rips (`.vob`, `.mpg`). The same list applies
+to the review pane's **Locate audio…** picker.
 
 **Output.** Where the transcript goes. Auto-fills to
 `<input>.transcript.docx` next to the input file. Override it if you

@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.10"
+__version__ = "0.9.11"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -263,8 +263,18 @@ def _next_revision_path(original):
         n += 1
 
 
-_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
-                     ".opus", ".mp4", ".mov", ".mkv", ".avi", ".webm")
+# Every audio/video extension the app accepts - deliberately broad,
+# because source recordings arrive in whatever a police disc, dictation
+# device or phone produced (.wma/.wmv ERISP exports, .dss/.ds2
+# dictaphones, .amr/.3gp phones, .vob/.mpg disc rips, ...). PyAV's
+# bundled FFmpeg decodes nearly all of them.
+_AUDIO_EXTENSIONS = (
+    ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm",
+    ".wma", ".wmv", ".asf", ".amr", ".3gp", ".3gpp", ".m4v",
+    ".mpg", ".mpeg", ".ts", ".mts", ".m2ts", ".vob", ".flv",
+    ".aif", ".aiff", ".caf", ".dss", ".ds2", ".dct", ".gsm",
+)
 
 
 def _guess_audio_for_transcript(transcript_path):
@@ -4018,10 +4028,10 @@ _NO_ENGINE_HINT = (
 
 # Extensions that mark a file as a recording. A transcript must never
 # be written to a path that looks like one.
-_MEDIA_EXTENSIONS = {
-    ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus",
-    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".wma", ".amr", ".3gp",
-}
+# The output-safety guard refuses to write over anything wearing a
+# media extension; sharing the master list keeps it as broad as what
+# the app can open.
+_MEDIA_EXTENSIONS = set(_AUDIO_EXTENSIONS)
 
 
 def ensure_output_is_safe(in_path, out_path):
@@ -5156,7 +5166,8 @@ def _audio_cache_dir():
 def _sweep_audio_cache():
     """Keep the newest few extracts within the size budget."""
     try:
-        files = sorted(_audio_cache_dir().glob("*.m4a"),
+        files = sorted([*_audio_cache_dir().glob("*.m4a"),
+                        *_audio_cache_dir().glob("*.wav")],
                        key=lambda p: p.stat().st_mtime, reverse=True)
         total = 0
         for i, p in enumerate(files):
@@ -5226,7 +5237,12 @@ def _extract_audio_m4a_pyav(src, target):
                 return
 
             # Transcode to AAC at the source rate; collapse >2 channels
-            # to stereo (review playback doesn't need surround).
+            # to stereo (review playback doesn't need surround). The AAC
+            # encoder demands fixed-size frames (1024 samples), but
+            # decoders emit whatever the SOURCE codec used (WMA and
+            # friends use big, varying frames) - so resampled audio is
+            # staged through an AudioFifo and pulled out in exactly the
+            # chunks the encoder accepts.
             rate = in_stream.codec_context.sample_rate or 44100
             channels = getattr(in_stream.codec_context, "channels", None)
             if channels is None:
@@ -5237,15 +5253,28 @@ def _extract_audio_m4a_pyav(src, target):
             out_stream.bit_rate = 128_000
             resampler = av.AudioResampler(
                 format="fltp", layout=layout, rate=rate)
+            fifo = av.AudioFifo()
+            chunk = out_stream.codec_context.frame_size or 1024
 
-            def encode_frames(frame):
-                for rf in resampler.resample(frame):
-                    for pkt in out_stream.encode(rf):
+            def drain(final):
+                while True:
+                    got = fifo.read(chunk, partial=final)
+                    if got is None or not got.samples:
+                        return
+                    got.pts = None
+                    for pkt in out_stream.encode(got):
                         out_container.mux(pkt)
 
+            def push(frame):
+                for rf in resampler.resample(frame):
+                    rf.pts = None
+                    fifo.write(rf)
+                drain(False)
+
             for frame in in_container.decode(in_stream):
-                encode_frames(frame)
-            encode_frames(None)                      # flush resampler
+                push(frame)
+            push(None)                               # flush resampler
+            drain(True)                              # flush fifo tail
             for pkt in out_stream.encode(None):      # flush encoder
                 out_container.mux(pkt)
 
@@ -5478,27 +5507,80 @@ class AudioPrep:
                 self.serve_path = str(src)
                 self._set("ready")
                 return
-            target = _audio_cache_dir() / f"{_audio_cache_key(src)}.m4a"
-            if target.exists():
-                self.serve_path = str(target)
-                self._set("ready")
-                return
+            key = _audio_cache_key(src)
+            target = _audio_cache_dir() / f"{key}.m4a"
+            wav_target = _audio_cache_dir() / f"{key}.wav"
+            for cached in (target, wav_target):
+                if cached.exists():
+                    self.serve_path = str(cached)
+                    self._set("ready")
+                    return
             self._set("extracting")
             tmp = target.with_suffix(".part.m4a")
 
-            # PyAV first (no external binary needed), the ffmpeg binary
-            # as fallback, and a clear message when neither works.
+            def wav_fallback():
+                """Last resort that covers anything the app can
+                transcribe: the transcription decode path itself
+                (16 kHz mono), written as a plain WAV. Bigger on disk
+                than AAC but universally playable."""
+                try:
+                    samples = decode_audio_16k(str(src))
+                    if samples is None or not len(samples):
+                        return False
+                    import wave
+                    import numpy as np
+                    wtmp = wav_target.with_suffix(".part.wav")
+                    with wave.open(str(wtmp), "wb") as w:
+                        w.setnchannels(1)
+                        w.setsampwidth(2)
+                        w.setframerate(AUDIO_SAMPLE_RATE)
+                        ints = np.clip(
+                            np.asarray(samples, dtype="float32")
+                            * 32767.0, -32768, 32767).astype("<i2")
+                        w.writeframes(ints.tobytes())
+                    os.replace(wtmp, wav_target)
+                    _sweep_audio_cache()
+                    self.serve_path = str(wav_target)
+                    self._set("ready")
+                    return True
+                except Exception:
+                    _log("WAV playback fallback failed:\n"
+                         + traceback.format_exc())
+                    return False
+
+            # PyAV AAC extract first (small file, no external binary),
+            # the ffmpeg binary next, then the WAV fallback - and a
+            # clear message when everything fails.
             try:
                 _extract_audio_m4a_pyav(src, tmp)
-            except Exception:
+            except Exception as extract_err:
                 _log("PyAV playback extraction failed, trying ffmpeg:\n"
                      + traceback.format_exc())
                 tmp.unlink(missing_ok=True)
                 ffmpeg = shutil.which("ffmpeg")
                 if not ffmpeg:
-                    self._set("unavailable",
-                              "Playing this file type needs the 'av' "
-                              "package or an ffmpeg install.")
+                    if wav_fallback():
+                        return
+                    # Say what actually went wrong: a broken install is
+                    # fixed by reinstalling; an undecodable file needs
+                    # converting or an ffmpeg install.
+                    try:
+                        import av  # noqa: F401
+                        detail = str(extract_err).strip() or type(
+                            extract_err).__name__
+                        self._set(
+                            "unavailable",
+                            f"Couldn't read this file's audio "
+                            f"({detail}). Its format may not be "
+                            "supported - converting it to .mp3/.wav, "
+                            "or installing ffmpeg, should fix "
+                            "playback.")
+                    except Exception:
+                        self._set(
+                            "unavailable",
+                            "The app's audio component (PyAV) is "
+                            "missing or broken - re-running the "
+                            "Transcribr installer fixes this.")
                     return
                 codec_args = (["-c:a", "copy"]
                               if _source_audio_codec(src) == "aac"
@@ -5509,11 +5591,13 @@ class AudioPrep:
                 proc = subprocess.run(cmd, capture_output=True,
                                       text=True, timeout=1800)
                 if proc.returncode != 0 or not tmp.exists():
+                    tmp.unlink(missing_ok=True)
+                    if wav_fallback():
+                        return
                     detail = (proc.stderr or "").strip().splitlines()
                     self._set("unavailable",
                               detail[-1] if detail
                               else "Extraction failed.")
-                    tmp.unlink(missing_ok=True)
                     return
             os.replace(tmp, target)
             _sweep_audio_cache()
@@ -6864,9 +6948,9 @@ class WebBackend:
             if kind == "transcript":
                 types = ("Transcripts (*.docx;*.txt)", "All files (*.*)")
             else:
-                types = ("Audio and video (*.mp3;*.wav;*.m4a;*.aac;"
-                         "*.flac;*.ogg;*.opus;*.mp4;*.mov;*.mkv;*.avi;"
-                         "*.webm)", "All files (*.*)")
+                pattern = ";".join(f"*{e}" for e in _AUDIO_EXTENSIONS)
+                types = (f"Audio and video ({pattern})",
+                         "All files (*.*)")
             result = self.window.create_file_dialog(
                 dialog_open, allow_multiple=multiple, file_types=types)
 

@@ -393,9 +393,26 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     } catch (err) {
       if (err instanceof ApiError) {
         void errorDialog("Can't use that file", err.message);
-      } else {
-        throw err;
+        return;
       }
+      throw err;
+    }
+    // Preparation runs in the background (probing -> extracting ->
+    // ready | unavailable). Wait for it to settle so a failure is a
+    // clear message, not a silently unchanged card.
+    for (let i = 0; i < 600; i++) {
+      const audio = get().doc?.audio;
+      if (!audio) return;
+      if (audio.state === "ready") return;
+      if (audio.state === "unavailable") {
+        void errorDialog(
+          "Couldn't use that recording",
+          audio.error ??
+            "The file couldn't be prepared for playback.",
+        );
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
   },
 
