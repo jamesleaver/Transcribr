@@ -2105,6 +2105,20 @@ def transcribe_worker(params, q, cancel_event):
                    "it in a media player is a quick way to confirm."))
             return
 
+    # Tell the user which word-timing mode is in effect - on mlx the
+    # alignment is the slow part, so this explains a longer run (or a
+    # faster one when it's skipped).
+    if params.get("word_timestamps"):
+        if params.get("engine") == "mlx":
+            q.put(("log",
+                   "Word-level timing is ON (mlx): this adds a slower "
+                   "alignment pass. Turn it off in Settings for faster "
+                   "runs.\n"))
+    else:
+        q.put(("log",
+               "Word-level timing is off - faster, but no confidence "
+               "highlighting for this run (change it in Settings).\n"))
+
     try:
         segments, result, used_partial = runner(params, q, cancel_event)
     except _EngineNotAvailable as e:
@@ -3705,6 +3719,19 @@ class TranscriptModel:
         return total
 
 
+def _resolve_word_timestamps(mode, engine_key):
+    """Turn the word_timestamps setting ("auto"/"on"/"off") into a bool
+    for the engine that will actually run. "auto" means on everywhere
+    except mlx-whisper, whose word alignment is disproportionately slow
+    (it roughly triples the run) - so Apple Silicon users get fast
+    transcription by default and can still opt in explicitly."""
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    return engine_key != "mlx"      # "auto"
+
+
 def build_worker_params(settings, in_path, out_path, *,
                         review_before_save):
     """Assemble the transcribe_worker params dict from a validated
@@ -3749,12 +3776,13 @@ def build_worker_params(settings, in_path, out_path, *,
         logprob_threshold=settings["logprob_threshold"],
         no_speech_threshold=settings["no_speech_threshold"],
         condition_on_previous_text=settings["condition_on_previous_text"],
-        # Always on since 0.9.0: word timings let paragraph gaps
-        # measure real silence instead of Whisper's padded segment
-        # edges, sharpen speaker labelling and playback spans, and
-        # feed confidence shading. The modest speed cost buys a
-        # noticeably better transcript.
-        word_timestamps=True,
+        # Word-level timings sharpen paragraph gaps, playback spans and
+        # feed confidence shading - but they are cheap on faster-whisper
+        # (~free) and expensive on mlx (word alignment roughly triples
+        # the run). So "auto" enables them everywhere EXCEPT mlx, where
+        # they would badly hurt transcription speed on long recordings.
+        word_timestamps=_resolve_word_timestamps(
+            settings.get("word_timestamps", "auto"), engine_key),
         initial_prompt=prompt or None,
         # With no title, name the document after the source file. (The
         # filename is never fed to the engine - recorder names like
@@ -3816,6 +3844,7 @@ def _settings_choices():
         "task": ["transcribe", "translate"],
         "output_format": ["txt", "docx", "pdf"],
         "theme": ["auto", "light", "dark"],
+        "word_timestamps": ["auto", "on", "off"],
     }
 
 
@@ -3851,6 +3880,9 @@ def default_settings():
         "diarize_threshold": _DIARIZE_CLUSTER_THRESHOLD,
         "show_all_models": False,
         "show_prompt": False,
+        # Word-level timing & confidence highlighting: "auto" (on except
+        # on mlx, where it is slow), "on", or "off".
+        "word_timestamps": "auto",
         # The experimental speaker-detection card stays hidden until
         # enabled from the Settings page.
         "show_diarize": False,

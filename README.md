@@ -343,11 +343,18 @@ interface. Briefly: **Temperature** 0 = deterministic; **Beam size /
 Best of** higher = better but slower; **Compression-ratio threshold**
 catches hallucination loops; **No-speech threshold** raises/lowers how
 readily silence is skipped; **Condition on previous text** improves
-consistency but can propagate an early mistake. **Highlight
-low-confidence words in review** shades the words the engine was
-unsure about so you know where to listen. (Word-level timestamps are
-always recorded since 0.9.0 — they make paragraph gaps measure real
-silence, sharpen playback spans, and feed the confidence shading.)
+consistency but can propagate an early mistake.
+
+**Word-level timing & highlighting** controls whether the engine records
+per-word timings. Those timings sharpen paragraph breaks and playback
+spans and feed the red/amber shading of uncertain words in Review. They
+are essentially free on faster-whisper but roughly **triple** the run
+time on Apple Silicon's mlx engine (its word-alignment pass is slow), so
+the default, **Automatic**, records them on every engine *except* mlx —
+keeping Apple-Silicon transcriptions fast. Choose **Always on** to force
+them (e.g. for a short, important recording where you want the
+confidence highlighting), or **Always off** for the quickest possible
+runs. The run log tells you which mode was used.
 
 ### Paragraphs and extra outputs
 

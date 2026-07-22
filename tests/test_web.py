@@ -2253,15 +2253,42 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(
             self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "faster")
 
-    def test_word_timestamps_always_on(self):
-        # Since 0.9.0 word timings are always recorded: they sharpen
-        # paragraph gaps, playback spans and confidence shading. A
-        # stale settings.json key cannot turn them off.
-        p = self._params(diarize=True)
-        self.assertTrue(p["word_timestamps"])
-        self.assertTrue(p["diarize"])
-        merged = T.validate_settings({"word_timestamps": False})
-        self.assertNotIn("word_timestamps", merged)
+    def test_word_timestamps_auto_is_engine_aware(self):
+        # "auto" enables word timings everywhere except mlx, where the
+        # alignment pass is disproportionately slow.
+        self.assertTrue(self._params(word_timestamps="auto")["engine"]
+                        == "faster")
+        self.assertTrue(self._params(word_timestamps="auto")["word_timestamps"])
+        T.AVAILABLE_ENGINES = list(self._ENGINES) + [
+            ("mlx", "mlx-whisper (Apple Silicon)")]
+        p = self._params(engine="mlx-whisper (Apple Silicon)",
+                         word_timestamps="auto")
+        self.assertEqual(p["engine"], "mlx")
+        self.assertFalse(p["word_timestamps"])   # skipped on mlx
+
+    def test_word_timestamps_on_off_override(self):
+        T.AVAILABLE_ENGINES = list(self._ENGINES) + [
+            ("mlx", "mlx-whisper (Apple Silicon)")]
+        # "on" forces them even on mlx; "off" disables them everywhere.
+        p_on = self._params(engine="mlx-whisper (Apple Silicon)",
+                            word_timestamps="on")
+        self.assertTrue(p_on["word_timestamps"])
+        p_off = self._params(engine="faster-whisper (CTranslate2)",
+                            word_timestamps="off")
+        self.assertFalse(p_off["word_timestamps"])
+
+    def test_word_timestamps_setting_validates_as_enum(self):
+        self.assertEqual(
+            T.validate_settings({"word_timestamps": "off"})["word_timestamps"],
+            "off")
+        # A junk value is rejected, keeping the default.
+        self.assertEqual(
+            T.validate_settings({"word_timestamps": "maybe"})["word_timestamps"],
+            "auto")
+        # A stale pre-0.9.10 boolean is ignored (not a valid enum value).
+        self.assertEqual(
+            T.validate_settings({"word_timestamps": True})["word_timestamps"],
+            "auto")
 
     def test_diarize_model_and_threshold_flow_through(self):
         p = self._params(diarize=True, diarize_model="campplus",

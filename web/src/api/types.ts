@@ -89,6 +89,8 @@ export interface Settings {
   show_prompt: boolean;
   /** Show the experimental speaker-detection card on the Transcribe page. */
   show_diarize: boolean;
+  /** Word-level timing & confidence highlighting: auto | on | off. */
+  word_timestamps: "auto" | "on" | "off";
 }
 
 export interface RecentItem {

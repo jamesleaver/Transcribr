@@ -129,6 +129,19 @@ export default function SettingsView() {
               onChange={(v) => update({ engine: v })}
               note="Automatic picks the fastest engine installed on this computer."
             />
+            <SelectField
+              label="Word-level timing & highlighting"
+              value={settings.word_timestamps}
+              options={[
+                { value: "auto", label: "Automatic (recommended)" },
+                { value: "on", label: "Always on" },
+                { value: "off", label: "Always off (fastest)" },
+              ]}
+              onChange={(v) =>
+                update({ word_timestamps: v as "auto" | "on" | "off" })
+              }
+              note="Word timings enable the red/amber highlighting of uncertain words and sharpen paragraph breaks. They're free on faster-whisper but roughly triple the time on Apple Silicon's mlx engine, so Automatic turns them off there. Turn Always on to force them, or Always off for the quickest runs."
+            />
             <NumberField label="Temperature" value={settings.temperature}
               min={0} max={1} step={0.1}
               onChange={(v) => update({ temperature: v })}
