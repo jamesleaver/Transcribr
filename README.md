@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.11.
+(c) James Leaver, 2026. Version 0.9.12.
 
 Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
 
@@ -461,10 +461,14 @@ speakers, and fill in whatever was left unlabelled.
 The right rail also holds:
 
 - **Playback** — `P` plays just the selected paragraph, `⌘P` plays on
-  from it; **Locate audio…** points at the recording if it can't be
-  found. Saved `.docx` transcripts embed the recording's location (both
-  an absolute and a transcript-relative path, so playback keeps working
-  even after the whole case folder is moved) so it survives re-opening.
+  from it. The playing paragraph's timestamp turns **green and ticks up
+  live**, and when you play on past a paragraph the green marker follows
+  the audio into the next one. A **Half speed (0.5×)** toggle slows
+  playback for hard-to-catch passages. **Locate audio…** points at the
+  recording if it can't be found; saved `.docx` transcripts embed the
+  recording's location (both an absolute and a transcript-relative path,
+  so playback keeps working even after the whole case folder is moved)
+  so it survives re-opening.
 - **Fix a section** — re-transcribe a stretch of the recording that
   came out badly; see below.
 - **Timestamps / uncertain words** — whether timestamps appear in the
@@ -527,7 +531,7 @@ that were re-transcribed, so nothing you did elsewhere is lost.
 | Merge with the previous paragraph | Press `M` |
 | Split a paragraph | Double-click the word to split before |
 | Edit the text | Enter (or F2), then Enter to commit / Esc to cancel |
-| Amend or hide a timestamp | Click the `[MM:SS]` chip |
+| Amend or hide a timestamp | Click the `[MM:SS]` chip (amending plays from the new time so you can confirm it) |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Cmd on Mac), or the buttons |
 | Find / replace | Ctrl+F (Cmd+F), then *Find next* / *Replace all* |
 

@@ -126,6 +126,7 @@ function PlaybackCard() {
   const playing = useReview((s) => s.playing);
   const playingThrough = useReview((s) => s.playingThrough);
   const selected = useReview((s) => s.selected);
+  const halfSpeed = useReview((s) => s.halfSpeed);
   if (!audio) return null;
 
   const paraActive = playing !== null && !playingThrough;
@@ -186,6 +187,17 @@ function PlaybackCard() {
           >
             {throughActive ? "■ Stop playing" : "▶▶ Play from here"}
           </button>
+          <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={halfSpeed}
+              onChange={(e) =>
+                useReview.getState().setHalfSpeed(e.target.checked)
+              }
+            />
+            Half speed (0.5×)
+          </label>
           <p className="mt-2 text-[11px] text-muted">
             P plays just the selected paragraph (press again to stop);
             ⌘P plays on from it.

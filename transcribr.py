@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.11"
+__version__ = "0.9.12"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"

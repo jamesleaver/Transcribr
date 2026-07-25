@@ -21,6 +21,14 @@ interface Session {
 let el: HTMLAudioElement | null = null;
 let active: Session | null = null;
 let selfPause = false;
+let playbackRate = 1;
+
+/** Set the playback speed (e.g. 0.5 for half speed). Applies to the
+ *  current playback immediately and to every span played afterwards. */
+export function setPlaybackRate(rate: number): void {
+  playbackRate = rate;
+  if (el) el.playbackRate = rate;
+}
 
 function finish(): void {
   const s = active;
@@ -73,6 +81,7 @@ export function playSpan(
   const begin = () => {
     if (active !== session) return;   // superseded while loading
     audio.currentTime = span.start;
+    audio.playbackRate = playbackRate;
     void audio.play().catch(() => {
       if (active === session) finish();
     });

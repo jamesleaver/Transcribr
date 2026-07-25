@@ -144,6 +144,8 @@ function TimestampCell({
     const parsed = parseTimestamp(draft);
     if (parsed !== null) {
       void useReview.getState().setTimestamp(index, parsed);
+      // Play from the corrected time so the reviewer can confirm it.
+      useReview.getState().playFromTime(index, parsed);
     }
     setOpen(false);
   };

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { api, ApiError } from "../api/client";
-import { playSpan, stopPlayback } from "../audio";
+import { playSpan, stopPlayback, setPlaybackRate } from "../audio";
 import { choiceDialog, confirmDialog, errorDialog } from "./dialogs";
 import { useApp } from "./store";
 
@@ -106,9 +106,15 @@ interface ReviewSlice {
   playingThrough: boolean;
   /** Live playback position (seconds) while a paragraph plays. */
   playHeadSec: number | null;
+  /** Play at half speed (0.5x) when on. */
+  halfSpeed: boolean;
+  setHalfSpeed: (value: boolean) => void;
   setAudioStatus: (status: AudioStatus) => void;
   /** `through` plays on past the paragraph to the end of the audio. */
   togglePlay: (index: number, through?: boolean) => void;
+  /** Play from an absolute time in the recording (e.g. an amended
+   *  timestamp), open-ended, with the indicator on `index`. */
+  playFromTime: (index: number, startSec: number) => void;
   locateAudio: () => Promise<void>;
 
   /** Review-pane saving options; null = keep what the run started with. */
@@ -160,6 +166,71 @@ interface ReviewSlice {
 
 function clamp(i: number, n: number): number {
   return Math.max(0, Math.min(i, n - 1));
+}
+
+// A monotonic token identifies the current playback so the tick/stop
+// callbacks can tell whether they still own the audio element -
+// independent of which paragraph `playing` points at, so the indicator
+// can move across paragraphs mid-play without the callbacks going stale.
+let activePlayToken = 0;
+
+/** The paragraph whose real audio covers `sec` - the greatest paragraph
+ *  whose playback start is at or before it. Uses real playback starts
+ *  (not amended display timestamps), since the audio plays real time. */
+function paragraphAtTime(paras: ReviewParagraph[], sec: number): number {
+  let found = 0;
+  for (let i = 0; i < paras.length; i++) {
+    const start = paras[i].play?.start ?? paras[i].start;
+    if (start <= sec + 0.02) found = i;
+    else break;
+  }
+  return found;
+}
+
+/** Start a playback span, tracking it with a fresh token. While it
+ *  runs, the live position ticks into playHeadSec and - when playing on
+ *  past the paragraph - the green indicator advances to whichever
+ *  paragraph the audio has reached. */
+function startPlayback(
+  index: number,
+  span: { start: number; end: number | null },
+  through: boolean,
+): void {
+  const url = useReview.getState().doc?.audio.url;
+  if (!url) return;
+  stopPlayback();
+  const myToken = ++activePlayToken;
+  useReview.setState({
+    playing: index,
+    playingThrough: through,
+    playHeadSec: span.start,
+  });
+  playSpan(
+    url,
+    span,
+    () => {
+      if (activePlayToken === myToken)
+        useReview.setState({
+          playing: null,
+          playingThrough: false,
+          playHeadSec: null,
+        });
+    },
+    (currentSec) => {
+      if (activePlayToken !== myToken) return;
+      const st = useReview.getState();
+      const paras = st.doc?.paragraphs ?? [];
+      const patch: Partial<ReviewSlice> = { playHeadSec: currentSec };
+      // Only advance forward, and only when playing on past the
+      // paragraph - so the indicator follows the audio into later
+      // paragraphs without ever jumping backwards.
+      if (st.playingThrough && st.playing !== null) {
+        const here = paragraphAtTime(paras, currentSec);
+        if (here > st.playing) patch.playing = here;
+      }
+      useReview.setState(patch);
+    },
+  );
 }
 
 /** After a save/export: open the file, show it in the folder, or move
@@ -438,20 +509,25 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     }
     const span = doc.paragraphs[index]?.play;
     if (!span || doc.audio.state !== "ready" || !doc.audio.url) return;
-    stopPlayback();
-    set({ playing: index, playingThrough: through, playHeadSec: span.start });
-    playSpan(
-      doc.audio.url,
+    startPlayback(
+      index,
       through ? { start: span.start, end: null } : span,
-      () => {
-        if (useReview.getState().playing === index)
-          set({ playing: null, playingThrough: false, playHeadSec: null });
-      },
-      (currentSec) => {
-        if (useReview.getState().playing === index)
-          set({ playHeadSec: currentSec });
-      },
+      through,
     );
+  },
+
+  playFromTime: (index, startSec) => {
+    const doc = get().doc;
+    if (!doc || doc.audio.state !== "ready" || !doc.audio.url) return;
+    // Open-ended play from an absolute position; the indicator starts
+    // on `index` and follows the playhead forward from there.
+    startPlayback(index, { start: startSec, end: null }, true);
+  },
+
+  halfSpeed: false,
+  setHalfSpeed: (value) => {
+    setPlaybackRate(value ? 0.5 : 1);
+    set({ halfSpeed: value });
   },
 
   refetch: async () => {
