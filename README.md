@@ -90,25 +90,37 @@ Result:
 <img width="781" height="1101" alt="Screenshot 2026-07-16 at 2 34 14 pm" src="https://github.com/user-attachments/assets/1e5c4b31-a93b-4e28-8e78-747da2b2605b" />
 
 
-## What this folder contains
+## What this repository contains
+
+Most people never see this — installers are on the
+[releases page](https://github.com/jamesleaver/Transcribr/releases/latest).
+This is the source they are built from.
 
 ```
-Transcribr-Installer/
+Transcribr/
 ├── INSTALL.txt              ← Quick-start instructions
 ├── README.md                ← This file
-├── RELEASING.md             ← Signing and publishing a release
-├── transcribr.py            ← The cross-platform GUI itself
+├── RELEASING.md             ← Building, signing and publishing a release
+├── transcribr.py            ← The application itself (backend + API)
+├── web/                     ← Review interface source (React + TypeScript)
+├── webdist/                 ← The built interface, committed and shipped
 ├── tests/                   ← Automated test suite
 │   ├── test_transcribr.py
+│   ├── test_web.py
 │   └── run_tests.command    ← Mac users: double-click to run the tests
 ├── macos/
-│   ├── bootstrap.sh         ← The one-line curl installer fetches this
-│   ├── install.command      ← Mac users: double-click this
-│   └── app_template/        ← Files used by the installer
-└── windows/
-    ├── install.bat          ← Windows users: double-click this
-    ├── install.ps1          ← The actual installer (run by install.bat)
-    └── icon.ico
+│   ├── build-pkg.sh         ← Builds the signed, notarised .pkg
+│   ├── bootstrap.sh         ← Fetched by the one-line Terminal install
+│   ├── install.command      ← The script installer it runs
+│   ├── entitlements.plist   ← Hardened-runtime exceptions for signing
+│   └── app_template/        ← Launcher, icon and Info.plist for the bundle
+├── windows/
+│   ├── build-exe.ps1        ← Stages the self-contained tree
+│   ├── transcribr.iss       ← Inno Setup script that packs the .exe
+│   ├── bootstrap.ps1        ← Fetched by the one-line Terminal install
+│   ├── install.ps1          ← The script installer it runs
+│   └── install.bat          ← Wrapper that launches install.ps1
+└── .github/workflows/       ← Builds the Windows installer on a runner
 ```
 
 ## Requirements
@@ -135,8 +147,9 @@ is needed at all — the PyAV package bundles the decoding libraries).
 
 ### macOS — the installer package (recommended)
 
-1. Download **`Transcribr-<version>-arm64.pkg`** from the
-   [latest release](https://github.com/jamesleaver/Transcribr/releases/latest).
+1. Download the `.pkg` for your Mac from the
+   [latest release](https://github.com/jamesleaver/Transcribr/releases/latest)
+   — `-arm64` for Apple Silicon, `-x86_64` for Intel.
 2. Double-click it and follow the prompts.
 
 That's it. The package is signed with an Apple Developer ID and
@@ -148,9 +161,10 @@ faster-whisper engine travel inside it, so there is no Homebrew step,
 nothing fetched from python.org, and no internet connection needed
 during the install.
 
-> **Apple Silicon only.** No Intel package is published, because there
-> is no Intel Mac here to test one on. On an Intel Mac, use the Terminal
-> install below — it works on both.
+Packages are published for both **Apple Silicon** (`-arm64.pkg`) and
+**Intel** (`-x86_64.pkg`) Macs — take the one matching your machine.
+If you are unsure, click the Apple menu → About This Mac: "Apple M…"
+means arm64, "Intel" means x86_64.
 
 Two engines are left out to keep the download small, because both drag
 in PyTorch (about 1.1 GB): **mlx-whisper**, which uses the GPU on
@@ -158,7 +172,7 @@ M-series Macs, and **openai-whisper**, the reference implementation.
 Install either in one click from the **Models** tab when you want it.
 Whisper model weights are downloaded on first use, as always.
 
-### macOS — Terminal install (Intel Macs, or if you prefer)
+### macOS — Terminal install
 
 Open **Terminal** (cmd+space, type "terminal") and paste:
 
@@ -177,6 +191,10 @@ for your password**, and on Apple Silicon it also installs mlx-whisper —
 which makes for a much larger install (~1.4 GB) but gives you GPU
 transcription immediately. It needs a working connection throughout.
 
+Most people should use the package. This route exists for unattended or
+scripted setups, machines where policy blocks installer packages, and
+anyone who simply prefers it.
+
 It will:
 
 - Ask before installing Homebrew (only if missing)
@@ -186,22 +204,6 @@ It will:
   mlx-whisper on Apple Silicon (macOS 13.5+), along with python-docx,
   reportlab, pywebview and bottle — no separate ffmpeg needed
 - Create `/Applications/Transcribr.app`
-
-### macOS — from the downloaded zip
-
-Only needed if you would rather not use either route above. Download and
-unzip the release, open the `macos` folder and double-click
-`install.command`.
-
-Because the zip came from a browser, macOS will refuse it the first
-time. To allow it: **System Settings → Privacy & Security**, scroll to
-the bottom, and click **Open Anyway** next to the message about
-`install.command`.
-
-> Older instructions said to right-click → Open. Apple removed that
-> shortcut in macOS 15 (Sequoia); on macOS 15 and later the Privacy &
-> Security route is the only one. Neither of the two options above runs
-> into this at all.
 
 ### macOS — after installing
 
@@ -230,6 +232,23 @@ never asks for an administrator password.
 Launch from your Desktop or Start Menu (search "Transcribr"). As on
 macOS, **openai-whisper** is not included (PyTorch, ~2 GB) — add it from
 the **Models** tab if you want it.
+
+### Windows — Terminal install
+
+The same alternative as on macOS. In **PowerShell**:
+
+```powershell
+irm https://raw.githubusercontent.com/jamesleaver/Transcribr/main/windows/bootstrap.ps1 | iex
+```
+
+This fetches the release and runs the PowerShell installer inside it,
+which downloads Python 3.12 from python.org and builds a virtual
+environment at `%LOCALAPPDATA%\Transcribr\venv` — rather than using the
+self-contained runtime the Setup `.exe` carries. It needs a working
+connection throughout.
+
+Use it for scripted setups, or where policy blocks running an unsigned
+`.exe`. Otherwise the Setup `.exe` above is simpler.
 
 ## Using the application
 
@@ -622,10 +641,10 @@ Transcribr asks GitHub once per launch whether a newer release exists.
 When there is one, a strip appears across the top of the window naming
 the new version, with **What's new** for that release's notes:
 
-- **Update now** downloads the release's installer, checks it against
-  the SHA-256 checksum GitHub publishes for the file, unpacks it and
-  opens the installer so you can watch it run — it may ask for your
-  password (Homebrew). Restart Transcribr when it finishes.
+- **Update now** downloads the installer that suits your machine — the
+  `.pkg` on macOS, the Setup `.exe` on Windows — checks it against the
+  SHA-256 checksum GitHub publishes for the file, and opens it. Follow
+  it through, then restart Transcribr.
 - **Not now** hides the strip until the next launch.
 
 The check is a plain, unauthenticated `GET` of the public releases API.
@@ -634,51 +653,68 @@ computer. If you would rather Transcribr never touched the network on
 its own, turn off **Settings -> Updates -> Check for new versions on
 launch**; **Check now** on that page still works on demand.
 
-## Re-running the installer
+## Reinstalling and upgrading
 
-Both installers are safe to re-run — including the macOS one-liner,
-which always fetches the current release:
+Normally you don't need to: Transcribr checks for new versions on
+launch and can install them itself (see [Updating](#updating) above).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
-```
+To do it by hand, just install again over the top — every route is safe
+to repeat:
 
-They will:
-- Skip dependencies that are already installed
-- Offer to recreate the venv from scratch (say no for a quick refresh,
-  yes if something is genuinely broken)
-- Always rebuild the launcher / .app bundle / shortcuts
+- **The package** — download the new `.pkg` and run it. It replaces the
+  application in place; your settings, recent files and any extra
+  engines are untouched.
+- **The Terminal install** — re-run the one-liner for your platform. It
+  skips what is already present, offers to rebuild the environment from
+  scratch (say no for a quick refresh, yes if something is genuinely
+  broken), and always rebuilds the launcher and shortcuts.
+
+Switching between the two is fine in either direction. They share the
+same settings and per-user folder, so nothing is lost.
 
 ## Where things go
+
+This differs slightly depending on how you installed, because the
+package carries its own Python while the Terminal install builds one.
 
 ### macOS
 
 | What | Where |
 |---|---|
-| Python virtualenv | `~/Library/Application Support/Transcribr/venv/` |
-| The GUI script | `~/Library/Application Support/Transcribr/transcribr.py` |
-| The web interface (pre-built) | `~/Library/Application Support/Transcribr/webdist/` |
 | The application | `/Applications/Transcribr.app` |
 | Settings / recent / autosave | `~/Library/Application Support/Transcribr/*.json` |
+| Per-user environment (extra engines) | `~/Library/Application Support/Transcribr/venv/` |
 | Speaker-detection models | `~/Library/Application Support/Transcribr/models/` |
+| Cached audio prepared for playback | `~/Library/Application Support/Transcribr/audio_cache/` |
 | Launch logs | `~/Library/Logs/Transcribr/launch.log` |
-| Whisper model cache | `~/.cache/whisper/` |
+| Whisper model cache | `~/.cache/huggingface/hub/` |
+
+With the **package**, Python, the app script and the web interface all
+live inside `Transcribr.app` itself, and the per-user environment is
+created on first launch purely to hold any engines you add later. With
+the **Terminal install**, `transcribr.py`, `webdist/` and the full
+environment sit in `~/Library/Application Support/Transcribr/` instead,
+and the app bundle is only a launcher.
 
 ### Windows
 
 | What | Where |
 |---|---|
-| Python virtualenv | `%LOCALAPPDATA%\Transcribr\venv\` |
-| The GUI script | `%LOCALAPPDATA%\Transcribr\transcribr.py` |
-| The web interface (pre-built) | `%LOCALAPPDATA%\Transcribr\webdist\` |
-| Desktop shortcut | `%USERPROFILE%\Desktop\Transcribr.lnk` |
-| Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk` |
+| The application (Setup `.exe`) | `%LOCALAPPDATA%\Programs\Transcribr\` |
+| The application (Terminal install) | `%LOCALAPPDATA%\Transcribr\` |
 | Settings / recent / autosave | `%APPDATA%\Transcribr\*.json` |
 | Speaker-detection models | `%APPDATA%\Transcribr\models\` |
-| Launch logs | `%LOCALAPPDATA%\Transcribr\launch.log` |
-| Whisper model cache | `%USERPROFILE%\.cache\whisper\` |
+| Cached audio prepared for playback | `%APPDATA%\Transcribr\audio_cache\` |
+| Desktop shortcut | `%USERPROFILE%\Desktop\Transcribr.lnk` |
+| Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk` |
+| Whisper model cache | `%USERPROFILE%\.cache\huggingface\hub\` |
+
+Nothing is installed outside your own user account on either platform,
+which is why neither installer needs an administrator password.
 
 ## Uninstalling
+
+Transcribr has no uninstaller; it is all files in your own folders.
 
 ### macOS
 
@@ -686,44 +722,58 @@ They will:
 rm -rf "/Applications/Transcribr.app"
 rm -rf "$HOME/Library/Application Support/Transcribr"
 rm -rf "$HOME/Library/Logs/Transcribr"
-rm -rf "$HOME/.cache/whisper"      # optional: frees the model cache
+```
+
+That removes the app, your settings and any engines you added. The
+Whisper model weights are cached separately and are worth keeping if you
+might reinstall — they are several gigabytes and are re-downloaded on
+demand:
+
+```bash
+rm -rf "$HOME/.cache/huggingface/hub"      # optional
 ```
 
 ### Windows
 
-In PowerShell:
+The Setup `.exe` registers a normal uninstaller: **Settings → Apps →
+Installed apps → Transcribr → Uninstall**. That leaves your settings
+behind deliberately; remove them too with:
+
+```powershell
+Remove-Item -Recurse -Force "$env:APPDATA\Transcribr"
+```
+
+For a Terminal install, or to clear everything by hand:
 
 ```powershell
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Transcribr"
-Remove-Item -Recurse -Force "$env:APPDATA\Transcribr"          # settings + speaker models
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\Transcribr"
+Remove-Item -Recurse -Force "$env:APPDATA\Transcribr"
 Remove-Item -Force "$env:USERPROFILE\Desktop\Transcribr.lnk"
 Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Transcribr.lnk"
-Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\whisper"  # optional
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub"   # optional
 ```
 
 ## Troubleshooting
 
 **macOS blocks the installer ("unidentified developer", "not opened").**
-Transcribr isn't signed with an Apple Developer ID, so anything you
-download through a *browser* is quarantined and refused. Either install
-with the one-liner, which isn't quarantined at all:
+This should no longer happen: the `.pkg` on the releases page is signed
+with an Apple Developer ID and notarised by Apple, and the Terminal
+install is never quarantined because `curl` sets no such flag.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
-```
-
-or allow the blocked file: **System Settings -> Privacy & Security**,
-scroll to the bottom, **Open Anyway**. (Right-click -> Open no longer
-works — Apple removed it in macOS 15 Sequoia.) If you have already
-unzipped it and would rather clear the flag by hand:
+If you hit it, you are running something older, or a file that came
+down through a browser and was quarantined. Either install with a
+current `.pkg`, or clear the flag by hand:
 
 ```bash
 xattr -dr com.apple.quarantine ~/Downloads/Transcribr-Installer
 ```
 
-`/Applications/Transcribr.app` is never affected by this: the installer
-builds it on your Mac rather than downloading it, so it carries no
-quarantine flag and launches normally.
+To allow a blocked file instead: **System Settings → Privacy & Security**,
+scroll to the bottom, **Open Anyway**. (Right-click → Open no longer
+works — Apple removed it in macOS 15 Sequoia.)
+
+`/Applications/Transcribr.app` is never affected by this once installed.
 
 If the app does not launch:
 
@@ -778,17 +828,6 @@ terminal (port 8737, token `dev`) and `npm run dev` in another, then
 open the Vite URL. If the repository lives in Dropbox, mark
 `web/node_modules` as ignored so it doesn't sync:
 `xattr -w com.dropbox.ignored 1 web/node_modules` (macOS).
-
-**Annotation overlay.** Launching with `--annotate` (or
-`TRANSCRIBR_ANNOTATE=1`), or creating a marker file in the config dir
-(`touch "~/Library/Application Support/Transcribr/annotate.on"` on
-macOS — delete it to hide the overlay again; checked live, no restart
-needed), adds a developer-only ✎ button: click any
-element in the UI to pin a note to it (selector path, text, markup and
-geometry are captured automatically). The 📋 button reviews the saved
-notes, deletes them, or copies the lot as markdown for a development
-session; they live in `annotations.json` in the config dir. Normal
-users never see any of this.
 
 ## What this does NOT install
 

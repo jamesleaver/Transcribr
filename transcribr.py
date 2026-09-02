@@ -5273,19 +5273,33 @@ class UpdateChecker:
         html = data.get("html_url") or _UPDATE_RELEASES_URL
         asset = None
         available = [a for a in (data.get("assets") or [])
-                     if a.get("browser_download_url")]
+                     if a.get("browser_download_url") and a.get("name")]
+        mine = _this_machine_tokens()
         for suffix in _ASSET_PREFERENCE:
-            for a in available:
-                if not (a.get("name") or "").lower().endswith(suffix):
+            matching = [a for a in available
+                        if a["name"].lower().endswith(suffix)]
+            if not matching:
+                continue
+            # When a suffix has architecture-specific builds, take ours
+            # or none - never fall back to a package for another
+            # architecture, which would install an app that won't run.
+            tokened = [a for a in matching
+                       if any(t in a["name"].lower()
+                              for t in _ALL_ARCH_TOKENS)]
+            if tokened:
+                ours = [a for a in tokened
+                        if any(t in a["name"].lower() for t in mine)]
+                if not ours:
                     continue
-                digest = a.get("digest") or ""
-                asset = (a["name"], a["browser_download_url"],
-                         int(a.get("size") or 0),
-                         digest.split("sha256:")[-1] if "sha256:" in digest
-                         else None)
-                break
-            if asset:
-                break
+                chosen = ours[0]
+            else:
+                chosen = matching[0]
+            digest = chosen.get("digest") or ""
+            asset = (chosen["name"], chosen["browser_download_url"],
+                     int(chosen.get("size") or 0),
+                     digest.split("sha256:")[-1] if "sha256:" in digest
+                     else None)
+            break
         with self.lock:
             self.latest = tag.lstrip("vV") or None
             self.notes = notes
@@ -5406,6 +5420,26 @@ elif os.name == "nt":
     _ASSET_PREFERENCE = (".exe", ".zip")
 else:
     _ASSET_PREFERENCE = ()
+
+# Architecture tokens that can appear in an asset's name. macOS releases
+# carry an arm64 and an x86_64 package side by side, and handing someone
+# the wrong one installs an app that cannot launch.
+_ARCH_TOKENS = {
+    "arm64": ("arm64", "aarch64", "apple-silicon"),
+    "x86_64": ("x86_64", "x86-64", "amd64", "intel"),
+}
+_ALL_ARCH_TOKENS = tuple(t for group in _ARCH_TOKENS.values() for t in group)
+
+
+def _this_machine_tokens():
+    """Asset-name tokens that mean 'built for this machine'."""
+    import platform
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return _ARCH_TOKENS["arm64"]
+    if machine in ("x86_64", "amd64"):
+        return _ARCH_TOKENS["x86_64"]
+    return ()
 
 
 def _safe_extract_zip(zf, dest):

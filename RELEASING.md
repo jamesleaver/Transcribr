@@ -171,13 +171,23 @@ Measured sizes:
    ./macos/build-pkg.sh --arch x86_64   # Intel Macs (default is arm64)
    ```
 
-   The default build is **arm64 only**. Run it twice, once per arch, if
-   Intel Macs need supporting.
+   Both architectures are published, so run it twice:
+
+   ```bash
+   ./macos/build-pkg.sh                     # Apple Silicon
+   ./macos/build-pkg.sh --arch x86_64       # Intel
+   ```
+
+   The Intel build works on an Apple Silicon Mac because the x86_64
+   interpreter runs under Rosetta 2 (`softwareupdate --install-rosetta`
+   if it is missing), so pip resolves x86_64 wheels correctly. It can be
+   smoke-tested here — `file` on the binaries, and launching it under
+   Rosetta — but only a real Intel Mac proves it.
 5. Build the Windows installer (see Part 4).
-6. Commit, tag and publish. Attach both installers; GitHub generates
-   the source archive for the tag by itself, and that is what
-   `macos/bootstrap.sh` falls back to on an Intel Mac, so no extra
-   asset is needed.
+6. Commit, tag and publish. Attach the three installers. GitHub
+   generates the source archive for the tag by itself, and that is what
+   both `bootstrap` scripts use, so no extra asset is needed — installer
+   zips are no longer published.
 
    ```bash
    git tag v0.9.14 && git push origin main --tags
@@ -185,12 +195,21 @@ Measured sizes:
        --title "Transcribr v0.9.14" --generate-notes
    ```
 
+   Three assets: `-arm64.pkg`, `-x86_64.pkg` and `-Setup.exe`.
+
+   ```bash
+   ```
+
 Publishing the release is what makes the in-app updater offer it to
 existing users, so publish last.
 
 The updater picks the asset that suits the machine it is running on:
-`.pkg` on macOS, `.exe` on Windows, and the source archive if neither is
-present (which is how releases before 0.9.14 still work). A `.pkg` or
+`.pkg` on macOS, `.exe` on Windows, and a `.zip` if neither is present
+(which is how releases before 0.9.14 still work). Among the macOS
+packages it matches the architecture in the file name, and offers
+nothing at all rather than a package for the other one — so name them
+`-arm64.pkg` and `-x86_64.pkg`, as `build-pkg.sh` does. Renaming them
+would silently strand whichever users no longer match. A `.pkg` or
 `.exe` opens directly; the source archive is unpacked and its platform
 installer script is run.
 

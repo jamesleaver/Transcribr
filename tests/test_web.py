@@ -365,6 +365,33 @@ class TestUpdateChecker(unittest.TestCase):
         self.assertTrue(u.asset[0].lower().endswith(expected),
                         f"picked {u.asset[0]} for preference {expected}")
 
+    def test_picks_the_package_for_this_architecture(self):
+        # macOS releases carry both packages; the wrong one installs an
+        # app that cannot launch, so it must never be offered.
+        if not T._this_machine_tokens():
+            self.skipTest("unrecognised machine architecture")
+        u = self._check_with(["Transcribr-99.0.0-arm64.pkg",
+                              "Transcribr-99.0.0-x86_64.pkg",
+                              "Transcribr-99.0.0-Setup.exe"])
+        if not T._ASSET_PREFERENCE:
+            self.skipTest("no installer assets on this platform")
+        name = u.asset[0].lower()
+        if T._ASSET_PREFERENCE[0] == ".pkg":
+            self.assertTrue(
+                any(t in name for t in T._this_machine_tokens()),
+                f"picked {u.asset[0]} on {T._this_machine_tokens()}")
+
+    def test_never_offers_a_foreign_architecture(self):
+        # Only the other architecture is published: offer nothing rather
+        # than something that will not run.
+        mine = T._this_machine_tokens()
+        if not mine or T._ASSET_PREFERENCE[:1] != (".pkg",):
+            self.skipTest("architecture-specific packages are macOS-only")
+        other = ("x86_64" if "arm64" in mine else "arm64")
+        u = self._check_with([f"Transcribr-99.0.0-{other}.pkg"])
+        self.assertIsNone(u.asset)
+        self.assertFalse(u.status()["can_install"])
+
     def test_falls_back_to_the_zip(self):
         # Releases published before the signed installers existed only
         # carry the source zip; those must still be installable.
