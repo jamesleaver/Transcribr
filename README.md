@@ -116,20 +116,10 @@ Transcribr-Installer/
 **macOS:**
 - macOS 11 (Big Sur) or later
 - ~3 GB free disk space (mostly for the Whisper models)
-- An admin password (Homebrew may need it during install)
 
 **Windows:**
 - Windows 10 (1809+) or Windows 11
 - ~3 GB free disk space (mostly for the Whisper models)
-- `winget` (built into modern Windows; install "App Installer" from the
-  Microsoft Store if missing)
-- The Microsoft Edge WebView2 runtime — already present on Windows 11
-  and most Windows 10 machines; the installer checks and installs it
-  if missing
-
-You do **not** need Python, ffmpeg, or Whisper pre-installed.
-The installer handles all of that (and since 0.9.0 no separate ffmpeg
-is needed at all — the PyAV package bundles the decoding libraries).
 
 ## How to install
 
@@ -139,18 +129,8 @@ is needed at all — the PyAV package bundles the decoding libraries).
    [latest release](https://github.com/jamesleaver/Transcribr/releases/latest).
 2. Double-click it and follow the prompts.
 
-That's it. The package is signed with an Apple Developer ID and
-notarised by Apple, so it opens with **no security warnings** — no
-right-clicking, no trip through System Settings.
-
-It is entirely self-contained (~110 MB): its own Python and the
-faster-whisper engine travel inside it, so there is no Homebrew step,
-nothing fetched from python.org, and no internet connection needed
-during the install.
-
-> **Apple Silicon only.** No Intel package is published, because there
-> is no Intel Mac here to test one on. On an Intel Mac, use the Terminal
-> install below — it works on both.
+> **Apple Silicon only.** No Intel package is published. On an Intel Mac, use
+> the Terminal install below — it works on both.
 
 Two engines are left out to keep the download small, because both drag
 in PyTorch (about 1.1 GB): **mlx-whisper**, which uses the GPU on
@@ -165,11 +145,6 @@ Open **Terminal** (cmd+space, type "terminal") and paste:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
 ```
-
-No security warnings here either: macOS only quarantines what a
-*browser* downloads, and `curl` sets no such flag — the same reason
-Homebrew installs itself this way. (To pin a version, append
-`-s -- v0.9.14` to the `bash`.)
 
 Unlike the package, this builds a Python environment on your Mac. It
 installs Homebrew and Python 3.12 if they are missing, **so it will ask
@@ -217,11 +192,6 @@ first launch.
 1. Download **`Transcribr-<version>-Setup.exe`** from the
    [latest release](https://github.com/jamesleaver/Transcribr/releases/latest).
 2. Run it.
-
-The installer is self-contained — Python and the faster-whisper engine
-are inside it, so nothing is downloaded during the install. It installs
-**per-user**, into `%LOCALAPPDATA%\Programs\Transcribr`, so Windows
-never asks for an administrator password.
 
 > **SmartScreen will warn you**, because the installer is not yet signed
 > with a code-signing certificate: click **More info → Run anyway**. A
