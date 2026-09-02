@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.12"
+__version__ = "0.9.13"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -3251,7 +3251,13 @@ class TranscriptModel:
 
     def __init__(self, paragraphs, speakers=None, speaker_names=None,
                  word_conf=None, ts_marks=None, *,
-                 on_autosave=None, timer_factory=None):
+                 on_autosave=None, timer_factory=None,
+                 has_timings=True):
+        # False when the paragraphs carry no real times at all - a
+        # transcript saved without timestamps parses back with every
+        # start at 0.0, which used to make every paragraph "play" from
+        # the beginning of the recording.
+        self.has_timings = bool(has_timings)
         self.paragraphs = [list(p) for p in paragraphs]
         n = len(self.paragraphs)
         self.speakers = (list(speakers) if speakers is not None
@@ -3325,14 +3331,24 @@ class TranscriptModel:
         paragraph's start instead - or open-ended for the last one."""
         if not (0 <= idx < len(self.paragraphs)):
             return None
+        if not self.has_timings:
+            return None
         para = self.paragraphs[idx]
         if not para:
             return None
         start = max(0.0, float(para[0][0]))
         end = float(para[-1][1])
         if end - start <= 1.0:
-            if idx + 1 < len(self.paragraphs) and self.paragraphs[idx + 1]:
-                next_start = float(self.paragraphs[idx + 1][0][0])
+            # Saved transcripts carry whole-second stamps, so runs of
+            # consecutive paragraphs routinely share one start. Scan on
+            # for the next paragraph that really does begin later:
+            # consulting only the immediate neighbour made every
+            # duplicated stamp play open-ended, i.e. "Play paragraph"
+            # ran to the end of the recording instead of stopping.
+            for nxt in self.paragraphs[idx + 1:]:
+                if not nxt:
+                    continue
+                next_start = float(nxt[0][0])
                 if next_start > start:
                     return (start, max(0.5, next_start - start + 0.3))
             return (start, None)
@@ -3833,6 +3849,7 @@ _SETTINGS_BOOL_KEYS = (
     "extra_json", "extra_srt", "extra_vtt",
     "extra_tsv", "show_details",
     "diarize", "show_all_models", "show_prompt", "show_diarize",
+    "check_updates",
 )
 
 _SETTINGS_NUMBER_KEYS = (
@@ -3896,6 +3913,10 @@ def default_settings():
         # The experimental speaker-detection card stays hidden until
         # enabled from the Settings page.
         "show_diarize": False,
+        # Ask GitHub once per launch whether a newer release exists.
+        # It is the app's only unprompted network call, so it is a
+        # setting rather than a given.
+        "check_updates": True,
     }
 
 
@@ -5140,6 +5161,238 @@ class ModelController:
 
 
 # =====================================================================
+# Update checking
+# =====================================================================
+#
+# Transcribr ships as a GitHub release: a small installer zip that the
+# platform installer script unpacks. The app asks GitHub once per
+# launch whether a newer release exists, and can fetch that zip and
+# hand it to the installer. Nothing about the user's files, transcripts
+# or usage is sent - it is an unauthenticated GET of the public
+# releases API - but because the app otherwise never touches the
+# network unprompted, the check is a setting the user can turn off.
+
+_UPDATE_REPO = "jamesleaver/Transcribr"
+_UPDATE_API = f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest"
+_UPDATE_RELEASES_URL = f"https://github.com/{_UPDATE_REPO}/releases/latest"
+
+
+def _version_tuple(text):
+    """("0.9.12" or "v0.9.12") -> ((0, 9, 12), 1), an ordering key.
+
+    The trailing flag is 0 for a pre-release (1.0.0-rc1) and 1 for the
+    plain release, so 1.0.0 sorts above 1.0.0-rc1. Numbers are padded
+    to three components so "1.0" and "1.0.0" compare equal."""
+    cleaned = str(text or "").strip().lstrip("vV")
+    parts = []
+    final = 1
+    for chunk in re.split(r"[.\-+]", cleaned):
+        if chunk.isdigit():
+            parts.append(int(chunk))
+        elif chunk:
+            final = 0               # rc / beta / dev suffix
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return (tuple(parts), final)
+
+
+def _is_newer(candidate, current=None):
+    return _version_tuple(candidate) > _version_tuple(current or __version__)
+
+
+class UpdateChecker:
+    """Asks GitHub for the newest release, and (on request) downloads
+    that release's installer zip and opens it for the user.
+
+    States: idle -> checking -> current | available | error, and the
+    install side runs available -> downloading -> ready_to_install.
+    """
+
+    def __init__(self, broker):
+        self.broker = broker
+        self.lock = threading.RLock()
+        self.state = "idle"
+        self.latest = None          # version string of the newest release
+        self.notes = ""
+        self.url = _UPDATE_RELEASES_URL
+        self.asset = None           # (name, url, size, sha256|None)
+        self.error = None
+        self.pct = 0
+        self.installer_path = None
+
+    # -- status ---------------------------------------------------------
+
+    def status(self):
+        with self.lock:
+            return {
+                "state": self.state,
+                "current": __version__,
+                "latest": self.latest,
+                "notes": self.notes,
+                "url": self.url,
+                "pct": self.pct,
+                "error": self.error,
+                "can_install": bool(self.asset) and _PLATFORM_INSTALLER
+                is not None,
+            }
+
+    def _set(self, state, **kw):
+        with self.lock:
+            self.state = state
+            for k, v in kw.items():
+                setattr(self, k, v)
+        self.broker.publish("update", self.status())
+
+    # -- checking -------------------------------------------------------
+
+    def check_async(self):
+        """Kick off a check unless one is already running."""
+        with self.lock:
+            if self.state in ("checking", "downloading"):
+                return
+        threading.Thread(target=self.check, daemon=True,
+                         name="transcribr-update").start()
+
+    def check(self):
+        import json
+        import urllib.request
+        self._set("checking", error=None)
+        try:
+            req = urllib.request.Request(
+                _UPDATE_API,
+                headers={"User-Agent": f"Transcribr/{__version__}",
+                         "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            self._set("error",
+                      error=f"Couldn't reach GitHub ({type(e).__name__}).")
+            return
+        tag = data.get("tag_name") or data.get("name") or ""
+        notes = (data.get("body") or "").strip()
+        html = data.get("html_url") or _UPDATE_RELEASES_URL
+        asset = None
+        for a in data.get("assets") or []:
+            name = a.get("name") or ""
+            if name.lower().endswith(".zip") and a.get("browser_download_url"):
+                digest = (a.get("digest") or "")
+                asset = (name, a["browser_download_url"],
+                         int(a.get("size") or 0),
+                         digest.split("sha256:")[-1] if "sha256:" in digest
+                         else None)
+                break
+        with self.lock:
+            self.latest = tag.lstrip("vV") or None
+            self.notes = notes
+            self.url = html
+            self.asset = asset
+        if self.latest and _is_newer(self.latest):
+            self._set("available")
+        else:
+            self._set("current")
+
+    # -- fetching the installer ------------------------------------------
+
+    def install_async(self):
+        with self.lock:
+            if self.state == "downloading":
+                raise ApiFail(409, "busy", "An update is already downloading.")
+            if not self.asset:
+                raise ApiFail(409, "no_asset",
+                              "This release has no installer to download.")
+            if _PLATFORM_INSTALLER is None:
+                raise ApiFail(409, "unsupported",
+                              "Automatic install isn't supported on this "
+                              "platform - use the Downloads page.")
+        threading.Thread(target=self._install, daemon=True,
+                         name="transcribr-update-install").start()
+
+    def _install(self):
+        import hashlib
+        import tempfile
+        import urllib.request
+        import zipfile
+        with self.lock:
+            name, url, size, sha = self.asset
+        self._set("downloading", pct=0, error=None)
+        try:
+            dest = Path(tempfile.mkdtemp(prefix="transcribr-update-"))
+            zip_path = dest / name
+            digest = hashlib.sha256()
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"Transcribr/{__version__}"})
+            with urllib.request.urlopen(req, timeout=120) as resp, \
+                    open(zip_path, "wb") as out:
+                total = int(resp.headers.get("Content-Length") or size or 0)
+                done = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    digest.update(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = min(99, int(done * 100 / total))
+                        with self.lock:
+                            changed = pct != self.pct
+                            self.pct = pct
+                        if changed:
+                            self.broker.publish("update", self.status())
+            if sha and digest.hexdigest().lower() != sha.lower():
+                raise RuntimeError(
+                    "the download failed its integrity check")
+            with zipfile.ZipFile(zip_path) as z:
+                _safe_extract_zip(z, dest)
+            script = None
+            for candidate in dest.rglob(_PLATFORM_INSTALLER):
+                script = candidate
+                break
+            if script is None:
+                raise RuntimeError(
+                    f"the download didn't contain {_PLATFORM_INSTALLER}")
+            os.chmod(script, 0o755)
+            self._open_installer(script)
+            self._set("ready_to_install", pct=100,
+                      installer_path=str(script))
+        except Exception as e:
+            _log("update install failed:\n" + traceback.format_exc())
+            detail = str(e).strip() or type(e).__name__
+            self._set("error", error=f"Update failed: {detail}.")
+
+    @staticmethod
+    def _open_installer(script):
+        """Hand the installer to the OS so the user watches it run and
+        can answer its prompts - it may need their password for
+        Homebrew. Running it silently in the background would leave
+        those prompts invisible."""
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-a", "Terminal", str(script)])
+        elif os.name == "nt":
+            subprocess.Popen(["cmd", "/c", "start", "", str(script)],
+                             cwd=str(script.parent))
+        else:
+            raise RuntimeError("unsupported platform")
+
+
+_PLATFORM_INSTALLER = ("install.command" if sys.platform == "darwin"
+                       else "install.bat" if os.name == "nt" else None)
+
+
+def _safe_extract_zip(zf, dest):
+    """Extract `zf` under `dest`, refusing entries that would escape it
+    (absolute paths or ../ traversal) - the archive comes off the
+    network, so it doesn't get to choose where it lands."""
+    root = Path(dest).resolve()
+    for member in zf.infolist():
+        target = (root / member.filename).resolve()
+        if not str(target).startswith(str(root) + os.sep) and target != root:
+            raise RuntimeError("the archive contained an unsafe path")
+    zf.extractall(dest)
+
+
+# =====================================================================
 # Web UI backend - audio preparation for playback
 # =====================================================================
 #
@@ -5153,6 +5406,16 @@ class ModelController:
 # bottle's static_file.
 
 _AUDIO_PASSTHROUGH_EXTS = {".mp3", ".m4a", ".aac", ".wav"}
+
+# Content types for the formats /audio/current can end up serving. The
+# extracted cache is .m4a, the last-resort fallback is .wav, and
+# passthrough sources add the rest.
+_AUDIO_MIMETYPES = {
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".aac": "audio/aac",
+    ".wav": "audio/wav",
+}
 _AUDIO_CACHE_MAX_FILES = 8
 _AUDIO_CACHE_MAX_BYTES = 1_000_000_000
 
@@ -5227,8 +5490,18 @@ def _extract_audio_m4a_pyav(src, target):
 
         with av.open(str(target), mode="w", format="mp4") as out_container:
             if codec == "aac":
-                # Remux: copy packets straight across.
-                out_stream = out_container.add_stream(template=in_stream)
+                # Remux: copy packets straight across. PyAV renamed this
+                # call - add_stream(template=...) was dropped in PyAV 12
+                # in favour of add_stream_from_template(). Without both
+                # spellings the remux raises on modern PyAV and every
+                # video file silently falls through to the much larger,
+                # 16 kHz WAV fallback.
+                if hasattr(out_container, "add_stream_from_template"):
+                    out_stream = out_container.add_stream_from_template(
+                        in_stream)
+                else:
+                    out_stream = out_container.add_stream(
+                        template=in_stream)
                 for packet in in_container.demux(in_stream):
                     if packet.dts is None:
                         continue
@@ -5660,6 +5933,9 @@ def open_transcript_info(path):
         "extra_formats": [],
         "preset_speakers": preset_speakers,
         "preset_speaker_names": preset_speaker_names,
+        # A transcript with no stamps anywhere carries no timing at
+        # all, so per-paragraph playback is not possible from it.
+        "has_timings": bool(parsed["show_timestamp"]),
         "preset_ts_marks": (
             ["hidden" if h else None for h in parsed.get("ts_hidden") or []]
             if parsed.get("show_timestamp") else []),
@@ -5741,6 +6017,7 @@ class ReviewSession:
             word_conf=info.get("word_conf"),
             ts_marks=info.get("preset_ts_marks") or None,
             on_autosave=self._write_autosave,
+            has_timings=info.get("has_timings", True),
         )
         # Reveal enough name fields to cover preset slots (parity with
         # _enter_review_mode's set_visible_speakers call).
@@ -5786,6 +6063,25 @@ class ReviewSession:
 
     # ----- Payload -------------------------------------------------------
 
+    def _audio_payload(self):
+        """Audio status for the review pane. A transcript parsed back
+        from a file with no timestamps has no per-paragraph times, so
+        however playable the recording is, nothing can be lined up
+        against it - say so rather than letting every paragraph play
+        from the top of the recording."""
+        if not self.model.has_timings:
+            return {
+                "state": "unavailable",
+                "error": ("this transcript was saved without "
+                          "timestamps, so Transcribr can't tell where "
+                          "each paragraph falls in the recording. "
+                          "Re-save it with timestamps shown to restore "
+                          "paragraph playback"),
+            }
+        if self.audio_status_fn is None:
+            return {"state": "unavailable"}
+        return self.audio_status_fn()
+
     def payload(self):
         with self.lock:
             m = self.model
@@ -5825,9 +6121,7 @@ class ReviewSession:
                 "show_timestamp": self.show_timestamp,
                 "title": self.title,
                 "loaded": self.loaded,
-                "audio": (self.audio_status_fn()
-                          if self.audio_status_fn is not None
-                          else {"state": "unavailable"}),
+                "audio": self._audio_payload(),
                 "speaker_names": dict(m.speaker_names),
                 "visible_speakers": m.visible_speakers,
                 "labelled": labelled,
@@ -6220,6 +6514,9 @@ class WebBackend:
         self.controller.on_paragraphs_ready = self._open_review_fresh
         self.models = ModelController(self.broker, self.controller)
         self.controller.model_busy_check = self.models.is_busy
+        self.updates = UpdateChecker(self.broker)
+        if current_settings().get("check_updates", True):
+            self.updates.check_async()
         self.review = None        # the open ReviewSession, if any
         self.audio = None         # AudioPrep for the open session
         self.retrans = None       # RetransJob for the open session
@@ -6580,10 +6877,13 @@ class WebBackend:
                     or not prep.serve_path):
                 _fail(ApiFail(404, "no_audio", "No audio is ready."))
             p = Path(prep.serve_path)
-            mimetype = ("audio/mp4" if p.suffix.lower() == ".m4a"
-                        else "auto")
+            # Name the type explicitly. bottle 0.13 dropped the magic
+            # "auto" string, so passing it emits a literal
+            # `Content-Type: auto` - WKWebView sniffs past that, but
+            # stricter engines (WebView2) refuse to play the media.
+            mimetype = _AUDIO_MIMETYPES.get(p.suffix.lower())
             resp = bottle.static_file(p.name, root=str(p.parent),
-                                      mimetype=mimetype)
+                                      mimetype=mimetype or True)
             # The URL names the *current* session's audio, which
             # changes between reviews - never let the browser cache it.
             resp.set_header("Cache-Control", "no-store")
@@ -6847,6 +7147,25 @@ class WebBackend:
             merged = validate_settings(incoming, base=current_settings())
             _settings_save(merged)
             return merged
+
+        # -- updates -----------------------------------------------------
+
+        @app.get("/api/update")
+        def api_update_get():
+            return backend.updates.status()
+
+        @app.post("/api/update/check")
+        def api_update_check():
+            backend.updates.check_async()
+            return backend.updates.status()
+
+        @app.post("/api/update/install")
+        def api_update_install():
+            try:
+                backend.updates.install_async()
+            except ApiFail as e:
+                _fail(e)
+            return backend.updates.status()
 
         # -- events ------------------------------------------------------
 

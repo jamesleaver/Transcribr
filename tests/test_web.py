@@ -14,6 +14,7 @@ test_transcribr.py.
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -284,6 +285,77 @@ class TestModelStructure(unittest.TestCase):
 
 
 # =====================================================================
+# Update checking
+# =====================================================================
+
+class TestUpdateChecker(unittest.TestCase):
+    class _Broker:
+        def __init__(self):
+            self.events = []
+
+        def publish(self, event, data):
+            self.events.append((event, data))
+
+    def test_version_ordering(self):
+        self.assertTrue(T._is_newer("0.9.12", "0.9.11"))
+        self.assertTrue(T._is_newer("0.10.0", "0.9.99"))
+        self.assertTrue(T._is_newer("1.0.0", "0.9.12"))
+        self.assertFalse(T._is_newer("0.9.11", "0.9.12"))
+        self.assertFalse(T._is_newer("0.9.12", "0.9.12"))
+        # A "v" prefix on the tag is stripped.
+        self.assertTrue(T._is_newer("v0.9.12", "0.9.11"))
+        # A pre-release sorts below the plain release.
+        self.assertFalse(T._is_newer("1.0.0-rc1", "1.0.0"))
+
+    def test_status_shape(self):
+        u = T.UpdateChecker(self._Broker())
+        st = u.status()
+        self.assertEqual(st["state"], "idle")
+        self.assertEqual(st["current"], T.__version__)
+        self.assertIsNone(st["latest"])
+        self.assertFalse(st["can_install"])
+
+    def test_check_failure_is_reported_not_raised(self):
+        u = T.UpdateChecker(self._Broker())
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=OSError("no network")):
+            u.check()
+        self.assertEqual(u.status()["state"], "error")
+        self.assertIn("GitHub", u.status()["error"])
+
+    def test_install_without_asset_refuses(self):
+        u = T.UpdateChecker(self._Broker())
+        with self.assertRaises(T.ApiFail):
+            u.install_async()
+
+    def test_zip_extract_rejects_traversal(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            zp = Path(d) / "evil.zip"
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("../escaped.txt", "nope")
+            with zipfile.ZipFile(zp) as z:
+                with self.assertRaises(RuntimeError):
+                    T._safe_extract_zip(z, Path(d) / "out")
+            self.assertFalse((Path(d) / "escaped.txt").exists())
+
+    def test_zip_extract_allows_normal_entries(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            zp = Path(d) / "ok.zip"
+            with zipfile.ZipFile(zp, "w") as z:
+                z.writestr("macos/install.command", "#!/bin/bash\n")
+            out = Path(d) / "out"
+            with zipfile.ZipFile(zp) as z:
+                T._safe_extract_zip(z, out)
+            self.assertTrue((out / "macos" / "install.command").exists())
+
+    def test_check_updates_defaults_on(self):
+        self.assertTrue(T.default_settings()["check_updates"])
+        self.assertIn("check_updates", T.validate_settings({}))
+
+
+# =====================================================================
 # TranscriptModel - playback spans, confidence, attention
 # =====================================================================
 
@@ -311,6 +383,43 @@ class TestModelDerived(unittest.TestCase):
     def test_playback_span_bad_index(self):
         m = _model()
         self.assertIsNone(m.playback_span(99))
+
+    def test_playback_span_skips_duplicate_starts(self):
+        # Saved transcripts carry whole-second stamps, so consecutive
+        # paragraphs often share a start. The span must still end at the
+        # next paragraph that genuinely begins later - looking only at
+        # the immediate neighbour made these play open-ended, i.e. on to
+        # the end of the recording.
+        m = T.TranscriptModel([
+            [(56.0, 57.0, "One.")],
+            [(56.0, 57.0, "Two.")],
+            [(60.0, 61.0, "Three.")],
+        ])
+        start, dur = m.playback_span(0)
+        self.assertEqual(start, 56.0)
+        self.assertAlmostEqual(dur, 4.3, places=2)   # to 60.0 + 0.3 tail
+        self.assertIsNotNone(m.playback_span(1)[1])
+        # The genuinely last paragraph stays open-ended.
+        self.assertEqual(m.playback_span(2), (60.0, None))
+
+    def test_audio_mimetypes_are_real_types(self):
+        # bottle 0.13 dropped the magic "auto" string, so every type we
+        # serve must be named explicitly - a literal `Content-Type: auto`
+        # is refused by stricter webviews.
+        for ext in T._AUDIO_PASSTHROUGH_EXTS | {".m4a"}:
+            self.assertIn("/", T._AUDIO_MIMETYPES.get(ext, ""),
+                          f"no content type for {ext}")
+
+    def test_playback_span_none_without_timings(self):
+        # A transcript saved with no stamps parses back with every start
+        # at 0.0; playback must decline rather than play every paragraph
+        # from the top of the recording.
+        m = T.TranscriptModel([
+            [(0.0, 1.0, "One.")],
+            [(0.0, 1.0, "Two.")],
+        ], has_timings=False)
+        self.assertIsNone(m.playback_span(0))
+        self.assertIsNone(m.playback_span(1))
 
     def test_confidence_spans_thresholds(self):
         m = T.TranscriptModel(_doc(), word_conf=_WORD_CONF)
@@ -1488,6 +1597,33 @@ class TestReviewSession(unittest.TestCase):
         reopened = T.ReviewSession(info, self.broker)
         self.assertEqual(reopened.payload()["paragraphs"][1]["ts"],
                          "hidden")
+
+    def test_no_timestamp_transcript_declines_playback(self):
+        # Round-trip a transcript saved without timestamps: it comes
+        # back with no usable times, so the review pane must say so
+        # instead of playing every paragraph from 00:00.
+        paras = [[(0.0, 5.0, "One.")], [(60.0, 63.3, "Two.")]]
+        out = Path(self.tmp.name) / "no_ts.txt"
+        T.write_paragraphs_to_file(paras, out, show_timestamp=False,
+                                   output_format="txt", speakers=None)
+        info = T.open_transcript_info(str(out))
+        self.assertFalse(info["has_timings"])
+        session = T.ReviewSession(info, self.broker)
+        payload = session.payload()
+        self.assertEqual(payload["audio"]["state"], "unavailable")
+        self.assertIn("without timestamps", payload["audio"]["error"])
+        self.assertTrue(all(p["play"] is None
+                            for p in payload["paragraphs"]))
+
+    def test_timestamped_transcript_keeps_playback(self):
+        paras = [[(0.0, 5.0, "One.")], [(60.0, 63.3, "Two.")]]
+        out = Path(self.tmp.name) / "with_ts.txt"
+        T.write_paragraphs_to_file(paras, out, show_timestamp=True,
+                                   output_format="txt", speakers=None)
+        info = T.open_transcript_info(str(out))
+        self.assertTrue(info["has_timings"])
+        payload = T.ReviewSession(info, self.broker).payload()
+        self.assertEqual(payload["paragraphs"][1]["play"]["start"], 60.0)
 
     def test_apply_retranscribe_splices_and_undoes(self):
         session, _ = self._fresh_session(fmt="txt")

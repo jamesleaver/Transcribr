@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import AnnotateOverlay from "./components/AnnotateOverlay";
 import DialogHost from "./components/DialogHost";
 import Sidebar from "./components/Sidebar";
+import UpdateBanner from "./components/UpdateBanner";
 import LibraryView from "./views/LibraryView";
 import ReviewView from "./views/ReviewView";
 import SettingsView from "./views/SettingsView";
@@ -10,6 +11,7 @@ import { api } from "./api/client";
 import { confirmDialog } from "./state/dialogs";
 import { useApp } from "./state/store";
 import { useReview, type ReviewPayload } from "./state/reviewStore";
+import { useUpdate } from "./state/updateStore";
 
 /** On launch: offer to restore a crash-recovery autosave (default Yes,
  *  parity with _maybe_offer_autosave_restore; declining discards). */
@@ -53,6 +55,12 @@ export default function App() {
   const bootError = useApp((s) => s.bootError);
   const view = useApp((s) => s.view);
   useAutosaveRestoreOffer(meta !== null);
+  // The launch check may finish before this client's event stream is
+  // attached, so read the settled status once rather than relying on
+  // the update event alone.
+  useEffect(() => {
+    if (meta) void useUpdate.getState().refresh();
+  }, [meta]);
 
   if (bootError) {
     return (
@@ -82,11 +90,14 @@ export default function App() {
   return (
     <div className="flex h-full">
       <Sidebar />
-      <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <UpdateBanner />
+        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
         {view === "transcribe" && <TranscribeView />}
         {view === "review" && <ReviewView />}
         {view === "library" && <LibraryView />}
         {view === "settings" && <SettingsView />}
+        </div>
       </main>
       <DialogHost />
       {meta.annotate && <AnnotateOverlay />}

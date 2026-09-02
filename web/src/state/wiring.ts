@@ -11,6 +11,7 @@ import { useApp } from "./store";
 import { useRun } from "./runStore";
 import { useModels } from "./modelsStore";
 import { useReview, type ReviewPayload } from "./reviewStore";
+import { useUpdate, type UpdateStatus } from "./updateStore";
 
 // Central registration of SSE event handlers -> store updates.
 // Imported once from main.tsx for its side effects.
@@ -24,6 +25,8 @@ onEvent("run_state", (d) => useRun.getState().applyRunState(d as RunState));
 onEvent("batch_done", (d) => useRun.getState().onBatchDone(d as BatchDone));
 
 onEvent("models", (d) => useModels.getState().applyPayload(d as ModelsPayload));
+
+onEvent("update", (d) => useUpdate.getState().apply(d as UpdateStatus));
 
 onEvent("model_progress", (d) =>
   useModels.getState().applyProgress(d as ModelJob | Record<string, never>),

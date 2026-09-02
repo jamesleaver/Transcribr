@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.12.
+(c) James Leaver, 2026. Version 0.9.13.
 
 Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
 
@@ -468,7 +468,10 @@ The right rail also holds:
   recording if it can't be found; saved `.docx` transcripts embed the
   recording's location (both an absolute and a transcript-relative path,
   so playback keeps working even after the whole case folder is moved)
-  so it survives re-opening.
+  so it survives re-opening. A transcript saved *without* timestamps
+  carries no per-paragraph times, so re-opening one offers no paragraph
+  playback — the rail says so rather than playing from the top of the
+  recording. Save with timestamps shown to keep playback available.
 - **Fix a section** — re-transcribe a stretch of the recording that
   came out badly; see below.
 - **Timestamps / uncertain words** — whether timestamps appear in the
@@ -555,6 +558,24 @@ or double-click `tests/run_tests.command` on a Mac (uses the app's
 venv, which has the optional dependencies). Tests that need an
 optional package or a display skip themselves; the suite never touches
 your real settings.
+
+## Updating
+
+Transcribr asks GitHub once per launch whether a newer release exists.
+When there is one, a strip appears across the top of the window naming
+the new version, with **What's new** for that release's notes:
+
+- **Update now** downloads the release's installer, checks it against
+  the SHA-256 checksum GitHub publishes for the file, unpacks it and
+  opens the installer so you can watch it run — it may ask for your
+  password (Homebrew). Restart Transcribr when it finishes.
+- **Not now** hides the strip until the next launch.
+
+The check is a plain, unauthenticated `GET` of the public releases API.
+No transcripts, recordings, file names or usage data leave your
+computer. If you would rather Transcribr never touched the network on
+its own, turn off **Settings -> Updates -> Check for new versions on
+launch**; **Check now** on that page still works on demand.
 
 ## Re-running the installer
 

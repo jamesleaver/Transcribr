@@ -1,6 +1,7 @@
 import { api } from "../api/client";
 import { useApp } from "../state/store";
 import { Card, CheckField, NumberField, SelectField } from "../components/fields";
+import { useUpdate } from "../state/updateStore";
 import ModelsView from "./ModelsView";
 import type { ThemeSetting } from "../api/types";
 
@@ -66,6 +67,18 @@ export default function SettingsView() {
               }
               note="Transcripts save in this format. One-off PDFs come from the Export PDF button on the Review pane."
             />
+          </div>
+        </Card>
+
+        <Card title="Updates">
+          <div className="flex flex-col gap-2.5">
+            <CheckField
+              label="Check for new versions on launch"
+              checked={settings.check_updates}
+              onChange={(v) => update({ check_updates: v })}
+              note="Asks GitHub once per launch whether a newer release exists. No transcripts, recordings or usage data leave your computer — turn it off to keep Transcribr fully offline."
+            />
+            <UpdateCheckRow />
           </div>
         </Card>
 
@@ -205,6 +218,33 @@ export default function SettingsView() {
           <ModelsView embedded />
         </section>
       </div>
+    </div>
+  );
+}
+
+/** Manual check, for when the launch check is off or the user wants to
+ *  look again without restarting. */
+function UpdateCheckRow() {
+  const status = useUpdate((s) => s.status);
+  const checking = status?.state === "checking";
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        className="rounded-lg border border-edge px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+        disabled={checking}
+        onClick={() => void useUpdate.getState().check()}
+      >
+        {checking ? "Checking…" : "Check now"}
+      </button>
+      <span className="text-xs text-muted">
+        {status?.state === "available"
+          ? `Version ${status.latest} is available (you have ${status.current}).`
+          : status?.state === "current"
+            ? `Transcribr ${status.current} is up to date.`
+            : status?.state === "error"
+              ? status.error
+              : `Version ${status?.current ?? ""}`}
+      </span>
     </div>
   );
 }
