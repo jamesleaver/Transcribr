@@ -323,6 +323,60 @@ class TestUpdateChecker(unittest.TestCase):
         self.assertEqual(u.status()["state"], "error")
         self.assertIn("GitHub", u.status()["error"])
 
+    def _release_json(self, names):
+        import json as _json
+        return _json.dumps({
+            "tag_name": "v99.0.0",
+            "body": "notes",
+            "html_url": "https://example.invalid/r",
+            "assets": [
+                {"name": n,
+                 "browser_download_url": f"https://example.invalid/{n}",
+                 "size": 10,
+                 "digest": "sha256:" + "0" * 64}
+                for n in names
+            ],
+        }).encode()
+
+    def _check_with(self, names):
+        u = T.UpdateChecker(self._Broker())
+        payload = self._release_json(names)
+
+        class _Resp:
+            def read(self_inner):
+                return payload
+            def __enter__(self_inner):
+                return self_inner
+            def __exit__(self_inner, *a):
+                return False
+
+        with mock.patch("urllib.request.urlopen", return_value=_Resp()):
+            u.check()
+        return u
+
+    def test_prefers_the_native_installer_for_this_platform(self):
+        # A release carrying every asset must yield the one that suits
+        # the running machine - not simply the first zip, which is what
+        # it used to take.
+        u = self._check_with(["Transcribr-99.0.0-arm64.pkg",
+                              "Transcribr-99.0.0-Setup.exe",
+                              "Transcribr-Installer.zip"])
+        expected = T._ASSET_PREFERENCE[0]
+        self.assertTrue(u.asset[0].lower().endswith(expected),
+                        f"picked {u.asset[0]} for preference {expected}")
+
+    def test_falls_back_to_the_zip(self):
+        # Releases published before the signed installers existed only
+        # carry the source zip; those must still be installable.
+        u = self._check_with(["Transcribr-Installer.zip"])
+        self.assertTrue(u.asset[0].lower().endswith(".zip"))
+        self.assertTrue(u.status()["can_install"])
+
+    def test_unrecognised_assets_are_ignored(self):
+        u = self._check_with(["notes.txt", "checksums.sha256"])
+        self.assertIsNone(u.asset)
+        self.assertFalse(u.status()["can_install"])
+
     def test_install_without_asset_refuses(self):
         u = T.UpdateChecker(self._Broker())
         with self.assertRaises(T.ApiFail):

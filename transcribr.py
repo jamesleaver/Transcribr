@@ -5233,8 +5233,7 @@ class UpdateChecker:
                 "url": self.url,
                 "pct": self.pct,
                 "error": self.error,
-                "can_install": bool(self.asset) and _PLATFORM_INSTALLER
-                is not None,
+                "can_install": bool(self.asset) and bool(_ASSET_PREFERENCE),
             }
 
     def _set(self, state, **kw):
@@ -5273,14 +5272,19 @@ class UpdateChecker:
         notes = (data.get("body") or "").strip()
         html = data.get("html_url") or _UPDATE_RELEASES_URL
         asset = None
-        for a in data.get("assets") or []:
-            name = a.get("name") or ""
-            if name.lower().endswith(".zip") and a.get("browser_download_url"):
-                digest = (a.get("digest") or "")
-                asset = (name, a["browser_download_url"],
+        available = [a for a in (data.get("assets") or [])
+                     if a.get("browser_download_url")]
+        for suffix in _ASSET_PREFERENCE:
+            for a in available:
+                if not (a.get("name") or "").lower().endswith(suffix):
+                    continue
+                digest = a.get("digest") or ""
+                asset = (a["name"], a["browser_download_url"],
                          int(a.get("size") or 0),
                          digest.split("sha256:")[-1] if "sha256:" in digest
                          else None)
+                break
+            if asset:
                 break
         with self.lock:
             self.latest = tag.lstrip("vV") or None
@@ -5301,7 +5305,7 @@ class UpdateChecker:
             if not self.asset:
                 raise ApiFail(409, "no_asset",
                               "This release has no installer to download.")
-            if _PLATFORM_INSTALLER is None:
+            if not _ASSET_PREFERENCE:
                 raise ApiFail(409, "unsupported",
                               "Automatic install isn't supported on this "
                               "platform - use the Downloads page.")
@@ -5343,41 +5347,65 @@ class UpdateChecker:
             if sha and digest.hexdigest().lower() != sha.lower():
                 raise RuntimeError(
                     "the download failed its integrity check")
-            with zipfile.ZipFile(zip_path) as z:
-                _safe_extract_zip(z, dest)
-            script = None
-            for candidate in dest.rglob(_PLATFORM_INSTALLER):
-                script = candidate
-                break
-            if script is None:
-                raise RuntimeError(
-                    f"the download didn't contain {_PLATFORM_INSTALLER}")
-            os.chmod(script, 0o755)
-            self._open_installer(script)
+
+            if zip_path.suffix.lower() == ".zip":
+                # Source archive: unpack and run the platform installer
+                # script inside it.
+                with zipfile.ZipFile(zip_path) as z:
+                    _safe_extract_zip(z, dest)
+                target = None
+                for candidate in dest.rglob(_PLATFORM_INSTALLER or "*"):
+                    target = candidate
+                    break
+                if target is None:
+                    raise RuntimeError(
+                        f"the download didn't contain {_PLATFORM_INSTALLER}")
+                os.chmod(target, 0o755)
+            else:
+                # A .pkg or .exe is the installer; hand it over as-is.
+                target = zip_path
+
+            self._open_installer(target)
             self._set("ready_to_install", pct=100,
-                      installer_path=str(script))
+                      installer_path=str(target))
         except Exception as e:
             _log("update install failed:\n" + traceback.format_exc())
             detail = str(e).strip() or type(e).__name__
             self._set("error", error=f"Update failed: {detail}.")
 
     @staticmethod
-    def _open_installer(script):
+    def _open_installer(target):
         """Hand the installer to the OS so the user watches it run and
-        can answer its prompts - it may need their password for
-        Homebrew. Running it silently in the background would leave
-        those prompts invisible."""
+        can answer its prompts - a .pkg asks for confirmation, and the
+        script installer may want their password for Homebrew. Running
+        it silently in the background would leave those invisible."""
+        target = Path(target)
         if sys.platform == "darwin":
-            subprocess.Popen(["open", "-a", "Terminal", str(script)])
+            if target.suffix.lower() == ".pkg":
+                # Opens in Installer.app - the ordinary macOS flow.
+                subprocess.Popen(["open", str(target)])
+            else:
+                subprocess.Popen(["open", "-a", "Terminal", str(target)])
         elif os.name == "nt":
-            subprocess.Popen(["cmd", "/c", "start", "", str(script)],
-                             cwd=str(script.parent))
+            subprocess.Popen(["cmd", "/c", "start", "", str(target)],
+                             cwd=str(target.parent))
         else:
             raise RuntimeError("unsupported platform")
 
 
 _PLATFORM_INSTALLER = ("install.command" if sys.platform == "darwin"
                        else "install.bat" if os.name == "nt" else None)
+
+# Which release asset to fetch, best first. The signed .pkg and the
+# Windows .exe are real installers and open directly; the source .zip is
+# the fallback, used for releases published before those existed and on
+# Intel Macs, where no .pkg is built.
+if sys.platform == "darwin":
+    _ASSET_PREFERENCE = (".pkg", ".zip")
+elif os.name == "nt":
+    _ASSET_PREFERENCE = (".exe", ".zip")
+else:
+    _ASSET_PREFERENCE = ()
 
 
 def _safe_extract_zip(zf, dest):

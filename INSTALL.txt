@@ -1,43 +1,61 @@
 TRANSCRIBR - Installation Guide
 ================================
 
-To install:
+The quickest route on each platform. Full detail, troubleshooting and
+uninstall instructions are in README.md.
 
-  On a Mac        Open Terminal (cmd+space, type "terminal") and paste
-                  this one line - no security warnings, nothing to
-                  unzip:
+
+ON A MAC (Apple Silicon)
+------------------------
+
+  Download  Transcribr-<version>-arm64.pkg  from:
+
+    https://github.com/jamesleaver/Transcribr/releases/latest
+
+  Double-click it and follow the prompts. That is the whole install.
+
+  The package is signed and notarised by Apple, so it opens with no
+  security warnings. Everything it needs - its own Python and the
+  transcription engine - is inside it, so there is nothing else to
+  download and no internet connection required.
+
+
+ON A MAC (Intel, or if you prefer the Terminal)
+-----------------------------------------------
+
+  No Intel package is published, because there is no Intel Mac here to
+  test one on. Open Terminal (cmd+space, type "terminal") and paste:
 
     curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
 
-                  Or, from this folder: open "macos" and double-click
-                  "install.command" (see the note below).
+  This raises no security warnings either - macOS only quarantines what
+  a browser downloads. It builds a Python environment on your Mac, so it
+  installs Homebrew and Python if they are missing (it will ask for your
+  password), needs a working connection, and takes longer than the
+  package.
 
-  On Windows      Open the "windows" folder, double-click "install.bat"
 
-The installer will set up everything automatically: Python, Whisper,
-the application, and Desktop / Start Menu shortcuts. On Windows it
-also checks for Microsoft's WebView2 runtime (used by the interface)
-and installs it if missing. No separate ffmpeg install is needed.
+ON WINDOWS
+----------
 
-Transcribr is not signed with an Apple Developer ID or a Windows code
-signing certificate, so if you install from the downloaded zip your
-operating system will warn you the first time:
+  Download  Transcribr-<version>-Setup.exe  from the same page and run
+  it. Everything is included; it installs for your user only, so Windows
+  never asks for an administrator password.
 
-  - On macOS:    System Settings -> Privacy & Security, scroll to the
-                 bottom, click "Open Anyway" next to the message about
-                 install.command.
-                 (Right-click -> Open used to work; Apple removed that
-                 in macOS 15 Sequoia. The one-line Terminal install
-                 above sidesteps this entirely, because macOS only
-                 quarantines files downloaded by a browser.)
-  - On Windows:  Click "More info" -> "Run anyway" if SmartScreen
-                 prompts; or right-click "install.bat" -> "Run as
-                 administrator" only if the standard run does not work.
+  SmartScreen will warn you, because the installer is not yet signed
+  with a code-signing certificate. Click "More info" -> "Run anyway".
 
-Total install time: 5-15 minutes depending on internet speed.
 
-For full details, troubleshooting, and uninstall instructions, see
-README.md.
+AFTERWARDS
+----------
+
+  Launch Transcribr from Spotlight / Launchpad / Applications on a Mac,
+  or the Desktop / Start Menu on Windows.
+
+  Whisper model weights download the first time you use a given model
+  (about 1.6 GB for the recommended one), so the first transcription
+  needs a connection. Everything after that runs entirely on your
+  computer.
 
 
 -----------------------------------------------------------------
@@ -52,13 +70,3 @@ before saving as Word (.docx), PDF, or plain text. Several files can
 be queued and transcribed in one unattended batch. Everything runs
 locally on your computer - no audio, video, or transcripts are
 uploaded to the internet.
-
-When a particular model is run for the first time, that model will
-be downloaded to your computer and stored locally. The 'Standard'
-model (large-v3-turbo) is recommended.
-
-Use at your own risk.
-
-Questions: jleaver@sgchambers.com.au
------------------------------------------------------------------
-

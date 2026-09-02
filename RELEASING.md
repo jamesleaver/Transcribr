@@ -174,7 +174,11 @@ Measured sizes:
    The default build is **arm64 only**. Run it twice, once per arch, if
    Intel Macs need supporting.
 5. Build the Windows installer (see Part 4).
-6. Commit, tag and publish:
+6. Commit, tag and publish. Attach both installers; GitHub generates
+   the source archive for the tag by itself, and that is what
+   `macos/bootstrap.sh` falls back to on an Intel Mac, so no extra
+   asset is needed.
+
    ```bash
    git tag v0.9.14 && git push origin main --tags
    gh release create v0.9.14 dist/*.pkg dist/*.exe \
@@ -183,6 +187,12 @@ Measured sizes:
 
 Publishing the release is what makes the in-app updater offer it to
 existing users, so publish last.
+
+The updater picks the asset that suits the machine it is running on:
+`.pkg` on macOS, `.exe` on Windows, and the source archive if neither is
+present (which is how releases before 0.9.14 still work). A `.pkg` or
+`.exe` opens directly; the source archive is unpacked and its platform
+installer script is run.
 
 ### Verifying a signed package
 

@@ -133,7 +133,32 @@ is needed at all — the PyAV package bundles the decoding libraries).
 
 ## How to install
 
-### macOS — one line, no security warnings (recommended)
+### macOS — the installer package (recommended)
+
+1. Download **`Transcribr-<version>-arm64.pkg`** from the
+   [latest release](https://github.com/jamesleaver/Transcribr/releases/latest).
+2. Double-click it and follow the prompts.
+
+That's it. The package is signed with an Apple Developer ID and
+notarised by Apple, so it opens with **no security warnings** — no
+right-clicking, no trip through System Settings.
+
+It is entirely self-contained (~110 MB): its own Python and the
+faster-whisper engine travel inside it, so there is no Homebrew step,
+nothing fetched from python.org, and no internet connection needed
+during the install.
+
+> **Apple Silicon only.** No Intel package is published, because there
+> is no Intel Mac here to test one on. On an Intel Mac, use the Terminal
+> install below — it works on both.
+
+Two engines are left out to keep the download small, because both drag
+in PyTorch (about 1.1 GB): **mlx-whisper**, which uses the GPU on
+M-series Macs, and **openai-whisper**, the reference implementation.
+Install either in one click from the **Models** tab when you want it.
+Whisper model weights are downloaded on first use, as always.
+
+### macOS — Terminal install (Intel Macs, or if you prefer)
 
 Open **Terminal** (cmd+space, type "terminal") and paste:
 
@@ -141,74 +166,70 @@ Open **Terminal** (cmd+space, type "terminal") and paste:
 curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
 ```
 
-That fetches the current release, checks it against the checksum GitHub
-publishes for the file, and runs the installer. Then skip to step 4
-below for what it does.
-
-Why bother: macOS tags anything a *browser* downloads with
-`com.apple.quarantine` and then refuses to run it. `curl` sets no such
-tag, so this path raises no Gatekeeper prompt at all — the same reason
+No security warnings here either: macOS only quarantines what a
+*browser* downloads, and `curl` sets no such flag — the same reason
 Homebrew installs itself this way. (To pin a version, append
-`-s -- v0.9.13` to the `bash`.)
+`-s -- v0.9.14` to the `bash`.)
+
+Unlike the package, this builds a Python environment on your Mac. It
+installs Homebrew and Python 3.12 if they are missing, **so it will ask
+for your password**, and on Apple Silicon it also installs mlx-whisper —
+which makes for a much larger install (~1.4 GB) but gives you GPU
+transcription immediately. It needs a working connection throughout.
+
+It will:
+
+- Ask before installing Homebrew (only if missing)
+- Install Python 3.12 via Homebrew
+- Create a virtual environment at `~/Library/Application Support/Transcribr/`
+- Install faster-whisper and sherpa-onnx (speaker detection), plus
+  mlx-whisper on Apple Silicon (macOS 13.5+), along with python-docx,
+  reportlab, pywebview and bottle — no separate ffmpeg needed
+- Create `/Applications/Transcribr.app`
 
 ### macOS — from the downloaded zip
 
-1. Download and unzip the latest release.
-2. Open the `macos` folder.
-3. Double-click `install.command`. Because the zip came from a browser,
-   macOS will refuse it the first time — **Transcribr is not signed with
-   an Apple Developer ID**. To allow it: **System Settings -> Privacy &
-   Security**, scroll to the bottom, and click **Open Anyway** next to
-   the message about `install.command`.
+Only needed if you would rather not use either route above. Download and
+unzip the release, open the `macos` folder and double-click
+`install.command`.
 
-   > Older instructions said to right-click -> Open. Apple removed that
-   > shortcut in macOS 15 (Sequoia); on macOS 15 and later the Privacy &
-   > Security route above is the only way. The one-line install avoids
-   > the whole business.
+Because the zip came from a browser, macOS will refuse it the first
+time. To allow it: **System Settings → Privacy & Security**, scroll to
+the bottom, and click **Open Anyway** next to the message about
+`install.command`.
 
-4. Read what it tells you and confirm prompts. It will:
-   - Ask before installing Homebrew (only if missing)
-   - Install Python 3.12 via Homebrew
-   - Create a venv at `~/Library/Application Support/Transcribr/`
-   - Install the faster-whisper engine and sherpa-onnx (speaker
-     detection), plus mlx-whisper on Apple Silicon (macOS 13.5+),
-     along with python-docx, reportlab, pywebview and bottle (no
-     separate ffmpeg needed). Roughly 300 MB on Intel; on Apple
-     Silicon mlx-whisper requires PyTorch, which takes it past 1.4 GB
-   - Create `/Applications/Transcribr.app`
-5. Launch from Spotlight, Launchpad, or the Applications folder.
+> Older instructions said to right-click → Open. Apple removed that
+> shortcut in macOS 15 (Sequoia); on macOS 15 and later the Privacy &
+> Security route is the only one. Neither of the two options above runs
+> into this at all.
 
-   The reference **openai-whisper** engine isn't installed up front
-   (it pulls in PyTorch, ~2 GB). Add it any time from the **Models** tab
-   in the app if you want it — see [Models](#models) below.
+### macOS — after installing
 
-   `Transcribr.app` in `/Applications` is shared by every user account
-   on the Mac, but each account keeps its own environment under its own
-   `~/Library/Application Support/Transcribr/`. If more than one person
-   uses the computer, each runs the installer once while logged in as
-   themselves; if an existing app was installed by another (or a
-   deleted) account, the installer asks for an administrator password
-   to replace it.
+Launch from Spotlight, Launchpad, or the Applications folder.
+
+`Transcribr.app` in `/Applications` is shared by every user account on
+the Mac, and each account keeps its own environment under its own
+`~/Library/Application Support/Transcribr/`, created automatically on
+first launch.
 
 ### Windows
 
-1. Download and unzip the latest release.
-2. Open the `windows` folder.
-3. **Double-click `install.bat`.**
-   - If Windows SmartScreen warns, click "More info" -> "Run anyway".
-   - The installer runs in a console window; PowerShell does the work.
-4. Read what it tells you and confirm prompts. It will:
-   - Install Python 3.12 (x64) from python.org
-   - Create a venv at `%LOCALAPPDATA%\Transcribr\venv`
-   - Install the faster-whisper engine and sherpa-onnx (speaker
-     detection) plus python-docx, reportlab, pywebview and bottle
-     (a few hundred MB — no PyTorch, no separate ffmpeg)
-   - Place a Desktop shortcut and a Start Menu entry
-5. Launch from your Desktop or Start Menu (search "Transcribr").
+1. Download **`Transcribr-<version>-Setup.exe`** from the
+   [latest release](https://github.com/jamesleaver/Transcribr/releases/latest).
+2. Run it.
 
-   The reference **openai-whisper** engine isn't installed up front
-   (it pulls in PyTorch, ~2 GB). Add it any time from the **Models** tab
-   in the app if you want it — see [Models](#models) below.
+The installer is self-contained — Python and the faster-whisper engine
+are inside it, so nothing is downloaded during the install. It installs
+**per-user**, into `%LOCALAPPDATA%\Programs\Transcribr`, so Windows
+never asks for an administrator password.
+
+> **SmartScreen will warn you**, because the installer is not yet signed
+> with a code-signing certificate: click **More info → Run anyway**. A
+> certificate is a separate purchase from Apple's, and is on the list.
+
+Launch from your Desktop or Start Menu (search "Transcribr"). As on
+macOS, **openai-whisper** is not included (PyTorch, ~2 GB) — add it from
+the **Models** tab if you want it.
 
 ## Using the application
 

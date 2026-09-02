@@ -56,6 +56,18 @@ DIGEST="$(printf '%s' "$META" \
     | grep -o '"digest"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]*"' \
     | head -1 | sed 's/.*sha256:\([0-9a-f]*\)"$/\1/')"
 
+# Releases from 0.9.14 onward ship a signed .pkg rather than an
+# installer zip. This script is the script-installer route - used on
+# Intel Macs, where no .pkg is built, and by anyone who prefers it - so
+# fall back to the tag's source archive, which carries install.command
+# and everything it needs.
+if [ -z "$ASSET_URL" ]; then
+    ASSET_URL="$(printf '%s' "$META" \
+        | grep -o '"zipball_url"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 | sed 's/.*"\(https[^"]*\)"$/\1/')"
+    DIGEST=""            # source archives carry no published checksum
+    [ -n "$ASSET_URL" ] && say "Using the source archive for ${TAG:-this release}."
+fi
 [ -n "$ASSET_URL" ] || fail "That release has no installer download. See https://github.com/$REPO/releases"
 
 # ---- fetch it --------------------------------------------------------------
