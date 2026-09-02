@@ -23,7 +23,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read version
         id: version
@@ -36,9 +36,9 @@ jobs:
 
       # webdist/ is committed, but rebuilding here means a forgotten
       # `npm run build` can never ship a stale interface.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -71,7 +71,7 @@ jobs:
             "{0} - {1:N1} MB" -f $_.Name, ($_.Length / 1MB)
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Transcribr-${{ steps.version.outputs.version }}-Windows
           path: dist/*.exe
@@ -80,6 +80,6 @@ jobs:
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.exe
