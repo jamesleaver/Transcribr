@@ -81,11 +81,44 @@ Name: "{autodesktop}\{#AppName}"; \
     Tasks: desktopicon
 
 [Run]
+; Install the WebView2 runtime first, and only if it is actually
+; missing - without it the interface cannot render. Per-user install, so
+; no elevation; needs a connection, hence the forgiving error handling.
+Filename: "{app}\MicrosoftEdgeWebview2Setup.exe"; \
+    Parameters: "/silent /install"; \
+    StatusMsg: "Installing the Microsoft Edge WebView2 runtime..."; \
+    Check: WebView2Missing; \
+    Flags: waituntilterminated skipifdoesntexist runasoriginaluser
+
 Filename: "{app}\python\pythonw.exe"; \
     Parameters: """{app}\transcribr.py"""; \
     WorkingDir: "{app}"; \
     Description: "Launch {#AppName}"; \
     Flags: nowait postinstall skipifsilent
+
+[Code]
+function WebView2Version(RootKey: Integer; SubKey: String): String;
+begin
+  Result := '';
+  if not RegQueryStringValue(RootKey, SubKey, 'pv', Result) then
+    Result := '';
+end;
+
+// True when the Evergreen WebView2 runtime is absent. Microsoft records
+// it under EdgeUpdate; "0.0.0.0" means registered but not installed.
+function WebView2Missing: Boolean;
+var
+  Version: String;
+const
+  ClientKey = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+begin
+  Version := WebView2Version(HKEY_LOCAL_MACHINE,
+      'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\' + ClientKey);
+  if (Version = '') or (Version = '0.0.0.0') then
+    Version := WebView2Version(HKEY_CURRENT_USER,
+        'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + ClientKey);
+  Result := (Version = '') or (Version = '0.0.0.0');
+end;
 
 [UninstallDelete]
 ; Bytecode and anything the Models tab installed later - none of it is

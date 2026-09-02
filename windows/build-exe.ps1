@@ -91,6 +91,23 @@ Say "Verifying the bundled engine imports..."
 & $Py -c "import faster_whisper, bottle, webview, docx, reportlab; print('imports ok')"
 if ($LASTEXITCODE -ne 0) { Die "The bundled runtime cannot import its own dependencies" }
 
+# ---- WebView2 bootstrapper --------------------------------------------------
+#
+# The interface renders in a WebView2 window. Windows 11 and most current
+# Windows 10 machines already have the Evergreen runtime, but not all -
+# and without it pywebview falls back to the old MSHTML engine, which
+# cannot render the interface at all. The script installer handled this
+# via winget; the .exe carries Microsoft's bootstrapper instead and runs
+# it only when the runtime is genuinely absent. It is ~2 MB.
+
+Say "Fetching the WebView2 bootstrapper..."
+try {
+    Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" `
+        -OutFile (Join-Path $StageDir "MicrosoftEdgeWebview2Setup.exe")
+} catch {
+    Die "Could not download the WebView2 bootstrapper: $_"
+}
+
 # ---- application files ------------------------------------------------------
 
 Say "Copying the application..."
