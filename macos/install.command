@@ -328,14 +328,9 @@ ok "Installed to: $APP"
 
 step "Done!"
 info "Launch ${BOLD}Transcribr${RESET} from:"
-info "  - Spotlight (cmd+space, type 'whisper')"
+info "  - Spotlight (cmd+space, type 'Transcribr')"
 info "  - Launchpad"
 info "  - the Applications folder"
-info
-info "${YELLOW}First launch only:${RESET} macOS may say the app is from an"
-info "unidentified developer. Right-click the app, choose ${BOLD}Open${RESET},"
-info "then ${BOLD}Open${RESET} again in the dialog. Subsequent launches will"
-info "work normally."
 info
 info "If anything misbehaves, run this installer again - it is safe to repeat."
 echo

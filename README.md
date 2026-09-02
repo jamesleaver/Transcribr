@@ -101,6 +101,7 @@ Transcribr-Installer/
 │   ├── test_transcribr.py
 │   └── run_tests.command    ← Mac users: double-click to run the tests
 ├── macos/
+│   ├── bootstrap.sh         ← The one-line curl installer fetches this
 │   ├── install.command      ← Mac users: double-click this
 │   └── app_template/        ← Files used by the installer
 └── windows/
@@ -131,13 +132,39 @@ is needed at all — the PyAV package bundles the decoding libraries).
 
 ## How to install
 
-### macOS
+### macOS — one line, no security warnings (recommended)
+
+Open **Terminal** (cmd+space, type "terminal") and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
+```
+
+That fetches the current release, checks it against the checksum GitHub
+publishes for the file, and runs the installer. Then skip to step 4
+below for what it does.
+
+Why bother: macOS tags anything a *browser* downloads with
+`com.apple.quarantine` and then refuses to run it. `curl` sets no such
+tag, so this path raises no Gatekeeper prompt at all — the same reason
+Homebrew installs itself this way. (To pin a version, append
+`-s -- v0.9.13` to the `bash`.)
+
+### macOS — from the downloaded zip
 
 1. Download and unzip the latest release.
 2. Open the `macos` folder.
-3. **Right-click `install.command`** -> Open -> Open.
-   (Right-click is needed only the first time, to get past the
-   "unidentified developer" warning. After that, double-click works.)
+3. Double-click `install.command`. Because the zip came from a browser,
+   macOS will refuse it the first time — **Transcribr is not signed with
+   an Apple Developer ID**. To allow it: **System Settings -> Privacy &
+   Security**, scroll to the bottom, and click **Open Anyway** next to
+   the message about `install.command`.
+
+   > Older instructions said to right-click -> Open. Apple removed that
+   > shortcut in macOS 15 (Sequoia); on macOS 15 and later the Privacy &
+   > Security route above is the only way. The one-line install avoids
+   > the whole business.
+
 4. Read what it tells you and confirm prompts. It will:
    - Ask before installing Homebrew (only if missing)
    - Install Python 3.12 via Homebrew
@@ -579,7 +606,14 @@ launch**; **Check now** on that page still works on demand.
 
 ## Re-running the installer
 
-Both installers are safe to re-run. They will:
+Both installers are safe to re-run — including the macOS one-liner,
+which always fetches the current release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
+```
+
+They will:
 - Skip dependencies that are already installed
 - Offer to recreate the venv from scratch (say no for a quick refresh,
   yes if something is genuinely broken)
@@ -638,6 +672,28 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\whisper"  # optional
 ```
 
 ## Troubleshooting
+
+**macOS blocks the installer ("unidentified developer", "not opened").**
+Transcribr isn't signed with an Apple Developer ID, so anything you
+download through a *browser* is quarantined and refused. Either install
+with the one-liner, which isn't quarantined at all:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
+```
+
+or allow the blocked file: **System Settings -> Privacy & Security**,
+scroll to the bottom, **Open Anyway**. (Right-click -> Open no longer
+works — Apple removed it in macOS 15 Sequoia.) If you have already
+unzipped it and would rather clear the flag by hand:
+
+```bash
+xattr -dr com.apple.quarantine ~/Downloads/Transcribr-Installer
+```
+
+`/Applications/Transcribr.app` is never affected by this: the installer
+builds it on your Mac rather than downloading it, so it carries no
+quarantine flag and launches normally.
 
 If the app does not launch:
 

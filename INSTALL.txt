@@ -3,7 +3,15 @@ TRANSCRIBR - Installation Guide
 
 To install:
 
-  On a Mac        Open the "macos" folder, double-click "install.command"
+  On a Mac        Open Terminal (cmd+space, type "terminal") and paste
+                  this one line - no security warnings, nothing to
+                  unzip:
+
+    curl -fsSL https://raw.githubusercontent.com/jamesleaver/Transcribr/main/macos/bootstrap.sh | bash
+
+                  Or, from this folder: open "macos" and double-click
+                  "install.command" (see the note below).
+
   On Windows      Open the "windows" folder, double-click "install.bat"
 
 The installer will set up everything automatically: Python, Whisper,
@@ -11,10 +19,17 @@ the application, and Desktop / Start Menu shortcuts. On Windows it
 also checks for Microsoft's WebView2 runtime (used by the interface)
 and installs it if missing. No separate ffmpeg install is needed.
 
-The first time you run the installer, your operating system may warn
-you that it's from an unidentified developer:
+Transcribr is not signed with an Apple Developer ID or a Windows code
+signing certificate, so if you install from the downloaded zip your
+operating system will warn you the first time:
 
-  - On macOS:    Right-click "install.command" -> Open -> Open
+  - On macOS:    System Settings -> Privacy & Security, scroll to the
+                 bottom, click "Open Anyway" next to the message about
+                 install.command.
+                 (Right-click -> Open used to work; Apple removed that
+                 in macOS 15 Sequoia. The one-line Terminal install
+                 above sidesteps this entirely, because macOS only
+                 quarantines files downloaded by a browser.)
   - On Windows:  Click "More info" -> "Run anyway" if SmartScreen
                  prompts; or right-click "install.bat" -> "Run as
                  administrator" only if the standard run does not work.
