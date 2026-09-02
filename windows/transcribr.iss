@@ -109,14 +109,14 @@ end;
 function WebView2Missing: Boolean;
 var
   Version: String;
-const
-  ClientKey = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
 begin
+  // Inno's Pascal Script has no local const blocks, so the client GUID
+  // is written out in full rather than named once.
   Version := WebView2Version(HKEY_LOCAL_MACHINE,
-      'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\' + ClientKey);
+      'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}');
   if (Version = '') or (Version = '0.0.0.0') then
     Version := WebView2Version(HKEY_CURRENT_USER,
-        'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + ClientKey);
+        'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}');
   Result := (Version = '') or (Version = '0.0.0.0');
 end;
 
