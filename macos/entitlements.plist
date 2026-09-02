@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Hardened runtime exceptions. Notarisation requires the hardened
+      runtime; a CPython application needs a few doors left open in it.
+
+      allow-unsigned-executable-memory / allow-jit:
+        CTranslate2 and ONNX Runtime generate and run code at run time.
+        Without these the engine dies the moment it starts transcribing.
+
+      disable-library-validation:
+        The Models tab pip-installs optional engines into the user's own
+        environment, and those wheels carry .so files signed by nobody -
+        or by somebody else. Library validation would refuse to load
+        them, so "install openai-whisper" would appear to work and then
+        fail on first use.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!--
+      Transcribr reads recordings the user picks, which can live
+      anywhere - including the Desktop, Documents and Downloads folders
+      macOS guards. It never sends them anywhere.
+    -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

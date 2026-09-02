@@ -126,9 +126,18 @@ roughly 1.4 GB. Since it is one click away in the app, it stays out.
 
 Optional engines install into a **per-user virtual environment** under
 `~/Library/Application Support/Transcribr/`, created on first launch
-from the bundled runtime. The app bundle in `/Applications` stays
+from the bundled runtime (`--system-site-packages`, so everything in
+the bundle stays importable). The app bundle in `/Applications` stays
 read-only and signed; nothing ever writes into it, which is what keeps
-the signature valid.
+the signature valid. Verified: `sys.executable` inside the running app
+is the user's venv, so the Models tab's pip installs land there.
+
+Measured sizes:
+
+| | Staged | Shipped |
+|---|---|---|
+| macOS `.pkg` (arm64) | 335 MB | **108 MB** |
+| Windows `.exe` | 371 MB | **82 MB** |
 
 ---
 
@@ -148,15 +157,28 @@ the signature valid.
    ```bash
    ./macos/build-pkg.sh
    ```
-   This assembles the app, signs every binary inside it, builds the
-   `.pkg`, signs that, uploads it for notarisation, waits for Apple,
-   and staples the ticket. Notarisation usually takes 2–15 minutes.
+   This downloads a relocatable CPython, installs the engine, assembles
+   the app, signs every binary inside it (169 of them in the current
+   build), builds the `.pkg`, signs that, uploads it for notarisation,
+   waits for Apple, and staples the ticket. Notarisation usually takes
+   2–15 minutes.
+
+   Useful variants:
+
+   ```bash
+   ./macos/build-pkg.sh --adhoc         # no certificates; test the build
+   ./macos/build-pkg.sh --no-notarize   # sign properly, skip Apple
+   ./macos/build-pkg.sh --arch x86_64   # Intel Macs (default is arm64)
+   ```
+
+   The default build is **arm64 only**. Run it twice, once per arch, if
+   Intel Macs need supporting.
 5. Build the Windows installer (see Part 4).
 6. Commit, tag and publish:
    ```bash
-   git tag v0.9.13 && git push origin main --tags
-   gh release create v0.9.13 dist/*.pkg dist/*.exe \
-       --title "Transcribr v0.9.13" --generate-notes
+   git tag v0.9.14 && git push origin main --tags
+   gh release create v0.9.14 dist/*.pkg dist/*.exe \
+       --title "Transcribr v0.9.14" --generate-notes
    ```
 
 Publishing the release is what makes the in-app updater offer it to
@@ -165,9 +187,9 @@ existing users, so publish last.
 ### Verifying a signed package
 
 ```bash
-spctl --assess --type install -vv dist/Transcribr-0.9.13.pkg
-pkgutil --check-signature dist/Transcribr-0.9.13.pkg
-stapler validate dist/Transcribr-0.9.13.pkg
+spctl --assess --type install -vv dist/Transcribr-0.9.14-arm64.pkg
+pkgutil --check-signature dist/Transcribr-0.9.14-arm64.pkg
+stapler validate dist/Transcribr-0.9.14-arm64.pkg
 ```
 
 `spctl` should say **accepted** with source *Notarized Developer ID*.
@@ -192,8 +214,27 @@ signing certificate, which is a separate purchase from Apple's $99:
 Nothing in the build pipeline needs to change when a certificate is
 eventually added — it is one extra signing step.
 
-Building the `.exe` needs a Windows machine (or a GitHub Actions
-`windows-latest` runner, which is free for public repositories).
+### Building it
+
+Building a Windows installer needs Windows, so it runs on GitHub
+Actions rather than locally:
+
+```bash
+gh workflow run build-installers.yml --ref main
+gh run watch
+```
+
+Pushing a `v*` tag runs it automatically and attaches the `.exe` to
+that release. Either way the installer is downloadable from the run's
+Artifacts section.
+
+The Windows installer is **per-user**: it installs into
+`%LOCALAPPDATA%\Programs\Transcribr`, so there is no UAC prompt and no
+administrator password, and the tree stays writable for the Models tab.
+
+The macOS `.pkg` is deliberately not built in CI — notarising it needs
+the Developer ID certificates, which belong in your keychain rather
+than in repository secrets.
 
 ---
 
