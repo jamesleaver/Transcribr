@@ -1,6 +1,6 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.13.
+(c) James Leaver, 2026. Version 0.9.14.
 
 Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
 
@@ -501,7 +501,10 @@ The right rail also holds:
   recording if it can't be found; saved `.docx` transcripts embed the
   recording's location (both an absolute and a transcript-relative path,
   so playback keeps working even after the whole case folder is moved)
-  so it survives re-opening. A transcript saved *without* timestamps
+  so it survives re-opening. `.mp3` recordings are quietly remuxed once
+  before playback (a packet copy — no re-encode, no quality loss): an
+  mp3 written without a Xing header reports a wildly wrong duration,
+  and every seek then lands near the start of the recording. A transcript saved *without* timestamps
   carries no per-paragraph times, so re-opening one offers no paragraph
   playback — the rail says so rather than playing from the top of the
   recording. Save with timestamps shown to keep playback available.

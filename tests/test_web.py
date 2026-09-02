@@ -406,9 +406,78 @@ class TestModelDerived(unittest.TestCase):
         # bottle 0.13 dropped the magic "auto" string, so every type we
         # serve must be named explicitly - a literal `Content-Type: auto`
         # is refused by stricter webviews.
-        for ext in T._AUDIO_PASSTHROUGH_EXTS | {".m4a"}:
+        served = (T._AUDIO_PASSTHROUGH_EXTS | T._AUDIO_REMUX_EXTS
+                  | {".m4a", ".wav", ".aac"})
+        for ext in served:
             self.assertIn("/", T._AUDIO_MIMETYPES.get(ext, ""),
                           f"no content type for {ext}")
+
+    def test_mp3_is_never_passed_through(self):
+        # An mp3 with no Xing/Info header reports a duration estimated
+        # from the first frame's bitrate - several times the truth on a
+        # VBR file. Players then map every seek to
+        # `wanted / estimated * filesize`, landing near the start, which
+        # is what made the review pane look like it ignored the selected
+        # paragraph. mp3 must be remuxed, never served as-is.
+        self.assertNotIn(".mp3", T._AUDIO_PASSTHROUGH_EXTS)
+        self.assertIn(".mp3", T._AUDIO_REMUX_EXTS)
+
+    def test_passthrough_is_only_self_describing_containers(self):
+        # Only formats that record their exact duration may be served
+        # straight from the source.
+        self.assertEqual(T._AUDIO_PASSTHROUGH_EXTS, {".m4a", ".wav"})
+
+    def test_remux_rebuilds_mp3_duration(self):
+        try:
+            import av
+            av.codec.Codec("libmp3lame", "w")
+        except Exception:
+            self.skipTest("needs PyAV with an mp3 encoder")
+        import math
+        with tempfile.TemporaryDirectory() as d:
+            broken = Path(d) / "broken.mp3"
+            # 20s of tone, encoded VBR with the Xing header suppressed -
+            # exactly what a recorder or a naive trim produces.
+            with av.open(str(broken), "w", format="mp3",
+                         options={"write_xing": "0"}) as out:
+                stream = out.add_stream("libmp3lame", rate=44100)
+                stream.bit_rate = 128000
+                fifo, n, rate = av.AudioFifo(), 0, 44100
+                import numpy as np
+                total = rate * 20
+                while n < total:
+                    chunk = min(4096, total - n)
+                    t = (np.arange(n, n + chunk) / rate).astype("float32")
+                    samples = (0.2 * np.sin(2 * math.pi * 440 * t))
+                    frame = av.AudioFrame.from_ndarray(
+                        samples.reshape(1, -1), format="fltp", layout="mono")
+                    frame.sample_rate = rate
+                    frame.pts = None
+                    fifo.write(frame)
+                    n += chunk
+                    while True:
+                        got = fifo.read(1152, partial=False)
+                        if got is None:
+                            break
+                        got.pts = None
+                        for pkt in stream.encode(got):
+                            out.mux(pkt)
+                for pkt in stream.encode(None):
+                    out.mux(pkt)
+
+            with av.open(str(broken)) as c:
+                claimed = c.duration / 1_000_000
+
+            fixed = Path(d) / "fixed.mp3"
+            T._remux_audio_pyav(broken, fixed)
+            with av.open(str(fixed)) as c:
+                repaired = c.duration / 1_000_000
+
+            # The repaired file must describe ~20s. (If the platform's
+            # muxer happened to get the original right, this still holds.)
+            self.assertAlmostEqual(repaired, 20.0, delta=1.0,
+                                   msg=f"remux gave {repaired}s")
+            self.assertGreater(claimed, 0)
 
     def test_playback_span_none_without_timings(self):
         # A transcript saved with no stamps parses back with every start
@@ -2285,6 +2354,12 @@ class TestAudioPrep(unittest.TestCase):
         bad.write_bytes(b"\x00" * 64)          # not real audio
         orig_which = _shutil.which
         _shutil.which = lambda name: None       # pretend no ffmpeg
+        # Remember whatever "av" was, so it can be put back exactly.
+        # Popping it instead left later tests with no importable av:
+        # PyAV is a C extension and does not survive being removed from
+        # sys.modules and imported afresh.
+        _sentinel = object()
+        _saved_av = _sys.modules.get("av", _sentinel)
         try:
             # Case 1: PyAV importable but the file is undecodable.
             _sys.modules.setdefault("av", type(_sys)("av"))
@@ -2314,7 +2389,10 @@ class TestAudioPrep(unittest.TestCase):
                           prep2.error)
         finally:
             _shutil.which = orig_which
-            _sys.modules.pop("av", None)
+            if _saved_av is _sentinel:
+                _sys.modules.pop("av", None)
+            else:
+                _sys.modules["av"] = _saved_av
 
     def test_wav_fallback_serves_when_extraction_fails(self):
         # If the AAC extract and ffmpeg both fail but the file CAN be

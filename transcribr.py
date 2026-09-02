@@ -20,7 +20,7 @@ Run with:
     python3 transcribr.py
 """
 
-__version__ = "0.9.13"
+__version__ = "0.9.14"
 
 ABOUT_TEXT = (
     f"Version {__version__}\n"
@@ -5405,7 +5405,23 @@ def _safe_extract_zip(zf, dest):
 # without Range support, which is why /audio/current is served through
 # bottle's static_file.
 
-_AUDIO_PASSTHROUGH_EXTS = {".mp3", ".m4a", ".aac", ".wav"}
+# Served straight from the source: these containers record their exact
+# duration, so the browser can map a timestamp to a byte offset.
+_AUDIO_PASSTHROUGH_EXTS = {".m4a", ".wav"}
+
+# .mp3 is deliberately NOT passed through. An mp3 with no Xing/Info
+# header - routine from voice recorders, and from any tool that trims
+# without re-encoding - carries no duration, so players estimate one
+# from the first frame's bitrate. On a variable-bitrate file that
+# estimate can be several times the truth (2294s for a 528s recording
+# in testing), and every seek then lands at
+# `wanted / estimated * filesize`, i.e. somewhere near the start. The
+# review pane looked like it ignored the selected paragraph and always
+# played from the beginning. Remuxing rebuilds the header; it copies
+# packets, so there is no re-encode and no quality loss.
+# Raw .aac (ADTS) has the same problem, worse - it falls through to the
+# .m4a extraction below, which remuxes it into a proper mp4 container.
+_AUDIO_REMUX_EXTS = {".mp3"}
 
 # Content types for the formats /audio/current can end up serving. The
 # extracted cache is .m4a, the last-resort fallback is .wav, and
@@ -5473,6 +5489,38 @@ def _source_audio_codec(path):
         return codec or None
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _remux_audio_pyav(src, target):
+    """Copy `src`'s first audio stream into `target` without re-encoding,
+    keeping the same codec and container. The point is the header the
+    muxer writes on the way out: an mp3 that arrived with no Xing/Info
+    frame gets one, so players know the real duration instead of
+    extrapolating it from the first frame's bitrate - which is what made
+    every seek land near the start of the file.
+
+    Raises on any failure; the caller falls back to full extraction."""
+    import av
+
+    fmt = Path(target).suffix.lstrip(".").lower()
+    with av.open(str(src)) as in_container:
+        if not in_container.streams.audio:
+            raise ValueError("No audio stream in file.")
+        in_stream = in_container.streams.audio[0]
+        with av.open(str(target), mode="w", format=fmt) as out_container:
+            if hasattr(out_container, "add_stream_from_template"):
+                out_stream = out_container.add_stream_from_template(in_stream)
+            else:
+                out_stream = out_container.add_stream(template=in_stream)
+            packets = 0
+            for packet in in_container.demux(in_stream):
+                if packet.dts is None:
+                    continue
+                packet.stream = out_stream
+                out_container.mux(packet)
+                packets += 1
+    if not packets:
+        raise ValueError("No audio packets could be read.")
 
 
 def _extract_audio_m4a_pyav(src, target):
@@ -5776,19 +5824,44 @@ class AudioPrep:
                 self._set("unavailable", "Source audio not found.")
                 return
             self.duration = get_audio_duration(str(src))
-            if src.suffix.lower() in _AUDIO_PASSTHROUGH_EXTS:
+            suffix = src.suffix.lower()
+            if suffix in _AUDIO_PASSTHROUGH_EXTS:
                 self.serve_path = str(src)
                 self._set("ready")
                 return
             key = _audio_cache_key(src)
             target = _audio_cache_dir() / f"{key}.m4a"
             wav_target = _audio_cache_dir() / f"{key}.wav"
-            for cached in (target, wav_target):
+            remux_target = _audio_cache_dir() / f"{key}{suffix}"
+            for cached in (target, wav_target, remux_target):
                 if cached.exists():
                     self.serve_path = str(cached)
                     self._set("ready")
                     return
             self._set("extracting")
+
+            # Formats that only need their header rebuilt (see
+            # _AUDIO_REMUX_EXTS): copy the packets across, keep the
+            # codec. Falls through to the full extraction below if the
+            # remux fails for any reason.
+            if suffix in _AUDIO_REMUX_EXTS:
+                rtmp = remux_target.with_suffix(f".part{suffix}")
+                try:
+                    _remux_audio_pyav(src, rtmp)
+                    os.replace(rtmp, remux_target)
+                    _sweep_audio_cache()
+                    self.serve_path = str(remux_target)
+                    # The source's estimate was the thing we distrusted;
+                    # re-probe now that the header is right.
+                    fixed = get_audio_duration(str(remux_target))
+                    if fixed:
+                        self.duration = fixed
+                    self._set("ready")
+                    return
+                except Exception:
+                    _log("Lossless remux failed, falling back to "
+                         "extraction:\n" + traceback.format_exc())
+                    rtmp.unlink(missing_ok=True)
             tmp = target.with_suffix(".part.m4a")
 
             def wav_fallback():

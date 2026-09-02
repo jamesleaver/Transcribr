@@ -312,7 +312,15 @@ mkdir -p "$APP/Contents/Resources"
 cp "$INSTALLER_DIR/app_template/launcher" "$APP/Contents/MacOS/launcher"
 chmod +x "$APP/Contents/MacOS/launcher"
 
-cp "$INSTALLER_DIR/app_template/Info.plist" "$APP/Contents/Info.plist"
+# Stamp the real version into the bundle. The template carries a
+# __VERSION__ placeholder so the build scripts and this installer agree;
+# it used to hold a hard-coded 0.8.1, which is what /Applications
+# reported no matter which version was actually installed.
+APP_VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' \
+    "$SHARED_DIR/transcribr.py" | head -1)
+[ -n "$APP_VERSION" ] || APP_VERSION="0.0.0"
+sed "s/__VERSION__/$APP_VERSION/g" \
+    "$INSTALLER_DIR/app_template/Info.plist" > "$APP/Contents/Info.plist"
 
 # Optional icon (only included if the installer ships one).
 if [ -f "$INSTALLER_DIR/app_template/icon.icns" ]; then
