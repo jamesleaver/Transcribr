@@ -96,6 +96,7 @@ Result:
 Transcribr-Installer/
 ├── INSTALL.txt              ← Quick-start instructions
 ├── README.md                ← This file
+├── RELEASING.md             ← Signing and publishing a release
 ├── transcribr.py            ← The cross-platform GUI itself
 ├── tests/                   ← Automated test suite
 │   ├── test_transcribr.py
@@ -171,8 +172,9 @@ Homebrew installs itself this way. (To pin a version, append
    - Create a venv at `~/Library/Application Support/Transcribr/`
    - Install the faster-whisper engine and sherpa-onnx (speaker
      detection), plus mlx-whisper on Apple Silicon (macOS 13.5+),
-     along with python-docx, reportlab, pywebview and bottle (a few
-     hundred MB — no PyTorch, no separate ffmpeg)
+     along with python-docx, reportlab, pywebview and bottle (no
+     separate ffmpeg needed). Roughly 300 MB on Intel; on Apple
+     Silicon mlx-whisper requires PyTorch, which takes it past 1.4 GB
    - Create `/Applications/Transcribr.app`
 5. Launch from Spotlight, Launchpad, or the Applications folder.
 
@@ -363,7 +365,11 @@ installed appear (install more from the **Models** tab):
   and its PyAV dependency handles all audio decoding (no ffmpeg).
 - **mlx-whisper** — Apple-Silicon-only (macOS 13.5+), uses the Mac's
   GPU via MLX. Fastest option on M-series machines. No mid-run Stop.
-  Installed by default on Apple Silicon.
+  Installed by default on Apple Silicon by the script installer, but
+  **not** included in the signed `.pkg`: mlx-whisper hard-requires
+  PyTorch (and numba, llvmlite and scipy with it), which would add
+  about 1.1 GB to the download. Install it in one click from the
+  **Models** tab if you want GPU transcription.
 - **openai-whisper** — the reference implementation. Most thoroughly
   tested, but pulls in PyTorch (~2 GB), so it's **optional**: install
   it from the **Models** tab when you want it.
@@ -726,6 +732,10 @@ If the app does not launch:
    on your own machine.
 
 ## Development
+
+Cutting and signing a release — Apple Developer setup, what goes in the
+package and why, and the per-release checklist — is documented
+separately in **[RELEASING.md](RELEASING.md)**.
 
 The web interface's source lives in `web/` (React + TypeScript,
 built with Vite). Node.js (≥ 20) is needed **only for development** —
