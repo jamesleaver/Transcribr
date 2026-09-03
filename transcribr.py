@@ -941,13 +941,12 @@ def _disclaimer_text(verified_by=None) -> str:
     """The line appended to every saved transcript. Unverified output
     carries a warning; once a human certifies the transcript from the
     review pane, it names them instead."""
+    origin = ("Transcribed using Transcribr "
+              "[https://github.com/jamesleaver/Transcribr].")
     if verified_by:
-        return ("Transcribed using Transcribr - (c) James Leaver, 2026. "
-                f"This transcript has been verified by {verified_by}.")
-    return ("Transcribed using Transcribr - (c) James Leaver, 2026. "
-            "If this text has not been deleted by the person who prepared "
-            "this document, then the accuracy of this transcript may not "
-            "have been checked by a human.")
+        return f"{origin} This transcript has been verified by {verified_by}."
+    return (f"{origin} If this text has not been deleted, the accuracy of "
+            "this transcript may not have been checked by a human.")
 
 
 def render(paragraphs, *, show_timestamp=True, title=None, speakers=None,
@@ -1407,6 +1406,8 @@ def _macos_supports_mlx():
         return False
     try:
         import platform
+        if platform.machine() not in ("arm64", "aarch64"):
+            return False        # mlx ships no x86_64 macOS wheels
         ver = platform.mac_ver()[0]
         if not ver:
             return False
@@ -4605,10 +4606,25 @@ def _download_status_text(model, downloaded, total, speed):
 
 
 # Engines the app can pip-install on demand from the Models view, so the
-# base install stays lean. Only the reference OpenAI engine qualifies: it
-# drags in PyTorch (~2 GB), so it's opt-in. faster-whisper and mlx-whisper
-# ship with the installer and aren't listed here.
+# base install stays lean. faster-whisper ships with every install and is
+# not listed here; the other two both drag in PyTorch, so they are opt-in.
+#
+# mlx-whisper used to be installed up front by the script installer, and
+# was left out of the signed packages for size. That combination left
+# Apple Silicon users with no route to GPU transcription at all, so it is
+# offered here instead - gated to machines that can actually run it.
 _INSTALLABLE_ENGINES = {
+    "mlx": {
+        "name": "mlx-whisper (Apple Silicon GPU)",
+        "note": "Runs on the Mac's GPU via Apple's MLX - the fastest "
+                "option on M-series machines. Downloads PyTorch as a "
+                "dependency, so it is a large install.",
+        "packages": ["mlx-whisper"],
+        "uninstall": ["mlx-whisper", "mlx"],
+        "verify_import": "mlx_whisper",
+        "approx_mb": 1100,
+        "requires": _macos_supports_mlx,
+    },
     "whisper": {
         "name": "OpenAI Whisper (reference)",
         "note": "The reference engine. Downloads PyTorch (~2 GB); "
@@ -4650,8 +4666,19 @@ def _engine_install_args(key):
 
 
 def _engine_uninstall_pkgs(key):
+    """Packages to remove for `key`. PyTorch is a dependency of both
+    optional engines, so it is only dropped when the other one is not
+    installed - otherwise removing openai-whisper would silently break
+    mlx-whisper, which is what makes the machine fast."""
     spec = _INSTALLABLE_ENGINES[key]
-    return list(spec.get("uninstall") or spec["packages"])
+    pkgs = list(spec.get("uninstall") or spec["packages"])
+    if "torch" in pkgs:
+        import importlib.util as _ilu
+        others = {"whisper": "mlx_whisper", "mlx": "whisper"}
+        other = others.get(key)
+        if other and _ilu.find_spec(other) is not None:
+            pkgs = [p for p in pkgs if p != "torch"]
+    return pkgs
 
 
 def _redetect_engines():
@@ -4800,6 +4827,7 @@ class ModelStore:
              "approx_mb": spec.get("approx_mb", 0)}
             for key, spec in _INSTALLABLE_ENGINES.items()
             if key not in installed_keys
+            and (spec.get("requires") or (lambda: True))()
         ]
         # An installed engine that the app knows how to pip-install can also
         # be removed to reclaim space.

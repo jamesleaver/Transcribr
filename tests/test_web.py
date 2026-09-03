@@ -1082,6 +1082,11 @@ class TestModelStore(unittest.TestCase):
 
     def test_payload_lists_installable_and_removable(self):
         T._hf_repo_sizes = lambda: {}
+        # mlx-whisper is only offered on Apple Silicon; pin it off so this
+        # asserts the same thing on every machine.
+        mlx = T._INSTALLABLE_ENGINES["mlx"]
+        self.addCleanup(mlx.__setitem__, "requires", mlx["requires"])
+        mlx["requires"] = lambda: False
         # whisper NOT installed -> offered under `installable`; faster isn't
         # an installable engine so it isn't removable.
         p = T.ModelStore(engines=[("faster", "faster-whisper")]).payload()
@@ -1093,6 +1098,37 @@ class TestModelStore(unittest.TestCase):
         self.assertEqual(p2["installable"], [])
         wh = next(e for e in p2["engines"] if e["key"] == "whisper")
         self.assertTrue(wh["removable"])
+
+    def test_mlx_is_offered_but_only_where_it_runs(self):
+        # mlx-whisper is left out of the signed packages for size, so the
+        # Models tab is the only route to GPU transcription. It must be
+        # offered - and only on hardware that can run it.
+        self.assertIn("mlx", T._INSTALLABLE_ENGINES)
+        self.assertIs(T._INSTALLABLE_ENGINES["mlx"]["requires"],
+                      T._macos_supports_mlx)
+        import platform
+        from unittest import mock
+        with mock.patch.object(platform, "machine", return_value="x86_64"):
+            self.assertFalse(T._macos_supports_mlx())
+
+    def test_uninstalling_one_engine_keeps_the_other_working(self):
+        # Both optional engines depend on torch. Removing one must not
+        # drag torch out from under the other.
+        import importlib.util as ilu
+        from unittest import mock
+        real = ilu.find_spec
+
+        def pretend_mlx_installed(name, *a, **k):
+            return object() if name == "mlx_whisper" else real(name, *a, **k)
+
+        with mock.patch.object(ilu, "find_spec", pretend_mlx_installed):
+            self.assertNotIn("torch", T._engine_uninstall_pkgs("whisper"))
+
+        def pretend_mlx_absent(name, *a, **k):
+            return None if name == "mlx_whisper" else real(name, *a, **k)
+
+        with mock.patch.object(ilu, "find_spec", pretend_mlx_absent):
+            self.assertIn("torch", T._engine_uninstall_pkgs("whisper"))
 
     def test_engine_install_args_base(self):
         from unittest import mock
@@ -1266,7 +1302,7 @@ class TestModelController(unittest.TestCase):
             mc.start_engine_install("faster")      # not an installable engine
         self.assertEqual(cm.exception.code, "bad_engine")
         with self.assertRaises(T.ApiFail) as cm:
-            mc.start_engine_uninstall("mlx")       # not installable
+            mc.start_engine_uninstall("faster")    # ships always; not removable
         self.assertEqual(cm.exception.code, "bad_engine")
 
     def test_download_error_reported(self):
@@ -1362,6 +1398,17 @@ class TestReviewSession(unittest.TestCase):
         self.assertIn("verified by J. Leaver", text)
         self.assertNotIn("may not have been checked", text)
 
+    def test_disclaimer_points_at_the_repository(self):
+        # Both forms name where the transcript came from, and neither
+        # carries a copyright line any more.
+        for verified in (None, "J. Leaver"):
+            text = T._disclaimer_text(verified)
+            self.assertIn("https://github.com/jamesleaver/Transcribr", text)
+            self.assertNotIn("(c)", text)
+            # The parser has to keep recognising it, or a re-opened
+            # transcript grows a disclaimer paragraph each save.
+            self.assertTrue(T._DISCLAIMER_RE.match(text))
+
     def test_unverified_disclaimer_warns(self):
         session, out = self._fresh_session(fmt="txt")
         session.save(session.model.rev, "no_labels")
@@ -1444,7 +1491,9 @@ class TestReviewSession(unittest.TestCase):
         session2, _ = self._fresh_session(fmt="txt", name="unverified")
         path2 = session2.export(session2.model.rev, "pdf")
         text2 = self._pdf_text(path2)
-        self.assertIn("may not have been checked", text2)
+        # Asserted on a short fragment: the disclaimer is line-wrapped in
+        # the PDF, so longer phrases straddle a break.
+        self.assertIn("checked by a human", text2)
         self.assertNotIn("verified by", text2)
 
     def test_verified_by_sticks_to_session(self):

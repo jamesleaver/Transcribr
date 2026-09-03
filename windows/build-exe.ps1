@@ -5,11 +5,11 @@
 # CPython, the default engine, and the built web interface. Nothing is
 # downloaded on the user's machine at install time.
 #
-# Deliberately NOT bundled: openai-whisper (PyTorch, ~900 MB) and
-# mlx-whisper (Apple Silicon only, and it hard-requires PyTorch too).
-# Both remain one click away in the app's Models tab, which pip-installs
-# into this same tree - %LOCALAPPDATA% is user-writable, so that works
-# without any elevation.
+# Deliberately NOT bundled: openai-whisper, which pulls in PyTorch
+# (~900 MB). It installs in one click from the app's Models tab, which
+# pip-installs into this same tree - %LOCALAPPDATA% is user-writable, so
+# that works without any elevation. (mlx-whisper is Apple Silicon only
+# and does not apply on Windows at all.)
 #
 # Usage:  pwsh -File windows\build-exe.ps1
 

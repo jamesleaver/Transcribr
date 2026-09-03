@@ -201,6 +201,24 @@ find "$RES" -type d -name '*.dSYM' -prune -exec rm -rf {} + 2>/dev/null
 AFTER=$(du -sm "$APP" | cut -f1)
 say "App bundle: ${AFTER} MB (pruned $((BEFORE - AFTER)) MB)"
 
+# ---- permissions ------------------------------------------------------------
+#
+# pkgbuild preserves whatever modes the staged files happen to have, and
+# the installer then owns them root:wheel. A source file that is 0600 in
+# the working tree therefore installs unreadable by the user who runs the
+# app. That is exactly how 0.9.14 shipped with no icon: icon.icns was
+# 0600 here (git has it 0644), so Finder could not read it. Normalise
+# rather than trusting the checkout.
+
+say "Normalising permissions..."
+find "$APP" -type d -exec chmod 755 {} +
+find "$APP" -type f -exec chmod a+r {} +
+# Anything already executable stays executable, for everyone.
+find "$APP" -type f -perm -u+x -exec chmod a+x {} +
+
+UNREADABLE=$(find "$APP" -type f ! -perm -o+r | wc -l | tr -d " ")
+[ "$UNREADABLE" -eq 0 ] || fail "$UNREADABLE file(s) in the bundle are not world-readable; they would install unusable."
+
 # ---- sanity checks ----------------------------------------------------------
 #
 # Both of these shipped broken once. Neither is caught by codesign,
