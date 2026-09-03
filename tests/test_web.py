@@ -440,6 +440,75 @@ class TestUpdateChecker(unittest.TestCase):
 # TranscriptModel - playback spans, confidence, attention
 # =====================================================================
 
+class TestTerms(unittest.TestCase):
+    """Candidate names, and correcting one everywhere at once."""
+
+    WITNESS = [
+        [(0.0, 3.0, "Just a moment, you just assured me that I could speak.")],
+        [(3.0, 6.0, "The witness is Mr Cavill, of Brunswick Street.")],
+        [(6.0, 9.0, "Cavil said he saw the van near Johnston Street.")],
+        [(9.0, 12.0, "Constable Doyle attended. Doyle made the arrest.")],
+        [(12.0, 15.0, "Carvill was standing outside the bookshop.")],
+    ]
+
+    def _group(self, terms, containing):
+        for g in terms:
+            if any(containing in v["term"] for v in g["variants"]):
+                return g
+        self.fail(f"no group containing {containing!r}")
+
+    def test_near_spellings_are_grouped(self):
+        # The whole point: one surname spelled three ways is one row to
+        # fix, not three to hunt down.
+        g = self._group(T.extract_terms(self.WITNESS), "Cavil")
+        spellings = {v["term"] for v in g["variants"]}
+        self.assertEqual(spellings, {"Cavill", "Cavil", "Carvill"})
+        self.assertEqual(g["count"], 3)
+
+    def test_a_name_behind_a_title_is_found(self):
+        # "Constable Doyle" also yields "Doyle", which is what matches a
+        # stray spelling elsewhere in the transcript.
+        terms = T.extract_terms(self.WITNESS)
+        self.assertTrue(any(g["term"] == "Doyle" for g in terms))
+
+    def test_ordinary_words_are_not_names(self):
+        terms = {g["term"] for g in T.extract_terms(self.WITNESS)}
+        for word in ("The", "Just", "You", "And"):
+            self.assertNotIn(word, terms)
+
+    def test_multi_word_terms_stay_together(self):
+        terms = {g["term"] for g in T.extract_terms(self.WITNESS)}
+        self.assertIn("Brunswick Street", terms)
+
+    def test_replace_term_fixes_every_spelling_at_once(self):
+        m = T.TranscriptModel([list(p) for p in self.WITNESS])
+        n = m.replace_term(["Cavill", "Cavil", "Carvill"], "Cavill")
+        self.assertEqual(n, 2)          # Cavil and Carvill; Cavill was right
+        joined = " ".join(m.body(i) for i in range(len(m.paragraphs)))
+        self.assertNotIn("Carvill", joined)
+        self.assertIn("Mr Cavill", joined)
+
+    def test_replace_term_respects_word_boundaries(self):
+        # replace_all() is a substring replace and would corrupt these;
+        # a name correction must not touch words that merely contain it.
+        m = T.TranscriptModel([[(0.0, 1.0, "Cavil was cavalier about Cavilling.")]])
+        m.replace_term(["Cavil"], "Cavill")
+        self.assertEqual(m.body(0), "Cavill was cavalier about Cavilling.")
+
+    def test_replace_term_is_one_undo_step(self):
+        m = T.TranscriptModel([list(p) for p in self.WITNESS])
+        before = [m.body(i) for i in range(len(m.paragraphs))]
+        m.replace_term(["Cavil", "Carvill"], "Cavill")
+        m.undo()
+        self.assertEqual([m.body(i) for i in range(len(m.paragraphs))], before)
+
+    def test_replace_term_does_nothing_when_nothing_matches(self):
+        m = T.TranscriptModel([list(p) for p in self.WITNESS])
+        rev = m.rev
+        self.assertEqual(m.replace_term(["Nonesuch"], "Other"), 0)
+        self.assertEqual(m.rev, rev)    # no undo step recorded
+
+
 class TestFlaggedSpans(unittest.TestCase):
     """The second pass re-runs what detect_hallucinations() flagged."""
 

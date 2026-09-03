@@ -74,6 +74,12 @@ interface SlimDelta {
 
 export type SearchHit = { index: number; start: number; end: number } | null;
 
+export interface TermGroup {
+  term: string;
+  count: number;
+  variants: { term: string; count: number }[];
+}
+
 interface ReviewSlice {
   doc: ReviewPayload | null;
   selected: number;
@@ -106,6 +112,12 @@ interface ReviewSlice {
   playingThrough: boolean;
   /** Live playback position (seconds) while a paragraph plays. */
   playHeadSec: number | null;
+  /** Candidate names and terms, loaded on demand from the backend. */
+  terms: TermGroup[] | null;
+  termsLoading: boolean;
+  loadTerms: () => Promise<void>;
+  /** Rewrite every listed spelling as `to`, across the transcript. */
+  applyTerm: (variants: string[], to: string) => Promise<number>;
   /** Play at half speed (0.5x) when on. */
   halfSpeed: boolean;
   setHalfSpeed: (value: boolean) => void;
@@ -522,6 +534,33 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     // Open-ended play from an absolute position; the indicator starts
     // on `index` and follows the playhead forward from there.
     startPlayback(index, { start: startSec, end: null }, true);
+  },
+
+  terms: null,
+  termsLoading: false,
+
+  loadTerms: async () => {
+    set({ termsLoading: true });
+    try {
+      const res = await api.get<{ terms: TermGroup[] }>("/api/review/terms");
+      set({ terms: res.terms, termsLoading: false });
+    } catch {
+      set({ terms: [], termsLoading: false });
+    }
+  },
+
+  applyTerm: async (variants, to) => {
+    const doc = get().doc;
+    if (!doc) return 0;
+    const res = await api.post<ReviewPayload & { count: number }>(
+      "/api/review/term",
+      { rev: doc.rev, variants, to },
+    );
+    get().openDoc(res);
+    // The list is derived from the text, so it is stale the moment the
+    // text changes.
+    void get().loadTerms();
+    return res.count;
   },
 
   halfSpeed: false,

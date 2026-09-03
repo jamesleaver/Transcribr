@@ -121,6 +121,131 @@ function FindReplace() {
   );
 }
 
+function NamesCard() {
+  const terms = useReview((s) => s.terms);
+  const loading = useReview((s) => s.termsLoading);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [note, setNote] = useState("");
+
+  const show = () => {
+    setOpen(true);
+    if (terms === null) void useReview.getState().loadTerms();
+  };
+
+  const apply = async (variants: string[]) => {
+    const to = draft.trim();
+    setEditing(null);
+    if (!to) return;
+    const n = await useReview.getState().applyTerm(variants, to);
+    setNote(
+      n === 0
+        ? "Nothing to change."
+        : `Corrected ${n} ${n === 1 ? "occurrence" : "occurrences"}.`,
+    );
+  };
+
+  return (
+    <section className="rounded-xl border border-edge bg-surface p-4">
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+        Names &amp; terms
+      </h2>
+
+      {!open ? (
+        <>
+          <button
+            className="w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2"
+            onClick={show}
+          >
+            Check names and terms
+          </button>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted">
+            Names the engine may have spelled inconsistently. Correcting one
+            fixes every occurrence at once.
+          </p>
+        </>
+      ) : loading ? (
+        <p className="text-[11px] text-muted">Reading the transcript…</p>
+      ) : !terms || terms.length === 0 ? (
+        <p className="text-[11px] text-muted">
+          No names or unusual terms found.
+        </p>
+      ) : (
+        <>
+          <ul className="flex max-h-80 flex-col gap-1.5 overflow-y-auto">
+            {terms.map((g) => {
+              const variants = g.variants.map((v) => v.term);
+              const spellings = g.variants.length > 1;
+              return (
+                <li key={g.term} className="text-sm">
+                  {editing === g.term ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        autoFocus
+                        className={`${inputCls} w-full py-1`}
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void apply(variants);
+                          if (e.key === "Escape") setEditing(null);
+                        }}
+                      />
+                      <button
+                        className="shrink-0 rounded-lg border border-edge px-2 py-1 text-xs hover:bg-surface-2"
+                        onClick={() => void apply(variants)}
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  ) : null}
+                  {editing === g.term && spellings ? (
+                    <div className="px-1.5 pt-1 text-[11px] text-muted">
+                      Rewrites {variants.join(", ")} — check these are the
+                      same name before applying.
+                    </div>
+                  ) : (
+                    <button
+                      className="flex w-full items-baseline gap-2 rounded-lg px-1.5 py-1 text-left hover:bg-surface-2"
+                      onClick={() => {
+                        setEditing(g.term);
+                        setDraft(g.term);
+                        setNote("");
+                      }}
+                    >
+                      <span className="truncate font-medium">{g.term}</span>
+                      <span className="ml-auto shrink-0 text-[11px] text-muted">
+                        {g.count}
+                      </span>
+                    </button>
+                  )}
+                  {spellings && editing !== g.term && (
+                    <div className="px-1.5 pb-0.5 text-[11px] text-muted">
+                      also {g.variants
+                        .filter((v) => v.term !== g.term)
+                        .map((v) => v.term)
+                        .join(", ")}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              className="rounded-lg border border-edge px-2.5 py-1.5 text-xs font-medium hover:bg-surface-2"
+              onClick={() => void useReview.getState().loadTerms()}
+            >
+              Refresh
+            </button>
+            <span className="text-[11px] text-muted">{note}</span>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function PlaybackCard() {
   const audio = useReview((s) => s.doc?.audio);
   const playing = useReview((s) => s.playing);
@@ -420,6 +545,7 @@ export default function ReviewRail() {
   return (
     <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
       <SpeakersPanel />
+      <NamesCard />
       <PlaybackCard />
       <FixSectionCard />
       <TimestampsCard />

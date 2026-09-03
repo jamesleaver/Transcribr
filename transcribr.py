@@ -2213,6 +2213,138 @@ def transcribe_worker(params, q, cancel_event):
     q.put(("done", str(out_path)))
 
 
+# --- names and terms --------------------------------------------------
+#
+# Proper nouns are where a transcript is most often wrong and most
+# expensive to fix by hand: a surname spelled three ways across forty
+# paragraphs is forty separate corrections. The engine has no idea
+# whether it heard Cavill, Cavil or Carvill, and will use all three in
+# one document without noticing.
+#
+# So: find the candidates, group the ones that look like the same word,
+# and let the reviewer settle each once.
+
+# Capitalised words that are almost never names. Titles are deliberately
+# absent - "Constable Doyle" is exactly the sort of term worth catching.
+_TERM_STOPWORDS = frozenset("""
+    a an and are as at be been but by for from had has have he her him his
+    i if in is it its me my no not of on or our she so that the their them
+    then there these they this to was we were what when where which who
+    why will with would you your yes okay oh ah um uh well just look now
+    get got do does did can could should must may might shall
+    good right sorry thank thanks please come go come on
+""".split())
+
+_TERM_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Titles worth keeping with the name and worth looking behind: the
+# surname in "Constable Doyle" is the thing that also appears alone.
+_TERM_TITLES = frozenset("""
+    mr mrs ms miss dr prof professor constable sergeant sgt senior
+    detective det inspector superintendent judge justice magistrate
+    officer sir madam lord lady his her honour
+""".split())
+
+
+def _capitalised(word):
+    return word[:1].isupper() and not word.isupper()
+
+
+def _term_key(term):
+    """Normalised form for grouping: case and punctuation folded away."""
+    return re.sub(r"[^a-z]", "", term.lower())
+
+
+def extract_terms(paragraphs, min_count=1):
+    """Candidate names and terms in a transcript, most frequent first.
+
+    Returns [{"term", "count", "variants": [{"term", "count"}, ...]}].
+    Runs of capitalised words are kept together, so "Brunswick Street"
+    is one term rather than two. Where a run begins with a title, the
+    name behind it is counted separately as well - "Constable Doyle"
+    also yields "Doyle", which is what groups with a stray "Doyal"
+    elsewhere in the transcript.
+
+    Near-spellings are grouped, so the reviewer sees "Cavill" with
+    "Cavil" and "Carvill" beneath it and settles all three at once.
+
+    Nothing is corrected automatically. A transcript is evidence;
+    guessing at the names in it is not the software's to do.
+    """
+    counts = {}
+
+    def add(term):
+        if term:
+            counts[term] = counts.get(term, 0) + 1
+
+    for para in paragraphs:
+        body = " ".join(seg[2] for seg in para)
+        for sentence in _SENTENCE_SPLIT_RE.split(body):
+            run = []
+            for m in _TERM_WORD_RE.finditer(sentence):
+                word = m.group(0)
+                if _capitalised(word) and word.lower() not in _TERM_STOPWORDS:
+                    run.append(word)
+                    continue
+                _flush_run(run, add)
+                run = []
+            _flush_run(run, add)
+
+    groups = []
+    for term, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        key = _term_key(term)
+        for g in groups:
+            if _looks_like_same_term(key, g["key"]):
+                g["variants"].append({"term": term, "count": n})
+                g["count"] += n
+                break
+        else:
+            groups.append({"key": key, "term": term, "count": n,
+                           "variants": [{"term": term, "count": n}]})
+
+    out = [{"term": g["term"], "count": g["count"],
+            "variants": sorted(g["variants"],
+                               key=lambda v: (-v["count"], v["term"]))}
+           for g in groups if g["count"] >= min_count]
+    out.sort(key=lambda g: (-g["count"], g["term"]))
+    return out
+
+
+def _flush_run(run, add):
+    """Record a run of capitalised words as one term, plus the name
+    behind any leading title."""
+    if not run:
+        return
+    add(" ".join(run))
+    if len(run) > 1 and run[0].lower().strip(".") in _TERM_TITLES:
+        rest = [w for w in run[1:]
+                if w.lower().strip(".") not in _TERM_TITLES]
+        if rest:
+            add(" ".join(rest))
+
+
+def _looks_like_same_term(a, b):
+    """Whether two normalised terms are plausibly the same word spelled
+    differently.
+
+    Set where it catches the mishearings that matter - Doyle/Doyal,
+    Smith/Smyth, Cavill/Carvill - which means it will occasionally put
+    two genuinely different names together (Mason/Macon sits at the same
+    similarity as Smith/Smyth; nothing in the spelling separates them).
+    That is why the panel lists every spelling a correction will rewrite
+    and asks before doing it: the reviewer, who knows the case, is the
+    one placed to tell those apart."""
+    if a == b:
+        return True
+    if not a or not b or a[0] != b[0]:
+        return False
+    if abs(len(a) - len(b)) > max(2, min(len(a), len(b)) // 3):
+        return False
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.80
+
+
 # --- hallucination detection ------------------------------------------
 # Whisper (and similar models) loop on silence or noise, emitting the
 # same word or short phrase over and over ("you you you…", "Thank you.
@@ -3557,6 +3689,38 @@ class TranscriptModel:
             self.visible_speakers = n
             self.rev += 1
         return self.visible_speakers
+
+    def replace_term(self, variants, replacement):
+        """Rewrite every occurrence of any of `variants` as
+        `replacement`, across the whole transcript, as a single undo
+        step. Returns how many occurrences changed.
+
+        Whole words only, and case-sensitive: capitalisation in a
+        transcript is meaningful, and a blind lower-cased replace would
+        turn "the Crown" into "the crown" halfway through a sentence.
+        """
+        replacement = (replacement or "").strip()
+        wanted = [v for v in (variants or []) if v and v != replacement]
+        if not replacement or not wanted:
+            return 0
+        # Longest first, so "Mr Cavill" wins over "Cavill".
+        pattern = re.compile(
+            r"\b(?:%s)\b" % "|".join(
+                re.escape(v) for v in sorted(wanted, key=len, reverse=True)))
+
+        hits = sum(len(pattern.findall(seg[2]))
+                   for para in self.paragraphs for seg in para)
+        if not hits:
+            return 0
+
+        self._push_undo()
+        self.paragraphs = [
+            [(seg[0], seg[1], pattern.sub(replacement, seg[2]))
+             for seg in para]
+            for para in self.paragraphs
+        ]
+        self.rev += 1
+        return hits
 
     def commit_edit(self, idx, new_text):
         """Replace paragraph idx's text, collapsing it to one segment
@@ -6535,6 +6699,13 @@ class ReviewSession:
                                       bool(body.get("match_case")))
                 result = self.payload()
                 result["count"] = count
+            elif action == "term":
+                # Distinct from replace-all: whole words only, several
+                # spellings at once, and one undo step for the lot.
+                count = m.replace_term(body.get("variants") or [],
+                                       str(body.get("to", "")))
+                result = self.payload()
+                result["count"] = count
             elif action == "undo":
                 m.undo()
                 result = self.payload()
@@ -7071,6 +7242,17 @@ class WebBackend:
             backend.controller._append_log(
                 f"\nLoaded transcript from: {path}\n")
             return {"review": session.payload()}
+
+        @app.get("/api/review/terms")
+        def api_review_terms():
+            """Candidate names and terms in the transcript as it stands.
+            Recomputed on request rather than carried in the review
+            payload: the transcript changes as it is edited, and this is
+            only wanted when the panel is open."""
+            session = backend._live_review()
+            with session.lock:
+                paragraphs = [list(p) for p in session.model.paragraphs]
+            return {"terms": extract_terms(paragraphs, min_count=1)}
 
         @app.post("/api/review/retranscribe")
         def api_review_retranscribe():
