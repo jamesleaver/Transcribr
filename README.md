@@ -85,9 +85,9 @@ Review pane — speakers labelled, text corrected against the audio:
 <img width="1312" height="912" alt="Transcribr's Review pane, showing a speaker-labelled transcript part-way through review" src="docs/screenshot-review.png" />
 
 
-Result:
+Result — the saved transcript:
 
-<img width="781" height="1101" alt="Screenshot 2026-07-16 at 2 34 14 pm" src="https://github.com/user-attachments/assets/1e5c4b31-a93b-4e28-8e78-747da2b2605b" />
+<img width="781" height="1104" alt="A finished Transcribr transcript: a titled, speaker-labelled document with timestamps" src="docs/screenshot-result.png" />
 
 
 ## What this repository contains
