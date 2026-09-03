@@ -87,7 +87,7 @@ Review pane — speakers labelled, text corrected against the audio:
 
 Result — the saved transcript:
 
-<img width="781" height="1104" alt="A finished Transcribr transcript: a titled, speaker-labelled document with timestamps" src="docs/screenshot-result.png" />
+<img width="781" height="1105" alt="A finished Transcribr transcript: a titled, speaker-labelled document with timestamps" src="docs/screenshot-result.png" />
 
 
 ## What this repository contains
