@@ -213,6 +213,45 @@ would silently strand whichever users no longer match. A `.pkg` or
 `.exe` opens directly; the source archive is unpacked and its platform
 installer script is run.
 
+### Verifying that it actually launches
+
+Signing, `spctl --type install` and notarisation all pass on a bundle
+macOS will refuse to open — they say nothing about whether the app
+starts. v0.9.14's first macOS packages were signed, notarised and
+completely dead, because `Info.plist` named an executable that did not
+exist in `Contents/MacOS/`.
+
+`build-pkg.sh` now fails the build on that mismatch, but the real test
+is launching the installed app the way a user does:
+
+```bash
+open -a Transcribr
+```
+
+Running `Contents/MacOS/<binary>` directly is **not** a substitute: it
+bypasses `Info.plist` entirely, so it succeeds on a bundle LaunchServices
+would reject. The useful signal is:
+
+```bash
+spctl --assess --type execute -vv /Applications/Transcribr.app
+```
+
+`--type execute` assesses it as an application; `--type install` only
+assesses the package. "the code is valid but does not seem to be an app"
+means a broken bundle with a perfectly good signature.
+
+### A note on synced folders
+
+This repository lives in Dropbox. Dropbox will write "conflicted copy"
+files into the build tree while a package is being signed — including
+inside the app bundle, which invalidates the signature. `build-pkg.sh`
+marks `build/` and `dist/` with `com.dropbox.ignored` and sweeps any
+strays before signing, but if builds start behaving strangely, check:
+
+```bash
+find build dist -name "*conflicted copy*"
+```
+
 ### Verifying a signed package
 
 ```bash

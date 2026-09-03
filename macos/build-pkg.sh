@@ -68,6 +68,15 @@ RES="$APP/Contents/Resources"
 rm -rf "$BUILD"
 mkdir -p "$APP/Contents/MacOS" "$RES" "$DIST"
 
+# This repository may live in a synced folder. Dropbox happily writes
+# "conflicted copy" files into a 584 MB build tree while it is being
+# signed - including inside the bundle and its _CodeSignature directory,
+# which invalidates the seal. Mark the build outputs as ignored; the
+# attribute is harmless anywhere else.
+for d in "$REPO_ROOT/build" "$DIST"; do
+    xattr -w com.dropbox.ignored 1 "$d" 2>/dev/null || true
+done
+
 # ---- identities -------------------------------------------------------------
 
 TEAM_ID="${TRANSCRIBR_TEAM_ID:-}"
@@ -141,6 +150,14 @@ cp -R webdist "$RES/"
 cp macos/app_template/bootstrap.py "$RES/"
 [ -f macos/app_template/icon.icns ] && cp macos/app_template/icon.icns "$RES/"
 sed "s/__VERSION__/$VERSION/g" macos/app_template/Info.plist > "$APP/Contents/Info.plist"
+# The template names the shell script the *script* installer copies in.
+# This build compiles a binary called Transcribr instead, and if the two
+# disagree macOS cannot find the executable and refuses the bundle with
+# "damaged or incomplete" - which is not a signing problem, so codesign
+# and spctl --type install both still pass.
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Transcribr" \
+    "$APP/Contents/Info.plist" >/dev/null \
+    || fail "Could not set CFBundleExecutable in Info.plist."
 
 clang -O2 -Wall -arch "$ARCH" \
     -o "$APP/Contents/MacOS/Transcribr" macos/app_template/launcher.c \
@@ -161,6 +178,26 @@ rm -rf "$RES/python/lib/python$PY_SERIES/site-packages/PyObjCTest" 2>/dev/null
 find "$RES" -type d -name '*.dSYM' -prune -exec rm -rf {} + 2>/dev/null
 AFTER=$(du -sm "$APP" | cut -f1)
 say "App bundle: ${AFTER} MB (pruned $((BEFORE - AFTER)) MB)"
+
+# ---- sanity checks ----------------------------------------------------------
+#
+# Both of these shipped broken once. Neither is caught by codesign,
+# spctl --type install, or notarisation: a bundle can be perfectly
+# signed and still refuse to launch.
+
+EXE_NAME="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" \
+    "$APP/Contents/Info.plist" 2>/dev/null)"
+[ -n "$EXE_NAME" ] || fail "Info.plist has no CFBundleExecutable."
+[ -f "$APP/Contents/MacOS/$EXE_NAME" ] || fail \
+    "Info.plist declares CFBundleExecutable '$EXE_NAME', but Contents/MacOS/ holds: $(ls "$APP/Contents/MacOS/" | tr '\n' ' ')
+macOS would refuse this bundle as \"damaged or incomplete\"."
+say "Bundle executable: $EXE_NAME (present)"
+
+STRAY="$(find "$APP" -name '*conflicted copy*' | wc -l | tr -d ' ')"
+if [ "$STRAY" -ne 0 ]; then
+    warn "Removing $STRAY file-sync conflicted copies from the bundle."
+    find "$APP" -name '*conflicted copy*' -print0 | xargs -0 rm -rf
+fi
 
 # ---- sign -------------------------------------------------------------------
 #
