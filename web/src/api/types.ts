@@ -90,6 +90,7 @@ export interface Settings {
   /** Show the experimental speaker-detection card on the Transcribe page. */
   show_diarize: boolean;
   check_updates: boolean;
+  auto_retranscribe: boolean;
   /** Word-level timing & confidence highlighting: auto | on | off. */
   word_timestamps: "auto" | "on" | "off";
 }

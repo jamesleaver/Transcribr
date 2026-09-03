@@ -3850,7 +3850,7 @@ _SETTINGS_BOOL_KEYS = (
     "extra_json", "extra_srt", "extra_vtt",
     "extra_tsv", "show_details",
     "diarize", "show_all_models", "show_prompt", "show_diarize",
-    "check_updates",
+    "check_updates", "auto_retranscribe",
 )
 
 _SETTINGS_NUMBER_KEYS = (
@@ -3918,6 +3918,10 @@ def default_settings():
         # It is the app's only unprompted network call, so it is a
         # setting rather than a given.
         "check_updates": True,
+        # After a run, re-run the sections that look like engine
+        # hallucination and keep whichever result the same check no
+        # longer objects to.
+        "auto_retranscribe": True,
     }
 
 
@@ -5874,6 +5878,148 @@ class RetransJob:
             self._done.set()
 
 
+def flagged_spans(model, join_gap=1, max_spans=12):
+    """Contiguous runs of paragraphs that detect_hallucinations() flagged,
+    as (lo, hi) index pairs. Runs separated by fewer than `join_gap`
+    clean paragraphs are merged, because re-running one longer stretch
+    gives the engine more context than two short ones and costs less
+    than two model loads."""
+    conf = None
+    if model.word_conf:
+        conf = [[p for _w, p in bucket]
+                for bucket in model._bucket_words_by_paragraph()]
+    flagged = detect_hallucinations(model.paragraphs, confidences=conf)
+    if not flagged:
+        return []
+    spans = [[flagged[0], flagged[0]]]
+    for idx in flagged[1:]:
+        if idx - spans[-1][1] <= join_gap + 1:
+            spans[-1][1] = idx
+        else:
+            spans.append([idx, idx])
+    return [(lo, hi) for lo, hi in spans[:max_spans]]
+
+
+MAX_RETRY_SPANS = 12
+MAX_RETRY_FRACTION = 0.25
+
+
+def _budgeted_spans(spans, paragraphs):
+    """Trim the work list so a badly-behaved recording cannot double the
+    time to a usable transcript. A transcript that is mostly flagged is
+    a bad recording, not something a second pass will rescue."""
+    if not paragraphs:
+        return []
+    total = float(paragraphs[-1][-1][1])
+    if total <= 0:
+        return spans[:MAX_RETRY_SPANS]
+    budget, kept = total * MAX_RETRY_FRACTION, []
+    for lo, hi in spans[:MAX_RETRY_SPANS]:
+        length = float(paragraphs[hi][-1][1]) - float(paragraphs[lo][0][0])
+        if budget - length < 0:
+            break
+        budget -= length
+        kept.append((lo, hi))
+    return kept
+
+
+def auto_retranscribe(paragraphs, word_conf, audio_path, settings,
+                      log=None, progress=None, cancel_event=None):
+    """Transcribe the flagged sections a second time, with conditioning
+    off, and keep whichever results the same check no longer objects to.
+
+    Conditioning feeds each chunk the text before it, which is what
+    turns one bad guess into a runaway repetition - so it earns its
+    place on the first pass and is exactly what to drop on the retry.
+
+    The acceptance test makes this safe by construction: a replacement
+    is kept only when detect_hallucinations() is happy with it, so the
+    pass can reduce the number of flagged paragraphs but never add one.
+
+    Returns (paragraphs, word_conf, attempted, replaced). Both lists are
+    new; the caller's are untouched.
+    """
+    paragraphs = [list(p) for p in paragraphs]
+    words = list(word_conf or [])
+    settings = dict(settings)
+    settings["condition_on_previous_text"] = False
+    # The engine runners check this unconditionally, so it must be a
+    # real Event even when the caller has nothing to cancel with.
+    if cancel_event is None:
+        cancel_event = threading.Event()
+
+    spans = _budgeted_spans(
+        flagged_spans(TranscriptModel(paragraphs, word_conf=words)),
+        paragraphs)
+    if not spans:
+        return paragraphs, words, 0, 0
+
+    def say(text):
+        if log:
+            log(text)
+
+    say(f"\nRe-checking {len(spans)} flagged "
+        f"{'section' if len(spans) == 1 else 'sections'} "
+        f"(second pass, without conditioning)...\n")
+
+    attempted = replaced = 0
+    q = queue.Queue()
+    # Last span first: replacing one shifts every index after it, and
+    # working backwards leaves the earlier spans' indices valid.
+    for n, (lo, hi) in enumerate(reversed(spans)):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        if progress:
+            progress(100.0 * n / len(spans),
+                     f"Re-checking flagged section {n + 1} of {len(spans)}")
+        start_t = float(paragraphs[lo][0][0])
+        end_t = (float(paragraphs[hi + 1][0][0])
+                 if hi + 1 < len(paragraphs) else None)
+        attempted += 1
+        try:
+            segments = retranscribe_slice(audio_path, start_t, end_t,
+                                          settings, q, cancel_event)
+        except _CancelledByUser:
+            break
+        except Exception as e:
+            _log("second pass over one section failed:\n"
+                 + traceback.format_exc())
+            say(f"  section at {_format_duration(start_t)}: "
+                f"could not be re-run ({type(e).__name__}).\n")
+            continue
+        finally:
+            while True:                     # keep the engine's own log
+                try:
+                    kind, data = q.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "log" and log:
+                    log(data)
+
+        candidate = paragraphify(segments, settings["gap"])
+        if not candidate or detect_hallucinations(candidate):
+            say(f"  section at {_format_duration(start_t)}: "
+                f"no better on a second pass, left as it was.\n")
+            continue
+
+        paragraphs[lo:hi + 1] = candidate
+        # The old word confidences describe text that is no longer here;
+        # keeping them would shade the new words by the old ones' scores.
+        limit = end_t if end_t is not None else float("inf")
+        words = [w for w in words if not (start_t <= w[0] < limit)]
+        replaced += 1
+        say(f"  section at {_format_duration(start_t)}: replaced.\n")
+
+    if replaced:
+        say(f"Second pass: {replaced} of {attempted} "
+            f"{'section' if attempted == 1 else 'sections'} improved.\n")
+    else:
+        say(f"Second pass: none of the {attempted} flagged "
+            f"{'section' if attempted == 1 else 'sections'} came back "
+            f"cleaner, so nothing was changed.\n")
+    return paragraphs, words, attempted, replaced
+
+
 class AudioPrep:
     """Prepares one review session's audio for the <audio> element on a
     background thread, reporting progress as audio_status SSE events.
@@ -6692,7 +6838,23 @@ class WebBackend:
         """paragraphs_ready arrived from the worker (review-before-save
         run): build the session and tell every client. Runs on the pump
         thread."""
+        # The second pass runs before the review is built, so the user
+        # is handed a finished transcript rather than watching it
+        # rewrite itself. It can take a while, so it happens off the
+        # pump thread with the run still showing as in progress.
+        threading.Thread(target=self._finish_fresh_review, args=(info,),
+                         daemon=True,
+                         name="transcribr-second-pass").start()
+
+    def _finish_fresh_review(self, info):
+        """Second pass over the flagged sections, then open the review."""
+        try:
+            info = self._second_pass(info)
+        except Exception:
+            _log("second pass failed; opening the review with the "
+                 "first-pass transcript:\n" + traceback.format_exc())
         self.controller.phase = "idle"
+        self.controller.progress = None
         self.controller._append_log(
             f"\n{len(info['paragraphs'])} paragraphs ready for review.\n")
         self.controller._publish_run_state()
@@ -6701,6 +6863,38 @@ class WebBackend:
         self._attach_audio(session)
         self.review = session
         self.broker.publish("review_opened", {"review": session.payload()})
+
+    def _second_pass(self, info):
+        """Re-run the sections that look like engine error, when the
+        setting allows and there is audio to re-read. Fresh runs only: a
+        transcript loaded from a file carries synthesised timings, so a
+        span computed from them would not line up with the recording."""
+        if not current_settings().get("auto_retranscribe", True):
+            return info
+        audio = info.get("audio_path")
+        if not audio or not Path(audio).exists():
+            return info
+
+        def progress(pct, text):
+            self.controller.progress = {
+                "pct": pct, "status_text": text, "stage": "retranscribing"}
+            self.broker.publish("progress", self.controller.progress)
+
+        paragraphs, word_conf, attempted, replaced = auto_retranscribe(
+            info["paragraphs"], info.get("word_conf"), audio,
+            current_settings(),
+            log=self.controller._append_log, progress=progress)
+        if attempted:
+            info = dict(info)
+            info["paragraphs"] = paragraphs
+            info["word_conf"] = word_conf or None
+            # Detected speaker labels are positional, and the pass can
+            # change how many paragraphs there are. Dropping them is
+            # better than pinning the wrong name to the wrong voice.
+            if replaced and info.get("preset_speakers"):
+                info["preset_speakers"] = None
+                info["diarized"] = False
+        return info
 
     def _open_review(self, info):
         """Open a session for a loaded transcript or autosave restore."""

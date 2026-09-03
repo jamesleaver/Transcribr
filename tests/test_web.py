@@ -440,6 +440,170 @@ class TestUpdateChecker(unittest.TestCase):
 # TranscriptModel - playback spans, confidence, attention
 # =====================================================================
 
+class TestFlaggedSpans(unittest.TestCase):
+    """The second pass re-runs what detect_hallucinations() flagged."""
+
+    def _model(self, bodies):
+        paras = [[(float(i * 5), float(i * 5 + 4), b)]
+                 for i, b in enumerate(bodies)]
+        return T.TranscriptModel(paras)
+
+    def test_adjacent_flags_become_one_span(self):
+        # A repetition loop runs across several paragraphs; re-running it
+        # as one stretch gives the engine more context than three
+        # separate slices, and costs one model load instead of three.
+        m = self._model([
+            "Something ordinary was said here.",
+            "How dare get your hands off me?",
+            "How dare get your hands off me?",
+            "How dare get your hands off me?",
+            "Something else entirely.",
+        ])
+        spans = T.flagged_spans(m)
+        self.assertEqual(len(spans), 1)
+        lo, hi = spans[0]
+        self.assertLessEqual(lo, 1)
+        self.assertGreaterEqual(hi, 3)
+
+    def test_clean_transcript_yields_no_work(self):
+        m = self._model([
+            "Just a moment, you just assured me that I could speak.",
+            "Sit down inside the car. You're under arrest.",
+            "Look, I'm under what?",
+        ])
+        self.assertEqual(T.flagged_spans(m), [])
+
+    def test_distant_flags_stay_separate(self):
+        bodies = ["Ordinary sentence number %d here." % i for i in range(14)]
+        bodies[1] = bodies[2] = "How dare get your hands off me?"
+        bodies[11] = bodies[12] = "Get some cuffs get some cuffs get some cuffs."
+        spans = T.flagged_spans(self._model(bodies))
+        self.assertEqual(len(spans), 2)
+
+    def test_span_count_is_capped(self):
+        # A transcript that is mostly hallucination is a bad recording,
+        # not something a second pass should grind through.
+        bodies = []
+        for i in range(40):
+            bodies += ["Clean line %d." % i, "How dare get your hands off me?",
+                       "How dare get your hands off me?"]
+        self.assertLessEqual(len(T.flagged_spans(self._model(bodies))), 12)
+
+    def test_the_acceptance_test_rejects_a_still_bad_result(self):
+        # This is what makes the pass safe: a replacement is only kept
+        # when the same detector no longer objects, so the pass can
+        # never introduce a flagged paragraph.
+        still_looping = [(0.0, 2.0, "How dare get your hands off me?"),
+                         (2.0, 4.0, "How dare get your hands off me?"),
+                         (4.0, 6.0, "How dare get your hands off me?")]
+        paras = T.paragraphify(still_looping, 1.0)
+        self.assertTrue(T.detect_hallucinations(paras))
+
+        clean = [(0.0, 2.0, "How dare you. Get your hands off me!"),
+                 (2.0, 4.0, "Ta-ta, and farewell.")]
+        self.assertFalse(T.detect_hallucinations(T.paragraphify(clean, 1.0)))
+
+    def _looping_transcript(self):
+        """A short repetition loop inside an otherwise clean recording -
+        the flagged stretch is a small fraction of the whole, as it is
+        on a real file."""
+        paras, t = [], 0.0
+        for i in range(20):
+            paras.append([(t, t + 2.0, "Ordinary sentence number %d." % i)])
+            t += 2.0
+        loop_start = t
+        for _ in range(4):
+            paras.append([(t, t + 2.0, "How dare get your hands off me?")])
+            t += 2.0
+        for i in range(20):
+            paras.append([(t, t + 2.0, "Later sentence number %d." % i)])
+            t += 2.0
+        return paras, loop_start
+
+    def test_second_pass_turns_conditioning_off(self):
+        # Conditioning is what feeds a repetition back into the model, so
+        # the retry must drop it - while the first pass keeps it, because
+        # it helps everywhere else.
+        seen = {}
+
+        def fake_slice(audio, start, end, settings, q, cancel):
+            seen.update(settings)
+            return [(start, start + 2.0, "How dare you. Get your hands off me!")]
+
+        looping, _start = self._looping_transcript()
+        from unittest import mock
+        with mock.patch.object(T, "retranscribe_slice", fake_slice):
+            paras, _w, attempted, replaced = T.auto_retranscribe(
+                looping, [], "/nonexistent.wav", T.default_settings())
+        self.assertEqual(attempted, 1)
+        self.assertEqual(replaced, 1)
+        self.assertFalse(seen["condition_on_previous_text"])
+        self.assertTrue(
+            T.default_settings()["condition_on_previous_text"],
+            "the first pass should still condition - only the retry stops")
+        self.assertFalse(T.detect_hallucinations(paras))
+
+    def test_second_pass_passes_a_real_cancel_event(self):
+        # The engine runners call cancel_event.is_set() unconditionally,
+        # so passing None makes every section fail with AttributeError -
+        # silently, because the failure is caught per section.
+        seen = {}
+
+        def fake_slice(audio, start, end, settings, q, cancel):
+            seen["cancel"] = cancel
+            cancel.is_set()                     # what the runners do
+            return [(start, start + 2.0, "How dare you. Get your hands off me!")]
+
+        looping, _start = self._looping_transcript()
+        from unittest import mock
+        with mock.patch.object(T, "retranscribe_slice", fake_slice):
+            _p, _w, _a, replaced = T.auto_retranscribe(
+                looping, [], "/nonexistent.wav", T.default_settings())
+        self.assertEqual(replaced, 1)
+        self.assertIsNotNone(seen["cancel"])
+
+    def test_second_pass_keeps_the_original_when_no_better(self):
+        # If the retry comes back just as bad, the original text stays.
+        def still_bad(audio, start, end, settings, q, cancel):
+            return [(start + i, start + i + 1, "How dare get your hands off me?")
+                    for i in range(4)]
+
+        looping, _start = self._looping_transcript()
+        before = [list(p) for p in looping]
+        from unittest import mock
+        with mock.patch.object(T, "retranscribe_slice", still_bad):
+            paras, _w, attempted, replaced = T.auto_retranscribe(
+                looping, [], "/nonexistent.wav", T.default_settings())
+        self.assertEqual(attempted, 1)
+        self.assertEqual(replaced, 0)
+        self.assertEqual(paras, before)
+
+    def test_second_pass_drops_stale_confidences(self):
+        # Word confidences describe the words that were there before; a
+        # replaced span must not shade its new text with the old scores.
+        def fake_slice(audio, start, end, settings, q, cancel):
+            return [(start, start + 2.0, "How dare you. Get your hands off me!")]
+
+        looping, loop_start = self._looping_transcript()
+        words = [(1.0, 1.5, "Ordinary", 0.9),
+                 (loop_start + 1, loop_start + 1.5, "dare", 0.2),
+                 (loop_start + 3, loop_start + 3.5, "hands", 0.2),
+                 (110.0, 110.5, "later", 0.8)]
+        from unittest import mock
+        with mock.patch.object(T, "retranscribe_slice", fake_slice):
+            _p, kept, _a, replaced = T.auto_retranscribe(
+                looping, words, "/nonexistent.wav", T.default_settings())
+        self.assertEqual(replaced, 1)
+        self.assertIn((1.0, 1.5, "Ordinary", 0.9), kept)     # before the span
+        self.assertIn((110.0, 110.5, "later", 0.8), kept)    # after it
+        self.assertNotIn((loop_start + 1, loop_start + 1.5, "dare", 0.2), kept)
+        self.assertNotIn((loop_start + 3, loop_start + 3.5, "hands", 0.2), kept)
+
+    def test_auto_retranscribe_defaults_on(self):
+        self.assertTrue(T.default_settings()["auto_retranscribe"])
+        self.assertIn("auto_retranscribe", T.validate_settings({}))
+
+
 class TestModelDerived(unittest.TestCase):
     def test_playback_span_real_ends_padded(self):
         m = _model()

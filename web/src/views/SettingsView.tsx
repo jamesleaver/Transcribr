@@ -70,6 +70,17 @@ export default function SettingsView() {
           </div>
         </Card>
 
+        <Card title="Accuracy">
+          <div className="flex flex-col gap-2.5">
+            <CheckField
+              label="Re-run sections that look like engine errors"
+              checked={settings.auto_retranscribe}
+              onChange={(v) => update({ auto_retranscribe: v })}
+              note="After a transcription, the sections flagged as repeated or low-confidence text are transcribed a second time without conditioning — the setting that makes the engine repeat itself. The new text is kept only where the same check no longer objects to it, and every replacement can be undone in the review pane."
+            />
+          </div>
+        </Card>
+
         <Card title="Updates">
           <div className="flex flex-col gap-2.5">
             <CheckField
