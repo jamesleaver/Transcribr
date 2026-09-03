@@ -1066,6 +1066,116 @@ def _parse_timestamp_prefix(line):
     return h * 3600 + mm * 60 + ss, line[m.end():]
 
 
+# --- searching saved transcripts --------------------------------------
+#
+# Once there are more than a handful of transcripts, the questions stop
+# being "open the last one" and become "which recording mentioned the
+# white van?" and "what have I already transcribed for this brief?".
+# Neither is answerable from a list of file names.
+#
+# The transcripts are already on disk in a format this app can parse, so
+# this is an index over files that already exist rather than a new store
+# to keep in step. Candidates are the recent list plus anything beside
+# those files that looks like a transcript - so the other recordings in
+# a matter folder are searchable without having been opened first.
+
+SEARCH_FILE_LIMIT = 400
+SEARCH_HITS_PER_FILE = 20
+_TRANSCRIPT_GLOBS = ("*.transcript.docx", "*.transcript.txt")
+
+
+def _search_candidates(extra_paths=()):
+    """Transcript files worth searching: everything in the recent list,
+    plus their folder-mates. Ordered, deduped, and capped."""
+    seen, out = set(), []
+
+    def add(path):
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            return
+        if resolved in seen or len(out) >= SEARCH_FILE_LIMIT:
+            return
+        seen.add(resolved)
+        out.append(resolved)
+
+    folders = []
+    for item in list(extra_paths) + [i["path"] for i in _recent_load()]:
+        add(item)
+        try:
+            parent = Path(item).parent
+        except (OSError, ValueError):
+            continue
+        if parent not in folders:
+            folders.append(parent)
+
+    for folder in folders:
+        for pattern in _TRANSCRIPT_GLOBS:
+            try:
+                for match in sorted(folder.glob(pattern)):
+                    add(match)
+            except OSError:
+                continue
+    return out
+
+
+def search_transcripts(query, paths=None, limit=SEARCH_FILE_LIMIT):
+    """Find `query` across saved transcripts.
+
+    Returns {"results": [...], "searched": n, "unreadable": m}, one entry
+    per file that matched, each carrying the paragraphs that matched and
+    the timestamp to seek to. Case-insensitive substring matching: the
+    point is finding a phrase someone half-remembers, not a regex.
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"results": [], "searched": 0, "unreadable": 0}
+    needle = query.lower()
+
+    results, searched, unreadable = [], 0, 0
+    for path in (paths if paths is not None else _search_candidates())[:limit]:
+        try:
+            parsed = read_paragraphs_from_file(path)
+        except TranscriptParseError:
+            unreadable += 1
+            continue
+        except Exception:
+            unreadable += 1
+            continue
+        searched += 1
+
+        hits = []
+        for index, para in enumerate(parsed["paragraphs"]):
+            body = " ".join(seg[2] for seg in para)
+            if needle not in body.lower():
+                continue
+            hits.append({
+                "index": index,
+                "start": float(para[0][0]) if para else 0.0,
+                "text": body,
+                "speaker": (parsed["speakers"][index]
+                            if index < len(parsed["speakers"]) else None),
+            })
+            if len(hits) >= SEARCH_HITS_PER_FILE:
+                break
+        if hits:
+            results.append({
+                "path": path,
+                "name": Path(path).name,
+                "folder": Path(path).parent.name,
+                "folder_path": str(Path(path).parent),
+                "title": parsed.get("title"),
+                "hits": hits,
+                "total_hits": len(hits),
+            })
+
+    # Group by folder in the caller's order: matters are folders, and
+    # that is how someone looking for "the Chowdhury brief" thinks.
+    results.sort(key=lambda r: (r["folder"].lower(), r["name"].lower()))
+    return {"results": results, "searched": searched,
+            "unreadable": unreadable}
+
+
 class TranscriptParseError(Exception):
     """Raised when a file can't be parsed as a Transcribr transcript."""
 
@@ -7216,6 +7326,19 @@ class WebBackend:
                 return backend._live_review().payload()
             except ApiFail as e:
                 _fail(e)
+
+        @app.get("/api/transcripts/search")
+        def api_transcripts_search():
+            """Search saved transcripts. Reads files on demand rather
+            than keeping an index: transcripts are edited outside this
+            app, and a stale index is worse than a slower search."""
+            q = (bottle.request.query.get("q") or "").strip()
+            if len(q) < 2:
+                return {"results": [], "searched": 0, "unreadable": 0,
+                        "query": q}
+            found = search_transcripts(q)
+            found["query"] = q
+            return found
 
         @app.post("/api/transcripts/open")
         def api_transcripts_open():

@@ -440,6 +440,75 @@ class TestUpdateChecker(unittest.TestCase):
 # TranscriptModel - playback spans, confidence, attention
 # =====================================================================
 
+class TestTranscriptSearch(unittest.TestCase):
+    """Finding a half-remembered phrase across saved transcripts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _make(self, name, rows, title=None):
+        paras = [[(float(t), float(t) + 4.0, txt)] for t, txt in rows]
+        out = self.dir / name
+        T.write_paragraphs_to_file(paras, out, show_timestamp=True,
+                                   title=title, output_format="txt",
+                                   speakers=None)
+        return str(out)
+
+    def test_finds_a_phrase_and_where_to_hear_it(self):
+        a = self._make("interview.transcript.txt", [
+            (0, "A white van came through after the light changed."),
+            (30, "It clipped a cyclist near the crossing.")])
+        b = self._make("statement.transcript.txt", [
+            (0, "I did not see any van that afternoon."),
+            (60, "The white van was parked outside when I arrived.")])
+        r = T.search_transcripts("white van", paths=[a, b])
+        self.assertEqual(len(r["results"]), 2)
+        # The timestamp is the point: it is what makes a hit playable.
+        starts = {f["name"]: f["hits"][0]["start"] for f in r["results"]}
+        self.assertEqual(starts["interview.transcript.txt"], 0.0)
+        self.assertEqual(starts["statement.transcript.txt"], 60.0)
+
+    def test_search_is_case_insensitive(self):
+        a = self._make("a.transcript.txt", [(0, "The Defendant said nothing.")])
+        self.assertEqual(len(T.search_transcripts("defendant", paths=[a])["results"]), 1)
+
+    def test_files_without_the_phrase_are_left_out(self):
+        a = self._make("a.transcript.txt", [(0, "Nothing relevant here.")])
+        self.assertEqual(T.search_transcripts("white van", paths=[a])["results"], [])
+
+    def test_an_empty_query_searches_nothing(self):
+        a = self._make("a.transcript.txt", [(0, "Something.")])
+        r = T.search_transcripts("   ", paths=[a])
+        self.assertEqual(r["results"], [])
+        self.assertEqual(r["searched"], 0)
+
+    def test_unreadable_files_are_counted_not_fatal(self):
+        good = self._make("good.transcript.txt", [(0, "A white van.")])
+        bad = self.dir / "bad.transcript.txt"
+        bad.write_bytes(b"\x00\x01 not a transcript")
+        r = T.search_transcripts("white van", paths=[good, str(bad)])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertEqual(r["unreadable"], 1)
+
+    def test_hits_per_file_are_capped(self):
+        rows = [(i * 10, "The white van again.") for i in range(40)]
+        a = self._make("many.transcript.txt", rows)
+        hits = T.search_transcripts("white van", paths=[a])["results"][0]["hits"]
+        self.assertLessEqual(len(hits), T.SEARCH_HITS_PER_FILE)
+
+    def test_candidates_include_folder_mates_of_recents(self):
+        # A matter folder's other recordings should be searchable without
+        # having been opened first.
+        self._make("opened.transcript.txt", [(0, "one")])
+        self._make("never-opened.transcript.txt", [(0, "two")])
+        found = T._search_candidates(
+            extra_paths=[str(self.dir / "opened.transcript.txt")])
+        names = {Path(f).name for f in found}
+        self.assertIn("never-opened.transcript.txt", names)
+
+
 class TestTerms(unittest.TestCase):
     """Candidate names, and correcting one everywhere at once."""
 
