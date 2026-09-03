@@ -475,18 +475,49 @@ class TestVocabularyPriming(unittest.TestCase):
         self.assertIn("Cavill", got)
         self.assertIn("Doyle", got)
 
-    def test_a_correction_records_the_term(self):
-        self.assertEqual(T._terms_load(), [])
-        T._terms_add("Cavill")
-        T._terms_add("Constable Doyle")
-        self.assertEqual(T._terms_load(), ["Constable Doyle", "Cavill"])
+    def test_a_correction_records_the_term_against_its_folder(self):
+        here = str(Path(self.tmp.name) / "brief-one" / "interview.docx")
+        self.assertEqual(T._terms_load(here), [])
+        T._terms_add(here, "Cavill")
+        T._terms_add(here, "Constable Doyle")
+        self.assertEqual(T._terms_load(here), ["Constable Doyle", "Cavill"])
+
+    def test_terms_do_not_leak_between_folders(self):
+        # The point of scoping: a name confirmed for one set of
+        # recordings must not be suggested to the engine while it
+        # transcribes an unrelated one, which may belong to someone else
+        # entirely.
+        one = str(Path(self.tmp.name) / "brief-one" / "a.docx")
+        two = str(Path(self.tmp.name) / "brief-two" / "b.docx")
+        T._terms_add(one, "Cavill")
+        self.assertEqual(T._terms_load(one), ["Cavill"])
+        self.assertEqual(T._terms_load(two), [])
+
+    def test_terms_are_shared_across_one_folder(self):
+        # And the point of keeping them at all: the second recording in
+        # a set benefits from the names settled while reviewing the first.
+        first = str(Path(self.tmp.name) / "brief" / "day-one.docx")
+        second = str(Path(self.tmp.name) / "brief" / "day-two.mp4")
+        T._terms_add(first, "Cavill")
+        self.assertEqual(T._terms_load(second), ["Cavill"])
 
     def test_recording_a_term_again_moves_it_up_without_duplicating(self):
-        T._terms_add("Cavill")
-        T._terms_add("Doyle")
-        T._terms_add("cavill")
-        self.assertEqual(len(T._terms_load()), 2)
-        self.assertEqual(T._terms_load()[0], "cavill")
+        here = str(Path(self.tmp.name) / "brief" / "a.docx")
+        T._terms_add(here, "Cavill")
+        T._terms_add(here, "Doyle")
+        T._terms_add(here, "cavill")
+        self.assertEqual(len(T._terms_load(here)), 2)
+        self.assertEqual(T._terms_load(here)[0], "cavill")
+
+    def test_priming_uses_only_this_folders_terms(self):
+        one = str(Path(self.tmp.name) / "brief-one" / "a.mp4")
+        two = str(Path(self.tmp.name) / "brief-two" / "b.mp4")
+        T._terms_add(one, "Cavill")
+        settings = dict(T.default_settings(), prime_with_terms=True)
+        self.assertIn("Cavill",
+                      T.compose_initial_prompt(settings, source_path=one))
+        self.assertEqual("",
+                         T.compose_initial_prompt(settings, source_path=two))
 
     def test_the_vocabulary_field_is_shown(self):
         # It is the most direct accuracy control in the app; hidden

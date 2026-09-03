@@ -76,27 +76,48 @@ function DropZone() {
 
 function KnownTermsCard() {
   const settings = useApp((s) => s.settings);
-  const [terms, setTerms] = useState<string[] | null>(null);
+  const staged = useRun((s) => s.staged);
+  const [terms, setTerms] = useState<string[]>([]);
+  const [folder, setFolder] = useState("");
   const [open, setOpen] = useState(false);
 
+  // Terms belong to the folder the recording sits in, so the list only
+  // means anything once a file is staged.
+  const forPath = staged[0]?.path ?? "";
+
   useEffect(() => {
+    if (!forPath) {
+      setTerms([]);
+      setFolder("");
+      return;
+    }
+    let live = true;
     void (async () => {
       try {
-        const res = await api.get<{ terms: string[] }>("/api/terms");
-        setTerms(res.terms);
+        const res = await api.get<{ terms: string[]; folder: string }>(
+          `/api/terms?for=${encodeURIComponent(forPath)}`,
+        );
+        if (live) {
+          setTerms(res.terms);
+          setFolder(res.folder);
+        }
       } catch {
-        setTerms([]);
+        if (live) setTerms([]);
       }
     })();
-  }, []);
+    return () => {
+      live = false;
+    };
+  }, [forPath]);
 
-  if (!settings || !terms || terms.length === 0) return null;
+  if (!settings || !forPath || terms.length === 0) return null;
 
-  const remove = async (term: string) => {
+  const forget = async (term: string) => {
     const kept = terms.filter((t) => t !== term);
     setTerms(kept);
     try {
       const res = await api.put<{ terms: string[] }>("/api/terms", {
+        for: forPath,
         terms: kept,
       });
       setTerms(res.terms);
@@ -108,20 +129,27 @@ function KnownTermsCard() {
   return (
     <div className="rounded-xl border border-edge bg-surface p-4">
       <CheckField
-        label={`Help the engine with ${terms.length} known ${
-          terms.length === 1 ? "name" : "names"
-        }`}
+        label={`Help the engine with ${terms.length} name${
+          terms.length === 1 ? "" : "s"
+        } from this folder`}
         checked={settings.prime_with_terms}
         onChange={(v) =>
           void useApp.getState().updateSettings({ prime_with_terms: v })
         }
-        note="Names you have corrected while reviewing. Telling the engine about them makes it likelier to spell them correctly — and slightly likelier to hear them where they were not said, so this is off unless you turn it on."
+        note={
+          `Names you corrected while reviewing other recordings in ${
+            folder ? `“${folder}”` : "this folder"
+          }. Telling the engine about them makes it likelier to spell them ` +
+          "correctly — and slightly likelier to hear them where they were " +
+          "not said, so this is off unless you turn it on. Names never " +
+          "travel between folders."
+        }
       />
       <button
         className="mt-2 text-xs text-muted underline"
         onClick={() => setOpen((v) => !v)}
       >
-        {open ? "Hide the list" : "Show the list"}
+        {open ? "Hide the names" : `Show the ${terms.length} names`}
       </button>
       {open && (
         <ul className="mt-2 flex flex-wrap gap-1.5">
@@ -133,8 +161,8 @@ function KnownTermsCard() {
               {t}
               <button
                 className="text-muted hover:text-fg"
-                title={`Forget "${t}"`}
-                onClick={() => void remove(t)}
+                title={`Forget “${t}”`}
+                onClick={() => void forget(t)}
               >
                 ✕
               </button>

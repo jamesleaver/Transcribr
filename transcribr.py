@@ -327,38 +327,88 @@ def _terms_path():
     return _config_dir() / "terms.json"
 
 
-def _terms_load():
-    """Terms the reviewer has confirmed by correcting them in a
-    transcript. Kept because the same names recur: officers, suburbs,
-    court terms, the parties in a matter that runs to several
-    recordings."""
+def _terms_folder_key(path):
+    """The folder a recording or transcript belongs to, as the key its
+    terms are filed under. Folders are the grouping people already use -
+    a brief, a story, a study, a set of interviews all arrive as a
+    folder of recordings - so nothing new has to be explained or
+    maintained."""
+    if not path:
+        return ""
+    try:
+        return str(Path(path).resolve().parent)
+    except (OSError, ValueError):
+        return ""
+
+
+def _terms_all():
+    """{folder: [term, ...]} for every folder that has any."""
     import json
     try:
         with open(_terms_path(), "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return [str(t) for t in data.get("terms", []) if str(t).strip()]
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
+        return {}
+    folders = data.get("folders")
+    if isinstance(folders, dict):
+        return {str(k): [str(t) for t in v if str(t).strip()]
+                for k, v in folders.items() if isinstance(v, list)}
+    return {}
+
+
+def _terms_load(path=None):
+    """Terms confirmed in the folder `path` belongs to.
+
+    Scoped to the folder on purpose. These names come from one set of
+    recordings, and carrying them into an unrelated transcript would
+    prime the engine to hear a name from somebody else's file - wrong
+    for accuracy, and worse than wrong when the two belong to different
+    people.
+    """
+    key = _terms_folder_key(path)
+    if not key:
         return []
+    return list(_terms_all().get(key, []))
 
 
-def _terms_add(term):
-    """Record a confirmed term, most recent first. No-op on error - a
+def _terms_save(path, terms):
+    """Replace the term list for `path`'s folder. No-op on error - a
     vocabulary note must never cost someone a transcript."""
     import json
-    term = (term or "").strip()
-    if not term:
-        return _terms_load()
+    key = _terms_folder_key(path)
+    if not key:
+        return []
+    cleaned, seen = [], set()
+    for t in terms:
+        t = str(t).strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            cleaned.append(t)
+    del cleaned[200:]
     try:
-        kept = [t for t in _terms_load() if t.lower() != term.lower()]
-        kept.insert(0, term)
-        del kept[200:]
+        everything = _terms_all()
+        if cleaned:
+            everything[key] = cleaned
+        else:
+            everything.pop(key, None)
         _terms_path().parent.mkdir(parents=True, exist_ok=True)
         with open(_terms_path(), "w", encoding="utf-8") as fh:
-            json.dump({"terms": kept}, fh, indent=2)
-        return kept
+            json.dump({"folders": everything}, fh, indent=2)
+        return cleaned
     except OSError as e:
         _log(f"Could not write terms.json: {e}")
-        return _terms_load()
+        return _terms_load(path)
+
+
+def _terms_add(path, term):
+    """Record a confirmed term against `path`'s folder, most recent
+    first."""
+    term = (term or "").strip()
+    if not term or not _terms_folder_key(path):
+        return _terms_load(path)
+    kept = [t for t in _terms_load(path) if t.lower() != term.lower()]
+    kept.insert(0, term)
+    return _terms_save(path, kept)
 
 
 def _recent_file():
@@ -4071,21 +4121,24 @@ def _resolve_word_timestamps(mode, engine_key):
     return engine_key != "mlx"      # "auto"
 
 
-def compose_initial_prompt(settings, terms=None):
+def compose_initial_prompt(settings, terms=None, source_path=None):
     """The engine's initial_prompt: whatever the user typed, plus the
-    confirmed terms when priming is switched on.
+    terms confirmed in this recording's folder, when priming is on.
 
     Priming is a real trade. Naming "Cavill" makes the engine far more
     likely to spell it right where it is said - and somewhat more likely
     to hear it where it was not. That is a poor bargain for a transcript
     relied on as a record, so it is off unless asked for, and the terms
-    come only from corrections the reviewer has already confirmed rather
-    than guesses.
+    come only from corrections the reviewer has already confirmed.
+
+    Terms are taken from the file's own folder and nowhere else. Names
+    belonging to one set of recordings have no business being suggested
+    to the engine while it transcribes somebody else's.
     """
     typed = (settings.get("prompt") or "").strip()
     if not settings.get("prime_with_terms"):
         return typed
-    known = list(terms if terms is not None else _terms_load())
+    known = list(terms if terms is not None else _terms_load(source_path))
     if not known:
         return typed
     # A plain comma list is what Whisper-family models take as context.
@@ -4117,8 +4170,9 @@ def build_worker_params(settings, in_path, out_path, *,
     # the engine, and the optional prompt (a vocabulary hint) is fed as
     # initial_prompt. Prompting is opt-in because it can backfire - it can
     # bleed into the transcript or trigger hallucinations on unclear audio.
-    # Confirmed terms join the typed hint only when priming is on.
-    prompt = compose_initial_prompt(settings)
+    # Confirmed terms join the typed hint only when priming is on, and
+    # only those confirmed alongside this recording.
+    prompt = compose_initial_prompt(settings, source_path=in_path)
     doc_title = (settings.get("title") or "").strip()
 
     engine_key = resolve_engine_key(settings["engine"])
@@ -6887,8 +6941,10 @@ class ReviewSession:
                 if count:
                     # The reviewer has just told us this spelling is
                     # right; that is the only trustworthy source of
-                    # vocabulary this app has.
-                    _terms_add(to)
+                    # vocabulary this app has. Filed against this
+                    # recording's folder, so it helps the rest of the
+                    # same set and reaches nothing else.
+                    _terms_add(self.audio_path or self.out_path, to)
                 result = self.payload()
                 result["count"] = count
             elif action == "undo":
@@ -7404,39 +7460,34 @@ class WebBackend:
 
         @app.get("/api/terms")
         def api_terms_get():
-            return {"terms": _terms_load()}
+            """Terms confirmed alongside the given file. `for` is the
+            recording or transcript being worked on; terms are filed by
+            its folder."""
+            for_path = bottle.request.query.get("for") or ""
+            return {"terms": _terms_load(for_path),
+                    "folder": Path(for_path).parent.name if for_path else ""}
 
         @app.put("/api/terms")
         def api_terms_put():
-            """Replace the confirmed-terms list. The reviewer owns this:
-            terms arrive by correcting a transcript, and leave by being
-            removed here."""
+            """Replace the term list for a file's folder. The reviewer
+            owns this: terms arrive by correcting a transcript, and
+            leave by being removed here."""
             try:
                 body = bottle.request.json
             except Exception:
                 body = None
-            if not isinstance(body, dict) or not isinstance(
-                    body.get("terms"), list):
+            if (not isinstance(body, dict)
+                    or not isinstance(body.get("terms"), list)
+                    or not str(body.get("for") or "").strip()):
                 raise bottle.HTTPResponse(
                     body=json.dumps({"error": {
                         "code": "bad_request",
-                        "message": "Body must be {\"terms\": [...]}."}}),
+                        "message": ("Body must be "
+                                    "{\"for\": path, \"terms\": [...]}.")}}),
                     status=400,
                     headers={"Content-Type": "application/json"})
-            cleaned, seen = [], set()
-            for t in body["terms"]:
-                t = str(t).strip()
-                if t and t.lower() not in seen:
-                    seen.add(t.lower())
-                    cleaned.append(t)
-            del cleaned[200:]
-            try:
-                _terms_path().parent.mkdir(parents=True, exist_ok=True)
-                with open(_terms_path(), "w", encoding="utf-8") as fh:
-                    json.dump({"terms": cleaned}, fh, indent=2)
-            except OSError as e:
-                _log(f"Could not write terms.json: {e}")
-            return {"terms": _terms_load()}
+            kept = _terms_save(str(body["for"]), body["terms"])
+            return {"terms": kept}
 
         @app.get("/api/transcripts/search")
         def api_transcripts_search():
