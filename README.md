@@ -75,14 +75,14 @@ Questions: [jleaver@sgchambers.com.au](mailto:jleaver@sgchambers.com.au)
 
 ## Screenshots
 
-Main pane:
+Main pane — a file staged and a transcription under way:
 
-<img width="1312" height="912" alt="Screenshot 2026-07-16 at 2 28 28 pm" src="https://github.com/user-attachments/assets/c91c6f47-ba0c-4806-b54c-36510e1f786e" />
+<img width="1312" height="912" alt="Transcribr's Transcribe pane, showing a staged recording and a transcription in progress" src="docs/screenshot-transcribe.png" />
 
 
-Review pane:
+Review pane — speakers labelled, text corrected against the audio:
 
-<img width="1312" height="912" alt="Screenshot 2026-07-16 at 2 33 29 pm" src="https://github.com/user-attachments/assets/9900d430-8574-4682-8788-8feb9f2abab2" />
+<img width="1312" height="912" alt="Transcribr's Review pane, showing a speaker-labelled transcript part-way through review" src="docs/screenshot-review.png" />
 
 
 Result:
