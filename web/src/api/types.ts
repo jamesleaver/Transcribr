@@ -91,6 +91,7 @@ export interface Settings {
   show_diarize: boolean;
   check_updates: boolean;
   auto_retranscribe: boolean;
+  prime_with_terms: boolean;
   /** Word-level timing & confidence highlighting: auto | on | off. */
   word_timestamps: "auto" | "on" | "off";
 }

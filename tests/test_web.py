@@ -440,6 +440,60 @@ class TestUpdateChecker(unittest.TestCase):
 # TranscriptModel - playback spans, confidence, attention
 # =====================================================================
 
+class TestVocabularyPriming(unittest.TestCase):
+    """Confirmed terms, and the deliberate decision not to use them by
+    default."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._orig = T._config_dir
+        T._config_dir = lambda: Path(self.tmp.name)
+        self.addCleanup(setattr, T, "_config_dir", self._orig)
+
+    def test_priming_is_off_by_default(self):
+        # Naming a person makes the engine likelier to hear them where
+        # they were not said. For a record relied on as evidence that is
+        # the wrong default, however tempting the accuracy gain.
+        self.assertFalse(T.default_settings()["prime_with_terms"])
+
+    def test_terms_are_ignored_unless_priming_is_on(self):
+        settings = dict(T.default_settings())
+        self.assertEqual(
+            T.compose_initial_prompt(settings, ["Cavill", "Doyle"]), "")
+
+    def test_typed_hint_is_used_on_its_own(self):
+        settings = dict(T.default_settings(), prompt="traffic incident")
+        self.assertEqual(
+            T.compose_initial_prompt(settings, ["Cavill"]), "traffic incident")
+
+    def test_priming_combines_the_typed_hint_and_confirmed_terms(self):
+        settings = dict(T.default_settings(), prompt="traffic incident",
+                        prime_with_terms=True)
+        got = T.compose_initial_prompt(settings, ["Cavill", "Doyle"])
+        self.assertIn("traffic incident", got)
+        self.assertIn("Cavill", got)
+        self.assertIn("Doyle", got)
+
+    def test_a_correction_records_the_term(self):
+        self.assertEqual(T._terms_load(), [])
+        T._terms_add("Cavill")
+        T._terms_add("Constable Doyle")
+        self.assertEqual(T._terms_load(), ["Constable Doyle", "Cavill"])
+
+    def test_recording_a_term_again_moves_it_up_without_duplicating(self):
+        T._terms_add("Cavill")
+        T._terms_add("Doyle")
+        T._terms_add("cavill")
+        self.assertEqual(len(T._terms_load()), 2)
+        self.assertEqual(T._terms_load()[0], "cavill")
+
+    def test_the_vocabulary_field_is_shown(self):
+        # It is the most direct accuracy control in the app; hidden
+        # behind a setting, most people never found it.
+        self.assertTrue(T.default_settings()["show_prompt"])
+
+
 class TestTranscriptSearch(unittest.TestCase):
     """Finding a half-remembered phrase across saved transcripts."""
 

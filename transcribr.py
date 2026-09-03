@@ -323,6 +323,44 @@ def _config_dir():
     return base
 
 
+def _terms_path():
+    return _config_dir() / "terms.json"
+
+
+def _terms_load():
+    """Terms the reviewer has confirmed by correcting them in a
+    transcript. Kept because the same names recur: officers, suburbs,
+    court terms, the parties in a matter that runs to several
+    recordings."""
+    import json
+    try:
+        with open(_terms_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [str(t) for t in data.get("terms", []) if str(t).strip()]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _terms_add(term):
+    """Record a confirmed term, most recent first. No-op on error - a
+    vocabulary note must never cost someone a transcript."""
+    import json
+    term = (term or "").strip()
+    if not term:
+        return _terms_load()
+    try:
+        kept = [t for t in _terms_load() if t.lower() != term.lower()]
+        kept.insert(0, term)
+        del kept[200:]
+        _terms_path().parent.mkdir(parents=True, exist_ok=True)
+        with open(_terms_path(), "w", encoding="utf-8") as fh:
+            json.dump({"terms": kept}, fh, indent=2)
+        return kept
+    except OSError as e:
+        _log(f"Could not write terms.json: {e}")
+        return _terms_load()
+
+
 def _recent_file():
     return _config_dir() / "recent.json"
 
@@ -4033,6 +4071,28 @@ def _resolve_word_timestamps(mode, engine_key):
     return engine_key != "mlx"      # "auto"
 
 
+def compose_initial_prompt(settings, terms=None):
+    """The engine's initial_prompt: whatever the user typed, plus the
+    confirmed terms when priming is switched on.
+
+    Priming is a real trade. Naming "Cavill" makes the engine far more
+    likely to spell it right where it is said - and somewhat more likely
+    to hear it where it was not. That is a poor bargain for a transcript
+    relied on as a record, so it is off unless asked for, and the terms
+    come only from corrections the reviewer has already confirmed rather
+    than guesses.
+    """
+    typed = (settings.get("prompt") or "").strip()
+    if not settings.get("prime_with_terms"):
+        return typed
+    known = list(terms if terms is not None else _terms_load())
+    if not known:
+        return typed
+    # A plain comma list is what Whisper-family models take as context.
+    listed = ", ".join(known[:60])
+    return f"{typed} {listed}".strip() if typed else listed
+
+
 def build_worker_params(settings, in_path, out_path, *,
                         review_before_save):
     """Assemble the transcribe_worker params dict from a validated
@@ -4057,7 +4117,8 @@ def build_worker_params(settings, in_path, out_path, *,
     # the engine, and the optional prompt (a vocabulary hint) is fed as
     # initial_prompt. Prompting is opt-in because it can backfire - it can
     # bleed into the transcript or trigger hallucinations on unclear audio.
-    prompt = (settings.get("prompt") or "").strip()
+    # Confirmed terms join the typed hint only when priming is on.
+    prompt = compose_initial_prompt(settings)
     doc_title = (settings.get("title") or "").strip()
 
     engine_key = resolve_engine_key(settings["engine"])
@@ -4124,7 +4185,7 @@ _SETTINGS_BOOL_KEYS = (
     "extra_json", "extra_srt", "extra_vtt",
     "extra_tsv", "show_details",
     "diarize", "show_all_models", "show_prompt", "show_diarize",
-    "check_updates", "auto_retranscribe",
+    "check_updates", "auto_retranscribe", "prime_with_terms",
 )
 
 _SETTINGS_NUMBER_KEYS = (
@@ -4181,7 +4242,11 @@ def default_settings():
         "diarize_model": DIARIZE_DEFAULT_VOICE_MODEL,
         "diarize_threshold": _DIARIZE_CLUSTER_THRESHOLD,
         "show_all_models": False,
-        "show_prompt": False,
+        # The field is shown: it is the most direct accuracy control in
+        # the app and was hidden behind a setting most people never
+        # found. Showing it costs nothing - an empty field primes
+        # nothing.
+        "show_prompt": True,
         # Word-level timing & confidence highlighting: "auto" (on except
         # on mlx, where it is slow), "on", or "off".
         "word_timestamps": "auto",
@@ -4196,6 +4261,11 @@ def default_settings():
         # hallucination and keep whichever result the same check no
         # longer objects to.
         "auto_retranscribe": True,
+        # Feed confirmed names to the engine before a run. Off by
+        # default: priming fixes the names it is given and can invent
+        # them where they were never said, which is the wrong trade for
+        # a transcript used as evidence. Opt in knowingly.
+        "prime_with_terms": False,
     }
 
 
@@ -6812,8 +6882,13 @@ class ReviewSession:
             elif action == "term":
                 # Distinct from replace-all: whole words only, several
                 # spellings at once, and one undo step for the lot.
-                count = m.replace_term(body.get("variants") or [],
-                                       str(body.get("to", "")))
+                to = str(body.get("to", ""))
+                count = m.replace_term(body.get("variants") or [], to)
+                if count:
+                    # The reviewer has just told us this spelling is
+                    # right; that is the only trustworthy source of
+                    # vocabulary this app has.
+                    _terms_add(to)
                 result = self.payload()
                 result["count"] = count
             elif action == "undo":
@@ -7326,6 +7401,42 @@ class WebBackend:
                 return backend._live_review().payload()
             except ApiFail as e:
                 _fail(e)
+
+        @app.get("/api/terms")
+        def api_terms_get():
+            return {"terms": _terms_load()}
+
+        @app.put("/api/terms")
+        def api_terms_put():
+            """Replace the confirmed-terms list. The reviewer owns this:
+            terms arrive by correcting a transcript, and leave by being
+            removed here."""
+            try:
+                body = bottle.request.json
+            except Exception:
+                body = None
+            if not isinstance(body, dict) or not isinstance(
+                    body.get("terms"), list):
+                raise bottle.HTTPResponse(
+                    body=json.dumps({"error": {
+                        "code": "bad_request",
+                        "message": "Body must be {\"terms\": [...]}."}}),
+                    status=400,
+                    headers={"Content-Type": "application/json"})
+            cleaned, seen = [], set()
+            for t in body["terms"]:
+                t = str(t).strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    cleaned.append(t)
+            del cleaned[200:]
+            try:
+                _terms_path().parent.mkdir(parents=True, exist_ok=True)
+                with open(_terms_path(), "w", encoding="utf-8") as fh:
+                    json.dump({"terms": cleaned}, fh, indent=2)
+            except OSError as e:
+                _log(f"Could not write terms.json: {e}")
+            return {"terms": _terms_load()}
 
         @app.get("/api/transcripts/search")
         def api_transcripts_search():

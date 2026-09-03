@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { alertDialog } from "../state/dialogs";
 import { useRun } from "../state/runStore";
 import { useApp } from "../state/store";
-import { inputCls } from "./fields";
+import { api } from "../api/client";
+import { CheckField, inputCls } from "./fields";
 
 // The Source column: drop zone, staged file(s), prompt field.
 // Drops anywhere on the window are accepted (parity with the Tk app,
@@ -70,6 +71,78 @@ function DropZone() {
         or click to browse — several files become a batch
       </div>
     </button>
+  );
+}
+
+function KnownTermsCard() {
+  const settings = useApp((s) => s.settings);
+  const [terms, setTerms] = useState<string[] | null>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await api.get<{ terms: string[] }>("/api/terms");
+        setTerms(res.terms);
+      } catch {
+        setTerms([]);
+      }
+    })();
+  }, []);
+
+  if (!settings || !terms || terms.length === 0) return null;
+
+  const remove = async (term: string) => {
+    const kept = terms.filter((t) => t !== term);
+    setTerms(kept);
+    try {
+      const res = await api.put<{ terms: string[] }>("/api/terms", {
+        terms: kept,
+      });
+      setTerms(res.terms);
+    } catch {
+      /* the list is a convenience; a failed edit is not worth a dialog */
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-edge bg-surface p-4">
+      <CheckField
+        label={`Help the engine with ${terms.length} known ${
+          terms.length === 1 ? "name" : "names"
+        }`}
+        checked={settings.prime_with_terms}
+        onChange={(v) =>
+          void useApp.getState().updateSettings({ prime_with_terms: v })
+        }
+        note="Names you have corrected while reviewing. Telling the engine about them makes it likelier to spell them correctly — and slightly likelier to hear them where they were not said, so this is off unless you turn it on."
+      />
+      <button
+        className="mt-2 text-xs text-muted underline"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "Hide the list" : "Show the list"}
+      </button>
+      {open && (
+        <ul className="mt-2 flex flex-wrap gap-1.5">
+          {terms.map((t) => (
+            <li
+              key={t}
+              className="flex items-center gap-1 rounded-lg border border-edge px-2 py-0.5 text-xs"
+            >
+              {t}
+              <button
+                className="text-muted hover:text-fg"
+                title={`Forget "${t}"`}
+                onClick={() => void remove(t)}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -202,6 +275,8 @@ function PromptCard() {
           </label>
         </div>
       )}
+
+      <KnownTermsCard />
     </>
   );
 }
