@@ -548,7 +548,7 @@ repetition (a word or phrase looping, or a line repeated across
 paragraphs) or, when the run recorded word confidence, a paragraph the
 engine itself scored mostly very low. The **Fix a section** card shows
 how many were found and a **Jump to next** button that selects the
-flagged run ready to re-transcribe. Ordinary courtroom repetition
+flagged run ready to re-transcribe. Ordinary conversational repetition
 ("Yes. Yes.", "Thank you. Thank you.") is deliberately left alone.
 
 **Fix a section (re-transcribing part of a recording).** When a

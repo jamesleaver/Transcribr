@@ -291,7 +291,7 @@ function PromptCard() {
               className={`${inputCls} min-h-[38px] w-full resize-y`}
               rows={1}
               value={prompt}
-              placeholder="e.g. Macklebum, Bloggs, Mount Druitt, AVO, ICAC, DVEC"
+              placeholder="e.g. surnames, place names, acronyms and jargon the engine may not know"
               onChange={(e) => useApp.getState().updateSettings({ prompt: e.target.value })}
             />
             <span className="mt-1.5 block text-xs text-amber-600 dark:text-amber-500">
