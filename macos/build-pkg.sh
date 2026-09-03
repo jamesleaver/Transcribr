@@ -81,6 +81,28 @@ done
 
 TEAM_ID="${TRANSCRIBR_TEAM_ID:-}"
 NOTARY_PROFILE="${TRANSCRIBR_NOTARY_PROFILE:-transcribr-notary}"
+
+# How to authenticate to the notary service. An App Store Connect API
+# key is preferred: it is a file, so unlike a keychain profile it cannot
+# quietly disappear - which cost two build cycles - and it is the only
+# form that works unattended in CI.
+#
+#   export TRANSCRIBR_NOTARY_KEY=~/.appstoreconnect/private_keys/AuthKey_XXXX.p8
+#   export TRANSCRIBR_NOTARY_KEY_ID=XXXXXXXXXX
+#   export TRANSCRIBR_NOTARY_ISSUER=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#
+# Falls back to the keychain profile when those are unset.
+NOTARY_KEY="${TRANSCRIBR_NOTARY_KEY:-}"
+NOTARY_KEY_ID="${TRANSCRIBR_NOTARY_KEY_ID:-}"
+NOTARY_ISSUER="${TRANSCRIBR_NOTARY_ISSUER:-}"
+NOTARY_AUTH=()
+if [ -n "$NOTARY_KEY" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ]; then
+    [ -f "$NOTARY_KEY" ] || fail "TRANSCRIBR_NOTARY_KEY points at a file that does not exist: $NOTARY_KEY"
+    NOTARY_AUTH=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID"
+                 --issuer "$NOTARY_ISSUER")
+else
+    NOTARY_AUTH=(--keychain-profile "$NOTARY_PROFILE")
+fi
 SIGN_APP=""
 SIGN_PKG=""
 
@@ -278,12 +300,12 @@ if [ "$NOTARIZE" -eq 0 ]; then
 fi
 
 say "Uploading to Apple for notarisation (typically 2-15 minutes)..."
-if ! xcrun notarytool submit "$PKG" \
-        --keychain-profile "$NOTARY_PROFILE" --wait; then
+say "Authenticating with ${NOTARY_KEY:+an App Store Connect API key}${NOTARY_KEY:-the keychain profile \"$NOTARY_PROFILE\"}"
+if ! xcrun notarytool submit "$PKG" "${NOTARY_AUTH[@]}" --wait; then
     echo
     fail "Notarisation failed. Ask Apple what it disliked:
-  xcrun notarytool history --keychain-profile \"$NOTARY_PROFILE\"
-  xcrun notarytool log <submission-id> --keychain-profile \"$NOTARY_PROFILE\""
+  xcrun notarytool history ${NOTARY_AUTH[*]}
+  xcrun notarytool log <submission-id> ${NOTARY_AUTH[*]}"
 fi
 
 say "Stapling the ticket..."

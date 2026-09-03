@@ -64,7 +64,35 @@ You should see two lines — one `Developer ID Application: ...`, one
 parentheses. **Back these up** (Keychain Access → right-click → Export)
 somewhere safe; replacing a lost Developer ID certificate is tedious.
 
-### 4. Create an app-specific password for notarisation
+### 4. Credentials for notarisation
+
+Two options. **Prefer the API key** — the keychain profile vanished
+twice during the 0.9.14 release, costing a build cycle each time, and a
+file cannot do that. The key is also the only form that works
+unattended, if signing ever moves into CI.
+
+#### Option A — App Store Connect API key (recommended)
+
+1. [App Store Connect → Users and Access → Integrations → App Store Connect API](https://appstoreconnect.apple.com/access/integrations/api)
+2. Generate a key with the **Developer** role and download the `.p8`.
+   **You get one chance** — it cannot be downloaded again.
+3. Note the **Key ID** and the **Issuer ID** from that page.
+4. Put the file somewhere stable and point the build at it:
+
+```bash
+mkdir -p ~/.appstoreconnect/private_keys
+mv ~/Downloads/AuthKey_XXXXXXXXXX.p8 ~/.appstoreconnect/private_keys/
+cat >> ~/.zshrc <<'EOF'
+export TRANSCRIBR_NOTARY_KEY=~/.appstoreconnect/private_keys/AuthKey_XXXXXXXXXX.p8
+export TRANSCRIBR_NOTARY_KEY_ID=XXXXXXXXXX
+export TRANSCRIBR_NOTARY_ISSUER=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+EOF
+```
+
+Treat the `.p8` like a password: it authorises notarisation on your
+account. Do not commit it.
+
+#### Option B — app-specific password in the keychain
 
 Apple's notary service won't take your ordinary Apple ID password.
 
