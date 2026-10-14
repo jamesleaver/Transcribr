@@ -10,7 +10,7 @@ import type {
 import { useApp } from "./store";
 import { useRun } from "./runStore";
 import { useModels } from "./modelsStore";
-import { useReview, type ReviewPayload } from "./reviewStore";
+import { useReview, type ReviewGrew, type ReviewPayload } from "./reviewStore";
 import { useUpdate, type UpdateStatus } from "./updateStore";
 
 // Central registration of SSE event handlers -> store updates.
@@ -53,6 +53,10 @@ onEvent("review_opened", (d) => {
   const payload = (d as { review: ReviewPayload }).review;
   useReview.getState().openDoc(payload);
   useApp.getState().setView("review");
+});
+
+onEvent("review_grew", (d) => {
+  useReview.getState().growDoc(d as ReviewGrew);
 });
 
 onEvent("review_closed", () => {

@@ -1,0 +1,12 @@
+# What the test suite needs to run every test rather than skip some.
+#
+# Deliberately not the full runtime set: faster-whisper, sherpa-onnx and
+# pywebview are heavy (or need a display) and nothing under tests/ loads
+# a model or opens a window. numpy and av come in on their own here
+# because several tests exercise the decoding and dead-air paths that
+# would otherwise skip.
+python-docx
+reportlab
+bottle
+numpy
+av

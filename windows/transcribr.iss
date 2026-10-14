@@ -14,7 +14,7 @@
 #endif
 
 #define AppName      "Transcribr"
-#define AppPublisher "James Leaver"
+#define AppPublisher "Fisheggs Pty Ltd"
 #define AppURL       "https://github.com/jamesleaver/Transcribr"
 
 [Setup]
@@ -46,7 +46,10 @@ SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\icon.ico
 UninstallDisplayName={#AppName} {#AppVersion}
 WizardStyle=modern
-LicenseFile=..\LICENSE
+; The end-user licence agreement, written by build-exe.ps1 from
+; docs\licence\EULA.md. (LICENSE, the source licence, is installed
+; alongside but is not what a user agrees to.)
+LicenseFile=..\build\stage\EULA.txt
 
 ; The payload is mostly already-compressed wheels and DLLs; lzma2/max
 ; with a solid block still buys a lot on a tree this size.
@@ -69,13 +72,13 @@ Source: "..\build\stage\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdir
 ; pythonw.exe rather than python.exe so no console window flashes up.
 Name: "{group}\{#AppName}"; \
     Filename: "{app}\python\pythonw.exe"; \
-    Parameters: """{app}\transcribr.py"""; \
+    Parameters: "-m transcribr"; \
     WorkingDir: "{app}"; \
     IconFilename: "{app}\icon.ico"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; \
     Filename: "{app}\python\pythonw.exe"; \
-    Parameters: """{app}\transcribr.py"""; \
+    Parameters: "-m transcribr"; \
     WorkingDir: "{app}"; \
     IconFilename: "{app}\icon.ico"; \
     Tasks: desktopicon
@@ -91,7 +94,7 @@ Filename: "{app}\MicrosoftEdgeWebview2Setup.exe"; \
     Flags: waituntilterminated skipifdoesntexist runasoriginaluser
 
 Filename: "{app}\python\pythonw.exe"; \
-    Parameters: """{app}\transcribr.py"""; \
+    Parameters: "-m transcribr"; \
     WorkingDir: "{app}"; \
     Description: "Launch {#AppName}"; \
     Flags: nowait postinstall skipifsilent

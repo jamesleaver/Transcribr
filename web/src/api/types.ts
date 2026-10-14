@@ -1,27 +1,19 @@
-// Mirrors the JSON contracts served by transcribr.py. This file is the
-// single place both sides are reviewed against.
+// Mirrors the JSON contracts served by the transcribr package.
+//
+// The shapes Python already owns - Settings, Palette, ThemeSetting,
+// RunPhase - are generated from it into contract.generated.ts and
+// re-exported here, so a renamed settings key is a build error instead
+// of an undefined in the browser. Regenerate with:
+//
+//     python3 -m transcribr.contract > web/src/api/contract.generated.ts
+//
+// Everything below is assembled by a route handler rather than declared
+// in Python, so it is still reviewed by hand against the routes.
 
-export type ThemeSetting = "auto" | "light" | "dark";
+import type { Palette, RunPhase } from "./contract.generated";
 
-/** Transcript-semantic colours served from Python's _PALETTES. */
-export interface Palette {
-  text_bg: string;
-  text_fg: string;
-  insert: string;
-  speaker_fg: string;
-  timestamp_fg: string;
-  selected_bg: string;
-  editing_bg: string;
-  search_bg: string;
-  conf_low: string;
-  conf_med: string;
-  badge_fg: string;
-  speaker_colours: Record<string, string>; // "1".."9"
-  drop_bg: string;
-  drop_hover: string;
-  drop_border: string;
-  drop_fg: string;
-}
+export type { Palette, RunPhase, Settings, ThemeSetting } from "./contract.generated";
+export { SETTING_CHOICES } from "./contract.generated";
 
 /** One entry of the simplified three-choice model picker. */
 export interface ModelTier {
@@ -34,6 +26,18 @@ export interface ModelTier {
   recommended?: boolean;
 }
 
+/** A recording-type preset: what it sets, and why. */
+export interface Preset {
+  id: string;
+  label: string;
+  note: string;
+  model: string;
+  model_en: string;
+  gap: number;
+  num_speakers: number;
+  voice_breaks: boolean;
+}
+
 export interface Meta {
   version: string;
   about_text: string;
@@ -43,6 +47,7 @@ export interface Meta {
   engines: { key: string; name: string }[];
   models: string[];
   model_tiers: ModelTier[];
+  presets: Preset[];
   languages: [string, string | null][];
   palettes: { light: Palette; dark: Palette };
   ffmpeg: boolean;
@@ -54,46 +59,6 @@ export interface Meta {
   readme_available: boolean;
 }
 
-/** Same keys and value conventions as settings.json (shared with Tk). */
-export interface Settings {
-  engine: string;
-  model: string;
-  language: string;
-  task: "transcribe" | "translate";
-  output_format: "txt" | "docx" | "pdf";
-  /** Document title (heading). Never sent to the engine. */
-  title: string;
-  /** Optional initial_prompt / vocabulary hint. Opt-in; can backfire. */
-  prompt: string;
-  gap: number;
-  show_timestamp: boolean;
-  temperature: number;
-  beam_size: number;
-  best_of: number;
-  compression_ratio_threshold: number;
-  logprob_threshold: number;
-  no_speech_threshold: number;
-  condition_on_previous_text: boolean;
-  extra_json: boolean;
-  extra_srt: boolean;
-  extra_vtt: boolean;
-  extra_tsv: boolean;
-  theme: ThemeSetting;
-  show_details: boolean;
-  diarize: boolean;
-  num_speakers: number;
-  diarize_model: string;
-  diarize_threshold: number;
-  show_all_models: boolean;
-  /** Show the context/vocabulary priming field on the Transcribe page. */
-  show_prompt: boolean;
-  /** Show the experimental speaker-detection card on the Transcribe page. */
-  show_diarize: boolean;
-  check_updates: boolean;
-  /** Word-level timing & confidence highlighting: auto | on | off. */
-  word_timestamps: "auto" | "on" | "off";
-}
-
 export interface RecentItem {
   path: string;
   name: string;
@@ -102,18 +67,15 @@ export interface RecentItem {
   verified: boolean;
 }
 
-export type RunPhase =
-  | "idle"
-  | "running"
-  | "stopping"
-  | "done"
-  | "error"
-  | "cancelled";
-
 export type ProgressStage =
   | "downloading"
   | "loading"
-  | "transcribing";
+  | "transcribing"
+  // The repair pass re-reading the sections that looked like engine
+  // error. Sent by _run_repair; it was missing here until 0.9.16.
+  | "retranscribing"
+  // Speaker detection, which runs alongside the transcription now.
+  | "diarizing";
 
 export interface Progress {
   pct: number;

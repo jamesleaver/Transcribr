@@ -30,9 +30,9 @@ function Die ($m) { Write-Host "Error: $m" -ForegroundColor Red; exit 1 }
 
 # ---- version ---------------------------------------------------------------
 
-$versionLine = Select-String -Path "transcribr.py" -Pattern '^__version__ = "(.*)"' |
+$versionLine = Select-String -Path "transcribr\version.py" -Pattern '^__version__ = "(.*)"' |
     Select-Object -First 1
-if (-not $versionLine) { Die "Couldn't read __version__ from transcribr.py" }
+if (-not $versionLine) { Die "Couldn't read __version__ from transcribr\version.py" }
 $Version = $versionLine.Matches[0].Groups[1].Value
 Say "Building Transcribr $Version"
 
@@ -48,9 +48,21 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 # ---- fetch a relocatable CPython -------------------------------------------
 
 Say "Resolving a standalone CPython $PythonVersion build..."
-$release = Invoke-RestMethod `
-    -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest" `
-    -Headers @{ "User-Agent" = "Transcribr-build" }
+# GitHub allows unauthenticated callers 60 API requests an hour per IP,
+# which a shared CI runner can have spent already - so send a token when
+# one is in the environment (the workflow passes its own).
+$ApiHeaders = @{ "User-Agent" = "Transcribr-build" }
+$Token = $env:GITHUB_TOKEN
+if (-not $Token) { $Token = $env:GH_TOKEN }
+if ($Token) { $ApiHeaders["Authorization"] = "Bearer $Token" }
+try {
+    $release = Invoke-RestMethod `
+        -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest" `
+        -Headers $ApiHeaders
+} catch {
+    Die ("Could not ask GitHub for a CPython build: $_" + [Environment]::NewLine +
+         "If this says 'rate limit', set GITHUB_TOKEN and run it again.")
+}
 
 # install_only_stripped: no debug symbols, which is most of the size.
 $pattern = "cpython-$([regex]::Escape($PythonVersion))\.\d+\+\d+-x86_64-pc-windows-msvc-install_only_stripped\.tar\.gz$"
@@ -83,13 +95,41 @@ Say "Installing application libraries and the faster-whisper engine..."
 & $Py -m pip install --upgrade pip --quiet
 if ($LASTEXITCODE -ne 0) { Die "Could not bootstrap pip in the bundled runtime" }
 
+# PyAV first, from the LGPL audio-only wheel windows/build-av-wheel.sh
+# builds (the "Build LGPL PyAV wheel" workflow), so faster-whisper finds
+# it satisfied and never pulls the stock wheel, whose FFmpeg carries the
+# GPL x264/x265 encoders.
+$AvVersion = if ($env:AV_VERSION) { $env:AV_VERSION } else { "19.0.0" }
+if ($env:AV_WHEELS) {
+    & $Py -m pip install --no-warn-script-location --quiet --no-index `
+        --find-links $env:AV_WHEELS "av==$AvVersion"
+    if ($LASTEXITCODE -ne 0) { Die "No LGPL PyAV $AvVersion wheel in $env:AV_WHEELS" }
+    Say "PyAV: the LGPL build from $env:AV_WHEELS"
+} elseif ($env:ALLOW_GPL_FFMPEG -eq "1") {
+    Say "WARNING: no LGPL PyAV wheel given; using the stock (GPL) one."
+} else {
+    Die "Set AV_WHEELS to the folder holding the LGPL PyAV wheel, or ALLOW_GPL_FFMPEG=1 for a test build"
+}
+
 & $Py -m pip install --no-warn-script-location --quiet `
     faster-whisper sherpa-onnx python-docx reportlab pywebview bottle
 if ($LASTEXITCODE -ne 0) { Die "Dependency install failed" }
+if ($env:ALLOW_GPL_FFMPEG -ne "1") {
+    & $Py -c "import av, sys; sys.exit(bool({'libx264', 'libx265'} & set(av.codecs_available)))"
+    if ($LASTEXITCODE -ne 0) { Die "The bundled FFmpeg has GPL encoders; something replaced the LGPL wheel" }
+}
 
 Say "Verifying the bundled engine imports..."
 & $Py -c "import faster_whisper, bottle, webview, docx, reportlab; print('imports ok')"
 if ($LASTEXITCODE -ne 0) { Die "The bundled runtime cannot import its own dependencies" }
+
+# Notices for exactly what was installed, read from each package's own
+# metadata.
+# The script writes the file itself, as UTF-8: piping it through the
+# console fails on Windows, whose default encoding cannot represent the
+# typographic characters in some licence texts.
+& $Py -m transcribr.notices (Join-Path $StageDir "THIRD-PARTY-NOTICES.txt")
+if ($LASTEXITCODE -ne 0) { Die "Could not write THIRD-PARTY-NOTICES.txt" }
 
 # ---- WebView2 bootstrapper --------------------------------------------------
 #
@@ -111,10 +151,14 @@ try {
 # ---- application files ------------------------------------------------------
 
 Say "Copying the application..."
-Copy-Item "transcribr.py" -Destination $StageDir
+Copy-Item "transcribr" -Destination $StageDir -Recurse
 Copy-Item "webdist" -Destination $StageDir -Recurse
 Copy-Item "windows\icon.ico" -Destination $StageDir
 Copy-Item "README.md", "LICENSE" -Destination $StageDir
+# The installer's licence page (transcribr.iss) shows the EULA, made from
+# docs\licence\EULA.md so it cannot drift from it.
+& $Py tools\eula_text.py (Join-Path $StageDir "EULA.txt")
+if ($LASTEXITCODE -ne 0) { Die "Could not write the EULA for the installer" }
 
 # ---- prune ------------------------------------------------------------------
 #

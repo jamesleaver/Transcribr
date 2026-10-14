@@ -1,0 +1,57 @@
+name: Tests
+
+# The suite is standard-library only and takes well under a second, so
+# it runs on every push and pull request, on both platforms Transcribr
+# ships to. build-installers.yml calls this workflow first, which is
+# what stops a release being cut on a red suite.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # a Windows-only break should still show macOS
+      matrix:
+        os: [macos-latest, windows-latest]
+        python: ["3.12"]        # the version both signed packages bundle
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install what the suite needs
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tests/requirements.txt
+
+      # Any test that skips here is a test that is not protecting
+      # anything, so the run reports them rather than hiding them.
+      - name: Run the suite
+        run: python -m unittest discover -s tests -v
+
+      # types.ts re-exports shapes generated from Python. The suite
+      # fails when the checked-in file is stale; this proves the
+      # front-end still type-checks against it.
+      - name: Type-check the front-end against the generated contract
+        run: |
+          python -m transcribr.contract web/src/api/contract.generated.ts
+          git diff --exit-code web/src/api/contract.generated.ts
+
+      - name: Check the module imports with nothing else installed
+        shell: bash
+        run: |
+          python -m venv .bare-venv
+          PY=.bare-venv/bin/python
+          [ -x "$PY" ] || PY=.bare-venv/Scripts/python.exe
+          "$PY" -c "import transcribr; print('bare import OK', transcribr.__version__)"

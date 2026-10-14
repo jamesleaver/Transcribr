@@ -10,7 +10,7 @@ set -uo pipefail
 
 APP_SUPPORT="$HOME/Library/Application Support/Transcribr"
 VENV="$APP_SUPPORT/venv"
-SCRIPT="$APP_SUPPORT/transcribr.py"
+PKG="$APP_SUPPORT/transcribr"
 
 # Make Homebrew binaries (especially ffmpeg) visible to the GUI process.
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
@@ -18,7 +18,7 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin
 # Missing pieces mean this macOS user hasn't been set up yet (or the
 # folder was deleted) - either way the remedy is running the installer
 # while logged in as this user.
-if [ ! -f "$VENV/bin/activate" ] || [ ! -f "$SCRIPT" ]; then
+if [ ! -f "$VENV/bin/activate" ] || [ ! -f "$PKG/__main__.py" ]; then
     /usr/bin/osascript -e "display alert \"Transcribr\" message \"Transcribr isn't set up for this macOS user yet.\\n\\nRun the Transcribr installer while logged in as this user to finish setup.\\n\\nIt installs into:\\n$APP_SUPPORT\" as critical"
     exit 1
 fi
@@ -35,6 +35,8 @@ LOG="$LOG_DIR/launch.log"
 {
     echo "==== $(date) ===="
     # "$@" lets `open -a Transcribr --args --annotate` reach the app.
-    "$VENV/bin/python" "$SCRIPT" "$@"
+    # -m needs the package's parent on the path; Finder starts us at "/".
+    PYTHONPATH="$APP_SUPPORT${PYTHONPATH:+:$PYTHONPATH}" \
+        "$VENV/bin/python" -m transcribr "$@"
     echo "GUI exited with status $?"
 } >> "$LOG" 2>&1

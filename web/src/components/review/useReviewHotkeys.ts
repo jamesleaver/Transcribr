@@ -23,6 +23,9 @@ export function useReviewHotkeys(): void {
     const onKey = (e: KeyboardEvent) => {
       const st = useReview.getState();
       if (!st.doc) return;
+      // A field that has already acted on this key (and may have closed
+      // itself, taking focus with it) has the last word.
+      if (e.defaultPrevented) return;
       const mod = e.metaKey || e.ctrlKey;
 
       if (mod && (e.key === "f" || e.key === "F")) {
@@ -71,6 +74,10 @@ export function useReviewHotkeys(): void {
         case "Delete": case "Backspace":
           e.preventDefault();
           void st.deleteParagraph(st.selected);
+          return;
+        case "u": case "U":
+          e.preventDefault();
+          st.nextUnsure(e.shiftKey ? -1 : 1);
           return;
         case "n": case "N":
           e.preventDefault();

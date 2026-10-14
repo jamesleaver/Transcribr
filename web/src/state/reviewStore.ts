@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { api, ApiError } from "../api/client";
 import { playSpan, stopPlayback, setPlaybackRate } from "../audio";
-import { choiceDialog, confirmDialog, errorDialog } from "./dialogs";
+import { alertDialog, choiceDialog, confirmDialog, errorDialog } from "./dialogs";
 import { useApp } from "./store";
 
 // The review workspace's state: a mirror of the server-side
@@ -31,6 +31,51 @@ export interface ReviewParagraph {
   locked: boolean;
   play: { start: number; end: number | null } | null;
   conf: [number, number, "low" | "med"][];
+  /** Passages offered as [indistinct]: [start, end] in body chars. */
+  unsure: [number, number][];
+  /** Accepted [indistinct] markers whose words are known: [start, end,
+   *  the words they replaced, ordinal among the paragraph's markers]. */
+  markers: [number, number, string, number][];
+  /** You wrote this text, so nothing automatic will replace it. */
+  mine: boolean;
+  /** You set this speaker, so detection will not override it. */
+  speaker_mine: boolean;
+  /** Final. The engine's provisional tail is not editable yet: it can
+   *  still be re-grouped as more of the recording is transcribed. */
+  sealed: boolean;
+  /** What the engine would rather this said, when it re-read a passage
+   *  you had already corrected. Yours stands until you take it. */
+  offer: { text: string; source: string } | null;
+}
+
+/** One `review_grew` event: the paragraphs from `from` to the end have
+ *  been replaced. The tail is re-sent each time because it can still
+ *  change shape; everything before `from` is final and untouched. */
+export interface QaRow {
+  /** "Q3" where a question begins, "A" where an answer does, "". */
+  mark: string;
+  /** The questioner's name, on the first question after a change. */
+  asker: string | null;
+  role: "Q" | "A" | null;
+}
+
+export interface QaLayout {
+  rows: QaRow[];
+  /** Speaker slots treated as asking. */
+  askers: string[];
+  /** True while the askers are suggested rather than chosen. */
+  auto: boolean;
+  method: "labels" | "wording" | "mixed";
+  note: string;
+}
+
+export interface ReviewGrew {
+  qa?: QaLayout | null;
+  rev: number;
+  from: number;
+  sealed_count: number;
+  total: number;
+  paragraphs: ReviewParagraph[];
 }
 
 export interface AudioStatus {
@@ -42,10 +87,22 @@ export interface AudioStatus {
 
 export interface ReviewPayload {
   rev: number;
+  /** True while the engine is still adding to this transcript. */
+  live: boolean;
+  /** How many paragraphs are final; the rest are the engine's tail. */
+  sealed_count: number;
   out_path: string;
   output_format: string;
   show_timestamp: boolean;
+  colour_speakers: boolean;
   title: string | null;
+  /** The model that made this transcript, if this session saw the run. */
+  run_model: string | null;
+  /** What a re-transcription defaults to: the other engine family. */
+  retrans_default: string;
+  /** How the pane shows the transcript, and how Save writes it. */
+  layout: "plain" | "qa";
+  qa: QaLayout | null;
   loaded: boolean;
   audio: AudioStatus;
   speaker_names: Record<string, string>;
@@ -70,32 +127,68 @@ interface SlimDelta {
   index?: number;
   speaker?: string | null;
   speaker_names?: Record<string, string>;
+  qa?: QaLayout | null;
 }
 
 export type SearchHit = { index: number; start: number; end: number } | null;
+
+export interface TermGroup {
+  term: string;
+  count: number;
+  variants: { term: string; count: number }[];
+}
 
 interface ReviewSlice {
   doc: ReviewPayload | null;
   selected: number;
   editing: number | null;
   editingDraft: string;
+  /** Where to put the caret when the edit box opens; null = the
+   *  browser's default. */
+  editingCaret: number | null;
   showConfidence: boolean;
   findTerm: string;
   replaceTerm: string;
   matchCase: boolean;
   findStatus: string;
   searchHit: SearchHit;
+  /** The [indistinct] offer being looked at, if any. */
+  unsureHit: { index: number; start: number; end: number; text: string } | null;
+  /** Step to the next (or previous) passage offered as [indistinct],
+   *  starting from the current one or the selected paragraph. */
+  nextUnsure: (dir?: 1 | -1) => void;
+  /** Accept the current offer, then move to the next. */
+  markUnsure: () => Promise<void>;
+  /** Keep the words as they are, then move to the next. */
+  keepUnsure: () => Promise<void>;
+  /** Put back the words an accepted [indistinct] replaced. */
+  restoreIndistinct: (index: number, ordinal: number, text: string) => Promise<void>;
 
+  /** Take the engine's alternative for a passage you had corrected. */
+  acceptOffer: (index: number) => Promise<void>;
+  /** Keep what is there and stop being asked. */
+  dismissOffer: (index: number) => Promise<void>;
   openDoc: (payload: ReviewPayload) => void;
+  /** Splice in newly transcribed paragraphs without disturbing
+   *  anything the reader may be editing further up. */
+  growDoc: (delta: ReviewGrew) => void;
   closeDoc: () => void;
   refetch: () => Promise<void>;
 
   select: (index: number) => void;
-  startEdit: (index: number) => void;
+  startEdit: (index: number, caret?: number) => void;
   cancelEdit: () => void;
   setEditingDraft: (value: string) => void;
   /** Commit the in-flight edit, if any (used before saves/clicks). */
   commitPendingEdit: () => Promise<void>;
+  /** Edit-mode Ctrl+Enter: split the paragraph being edited at the
+   *  caret and carry on editing the second half. */
+  editSplitAtCaret: (caret: number) => Promise<void>;
+  /** Edit-mode Ctrl+M: join the paragraph being edited onto the one
+   *  before, and carry on editing at the join. */
+  editJoinPrevious: () => Promise<void>;
+  /** Edit-mode Ctrl+Up/Down: settle this edit and open the next. */
+  editMove: (delta: -1 | 1) => Promise<void>;
   setShowConfidence: (value: boolean) => void;
   setFindTerm: (value: string) => void;
   setReplaceTerm: (value: string) => void;
@@ -106,6 +199,12 @@ interface ReviewSlice {
   playingThrough: boolean;
   /** Live playback position (seconds) while a paragraph plays. */
   playHeadSec: number | null;
+  /** Candidate names and terms, loaded on demand from the backend. */
+  terms: TermGroup[] | null;
+  termsLoading: boolean;
+  loadTerms: () => Promise<void>;
+  /** Rewrite every listed spelling as `to`, across the transcript. */
+  applyTerm: (variants: string[], to: string) => Promise<number>;
   /** Play at half speed (0.5x) when on. */
   halfSpeed: boolean;
   setHalfSpeed: (value: boolean) => void;
@@ -120,6 +219,8 @@ interface ReviewSlice {
   /** Review-pane saving options; null = keep what the run started with. */
   saveShowTimestamp: boolean | null;
   setSaveShowTimestamp: (value: boolean) => void;
+  saveColourSpeakers: boolean | null;
+  setSaveColourSpeakers: (value: boolean) => void;
   /** Certifier name for the "verified by" disclaimer; empty = unverified. */
   verifyName: string;
   /** Shift-click range selection for section-level actions. */
@@ -132,7 +233,7 @@ interface ReviewSlice {
     log: string;
   };
   setVerifyName: (value: string) => void;
-  exportAs: (fmt: "pdf") => Promise<void>;
+  exportAs: (fmt: "pdf" | "qa") => Promise<void>;
 
   needsAttention: (index: number) => boolean;
   jumpNextAttention: () => void;
@@ -142,7 +243,15 @@ interface ReviewSlice {
   setTimestamp: (index: number, value: "hidden" | number | null) => Promise<void>;
   selectRangeTo: (index: number) => void;
   jumpNextSuspect: () => void;
-  retranscribe: (model: string, condition: boolean) => Promise<void>;
+  /** The Fix-a-section choices, shared by the rail card and the
+   *  paragraph context menu. null = the document's suggested
+   *  re-run model; "" = the current setting. */
+  retransModel: string | null;
+  retransCondition: boolean;
+  setRetransModel: (value: string | null) => void;
+  setRetransCondition: (value: boolean) => void;
+  /** model null = the document's suggested re-run model. */
+  retranscribe: (model: string | null, condition: boolean) => Promise<void>;
   cancelRetranscribe: () => Promise<void>;
   applyRetrans: (d: {
     state: string;
@@ -152,6 +261,11 @@ interface ReviewSlice {
     log_delta?: string;
   }) => void;
   setSpeakerName: (slot: string, name: string) => Promise<void>;
+  /** The saved document's heading; "" removes it. */
+  setTitle: (title: string) => Promise<void>;
+  setLayout: (layout: "plain" | "qa") => Promise<void>;
+  /** Speaker slots who ask the questions; null = suggest them. */
+  setAskers: (askers: string[] | null) => Promise<void>;
   addSpeaker: () => Promise<void>;
   commitEdit: (index: number, text: string) => Promise<void>;
   split: (index: number, offset: number) => Promise<void>;
@@ -234,7 +348,7 @@ function startPlayback(
 }
 
 /** After a save/export: open the file, show it in the folder, or move
- *  on - James's post-save flow of choice. */
+ *  on - the preferred post-save flow. */
 async function offerOpenOrReveal(
   title: string,
   body: string,
@@ -255,23 +369,88 @@ async function mutateApi(
 ): Promise<ReviewPayload | SlimDelta | null> {
   const doc = useReview.getState().doc;
   if (!doc) return null;
-  try {
-    return await api.post<ReviewPayload | SlimDelta>(`/api/review/${action}`, {
-      rev: doc.rev,
+  const send = (rev: number) =>
+    api.post<ReviewPayload | SlimDelta>(`/api/review/${action}`, {
+      rev,
       ...body,
     });
+  try {
+    return await send(doc.rev);
   } catch (err) {
-    if (
-      err instanceof ApiError &&
-      (err.code === "stale_rev" || err.code === "locked")
-    ) {
-      // The doc moved under us, or the paragraph is mid re-transcription
-      // — resync and drop this edit rather than erroring.
+    if (!(err instanceof ApiError)) throw err;
+    if (err.code === "stale_rev") {
+      // Something really did change underneath this edit. Resync and
+      // put it through once more against what is there now — dropping
+      // it silently, as this used to, meant a correction the reviewer
+      // had typed simply vanished with nothing said.
       await useReview.getState().refetch();
+      const fresh = useReview.getState().doc;
+      if (!fresh) return null;
+      try {
+        return await send(fresh.rev);
+      } catch (again) {
+        if (!(again instanceof ApiError)) throw again;
+        await useReview.getState().refetch();
+        void alertDialog(
+          "That change didn't go through",
+          "The transcript changed while you were typing, so the edit " +
+            "was not applied. What you typed is not saved — have " +
+            "another go.",
+        );
+        return null;
+      }
+    }
+    if (err.code === "locked") {
+      // A section is mid re-transcription; the server says which and
+      // why. Resync so the pane shows it as locked.
+      await useReview.getState().refetch();
+      void alertDialog("Not just now", err.message);
       return null;
     }
     throw err;
   }
+}
+
+/** mutateApi, with the refusals it leaves to the caller (a paragraph
+ *  not yet sealed, say) shown rather than thrown. */
+async function tryMutate(
+  action: string,
+  body: Record<string, unknown>,
+): Promise<ReviewPayload | SlimDelta | null> {
+  try {
+    return await mutateApi(action, body);
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err;
+    await useReview.getState().refetch();
+    void alertDialog("Not just now", err.message);
+    return null;
+  }
+}
+
+function editable(p: ReviewParagraph | undefined): boolean {
+  return !!p && p.sealed && !p.locked;
+}
+
+// One edit-mode keyboard action at a time: each is a round trip or
+// two, and a second keypress landing mid-way would act on indices the
+// first is about to change.
+let editBusy = false;
+
+/** Close the edit box, sending the text only if it changed. Sending
+ *  unchanged text is not harmless: the server collapses the paragraph
+ *  to one segment, which costs a later split its word timings.
+ *  Returns false if the edit was refused. */
+async function settleEdit(): Promise<boolean> {
+  const s = useReview.getState();
+  const idx = s.editing;
+  if (idx === null) return true;
+  const text = s.editingDraft.trim();
+  const para = s.doc?.paragraphs[idx];
+  useReview.setState({ editing: null, editingDraft: "" });
+  if (!para || !text || text === para.body) return true;
+  const r = await tryMutate("edit", { index: idx, text });
+  applyResult(r);
+  return r !== null;
 }
 
 function isFull(r: ReviewPayload | SlimDelta): r is ReviewPayload {
@@ -288,6 +467,7 @@ function applyResult(r: ReviewPayload | SlimDelta | null): void {
     const doc = { ...s.doc, rev: r.rev, labelled: r.labelled, total: r.total,
       visible_speakers: r.visible_speakers };
     if (r.speaker_names) doc.speaker_names = r.speaker_names;
+    if (r.qa !== undefined) doc.qa = r.qa;
     if (r.index !== undefined && r.speaker !== undefined) {
       doc.paragraphs = doc.paragraphs.map((p, i) =>
         i === r.index ? { ...p, speaker: r.speaker ?? null } : p,
@@ -302,12 +482,40 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   selected: 0,
   editing: null,
   editingDraft: "",
+  editingCaret: null,
   showConfidence: true,
   findTerm: "",
   replaceTerm: "",
   matchCase: false,
   findStatus: "",
   searchHit: null,
+  unsureHit: null,
+
+  acceptOffer: async (index) => {
+    applyResult(await mutateApi("accept-offer", { index }));
+  },
+
+  dismissOffer: async (index) => {
+    applyResult(await mutateApi("dismiss-offer", { index }));
+  },
+
+  growDoc: (delta) =>
+    set((s) => {
+      if (!s.doc) return {};
+      // Everything before `from` is sealed and may be mid-edit, so it
+      // is kept exactly as it is; only the tail is replaced.
+      const kept = s.doc.paragraphs.slice(0, delta.from);
+      return {
+        doc: {
+          ...s.doc,
+          rev: delta.rev,
+          sealed_count: delta.sealed_count,
+          total: delta.total,
+          paragraphs: [...kept, ...delta.paragraphs],
+          ...(delta.qa !== undefined ? { qa: delta.qa } : {}),
+        },
+      };
+    }),
 
   openDoc: (payload) =>
     set({
@@ -316,8 +524,10 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       editing: null,
       findStatus: "",
       searchHit: null,
+  unsureHit: null,
       showConfidence: payload.has_word_conf,
       saveShowTimestamp: null,
+      saveColourSpeakers: null,
       verifyName: payload.verified_by ?? "",
       selRange: null,
       retrans: RETRANS_IDLE,
@@ -335,11 +545,17 @@ export const useReview = create<ReviewSlice>((set, get) => ({
 
   saveShowTimestamp: null,
   setSaveShowTimestamp: (value) => set({ saveShowTimestamp: value }),
+  saveColourSpeakers: null,
+  setSaveColourSpeakers: (value) => set({ saveColourSpeakers: value }),
   verifyName: "",
   setVerifyName: (value) => set({ verifyName: value }),
 
   selRange: null,
   retrans: RETRANS_IDLE,
+  retransModel: null,
+  retransCondition: false,
+  setRetransModel: (value) => set({ retransModel: value }),
+  setRetransCondition: (value) => set({ retransCondition: value }),
 
   selectRangeTo: (index) =>
     set((s) => {
@@ -361,6 +577,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     const s = get();
     const doc = s.doc;
     if (!doc || s.retrans.running) return;
+    if (model === null) model = doc.retrans_default ?? "";
     const range = s.selRange ?? { from: s.selected, to: s.selected };
     try {
       set({
@@ -434,15 +651,22 @@ export const useReview = create<ReviewSlice>((set, get) => ({
         "/api/review/export",
         {
           rev: doc.rev,
-          format: fmt,
+          // "qa": the numbered question-and-answer layout, as Word.
+          format: fmt === "qa" ? "docx" : fmt,
+          ...(fmt === "qa" ? { layout: "qa" } : {}),
           ...(s.saveShowTimestamp !== null
             ? { show_timestamp: s.saveShowTimestamp }
+            : {}),
+          ...(s.saveColourSpeakers !== null
+            ? { colour_speakers: s.saveColourSpeakers }
             : {}),
           verified_by: s.verifyName,
         },
       );
       void offerOpenOrReveal("Exported",
-        `Written to:\n${res.out_path}\n\nThe review stays open.`,
+        fmt === "qa"
+          ? `Written to:\n${res.out_path}\n\nQuestions are numbered and answers marked A. The first lines say how each was decided — check any placed from the wording against the recording.\n\nThe review stays open.`
+          : `Written to:\n${res.out_path}\n\nThe review stays open.`,
         res.out_path);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -524,6 +748,33 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     startPlayback(index, { start: startSec, end: null }, true);
   },
 
+  terms: null,
+  termsLoading: false,
+
+  loadTerms: async () => {
+    set({ termsLoading: true });
+    try {
+      const res = await api.get<{ terms: TermGroup[] }>("/api/review/terms");
+      set({ terms: res.terms, termsLoading: false });
+    } catch {
+      set({ terms: [], termsLoading: false });
+    }
+  },
+
+  applyTerm: async (variants, to) => {
+    const doc = get().doc;
+    if (!doc) return 0;
+    const res = await api.post<ReviewPayload & { count: number }>(
+      "/api/review/term",
+      { rev: doc.rev, variants, to },
+    );
+    get().openDoc(res);
+    // The list is derived from the text, so it is stale the moment the
+    // text changes.
+    void get().loadTerms();
+    return res.count;
+  },
+
   halfSpeed: false,
   setHalfSpeed: (value) => {
     setPlaybackRate(value ? 0.5 : 1);
@@ -533,11 +784,22 @@ export const useReview = create<ReviewSlice>((set, get) => ({
   refetch: async () => {
     try {
       const payload = await api.get<ReviewPayload>("/api/review");
-      set((s) => ({
-        doc: payload,
-        selected: clamp(s.selected, payload.paragraphs.length),
-        editing: null,
-      }));
+      set((s) => {
+        // Keep an open edit box if the same paragraph is still there.
+        // The server's own change notice can arrive before the reply
+        // to a split or join, and the refetch it prompts would
+        // otherwise shut the box the reply has just opened.
+        const editId =
+          s.editing !== null ? s.doc?.paragraphs[s.editing]?.id : undefined;
+        const keep =
+          editId !== undefined
+          && payload.paragraphs[s.editing as number]?.id === editId;
+        return {
+          doc: payload,
+          selected: clamp(s.selected, payload.paragraphs.length),
+          ...(keep ? {} : { editing: null }),
+        };
+      });
     } catch (err) {
       if (err instanceof ApiError && err.code === "no_review") {
         get().closeDoc();
@@ -551,14 +813,16 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       selRange: null,
     })),
 
-  startEdit: (index) =>
+  startEdit: (index, caret) =>
     set((s) => {
       // Can't edit a paragraph that is being re-transcribed.
       if (s.doc?.paragraphs[index]?.locked) return {};
       return {
         editing: index,
         editingDraft: s.doc?.paragraphs[index]?.body ?? "",
+        editingCaret: caret ?? null,
         selected: index,
+        selRange: null,
       };
     }),
 
@@ -570,6 +834,64 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     const s = get();
     if (s.editing === null) return;
     await s.commitEdit(s.editing, s.editingDraft);
+  },
+
+  editSplitAtCaret: async (caret) => {
+    const s = get();
+    const idx = s.editing;
+    if (idx === null || editBusy) return;
+    // The server trims the text it is given; index into that.
+    const draft = s.editingDraft;
+    const lead = draft.length - draft.trimStart().length;
+    const text = draft.trim();
+    const off = Math.min(Math.max(caret - lead, 0), text.length);
+    // At either end there is nothing to split off.
+    if (off <= 0 || off >= text.length) return;
+    editBusy = true;
+    try {
+      if (!(await settleEdit())) return;
+      const r = await tryMutate("split", { index: idx, offset: off });
+      applyResult(r);
+      if (r && isFull(r) && r.new_index != null) {
+        get().startEdit(r.new_index, 0);
+      }
+    } finally {
+      editBusy = false;
+    }
+  },
+
+  editJoinPrevious: async () => {
+    const s = get();
+    const idx = s.editing;
+    if (idx === null || idx <= 0 || editBusy) return;
+    if (!editable(s.doc?.paragraphs[idx - 1])) return;
+    editBusy = true;
+    try {
+      if (!(await settleEdit())) return;
+      const prev = get().doc?.paragraphs[idx - 1];
+      if (!prev) return;
+      const r = await tryMutate("merge", { index: idx });
+      applyResult(r);
+      // The two bodies are joined with a space; land after it.
+      if (r) get().startEdit(idx - 1, prev.body.length + 1);
+    } finally {
+      editBusy = false;
+    }
+  },
+
+  editMove: async (delta) => {
+    const s = get();
+    const idx = s.editing;
+    if (idx === null || editBusy) return;
+    const target = idx + delta;
+    if (!editable(s.doc?.paragraphs[target])) return;
+    editBusy = true;
+    try {
+      if (!(await settleEdit())) return;
+      get().startEdit(target, 0);
+    } finally {
+      editBusy = false;
+    }
   },
 
   setShowConfidence: (value) => set({ showConfidence: value }),
@@ -598,6 +920,51 @@ export const useReview = create<ReviewSlice>((set, get) => ({
         return;
       }
     }
+  },
+
+  nextUnsure: (dir = 1) => {
+    const s = get();
+    const paras = s.doc?.paragraphs ?? [];
+    const hit = s.unsureHit;
+    const all: { index: number; start: number; end: number; text: string }[] = [];
+    paras.forEach((p, i) =>
+      (p.unsure ?? []).forEach(([a, b]) =>
+        all.push({ index: i, start: a, end: b, text: p.body.slice(a, b) })));
+    if (all.length === 0) {
+      set({ unsureHit: null });
+      return;
+    }
+    const at = hit ?? { index: s.selected, start: dir > 0 ? -1 : Infinity };
+    const after = (x: { index: number; start: number }) =>
+      x.index > at.index || (x.index === at.index && x.start > at.start);
+    const before = (x: { index: number; start: number }) =>
+      x.index < at.index || (x.index === at.index && x.start < at.start);
+    const next = dir > 0
+      ? (all.find(after) ?? all[0])
+      : ([...all].reverse().find(before) ?? all[all.length - 1]);
+    set({ unsureHit: next, selected: next.index, selRange: null });
+  },
+
+  markUnsure: async () => {
+    const hit = get().unsureHit;
+    if (!hit) return;
+    const r = await tryMutate("indistinct", hit);
+    applyResult(r);
+    // The marker starts where the passage did, so the next offer is
+    // the first one after that point.
+    if (r) get().nextUnsure(1);
+  },
+
+  restoreIndistinct: async (index, ordinal, text) => {
+    applyResult(await tryMutate("indistinct-restore", { index, ordinal, text }));
+  },
+
+  keepUnsure: async () => {
+    const hit = get().unsureHit;
+    if (!hit) return;
+    const r = await tryMutate("indistinct-keep", hit);
+    applyResult(r);
+    if (r) get().nextUnsure(1);
   },
 
   jumpNextSuspect: () => {
@@ -671,6 +1038,18 @@ export const useReview = create<ReviewSlice>((set, get) => ({
     set((s) => ({ selected: clamp(index + 1, s.doc?.paragraphs.length ?? 0) }));
   },
 
+  setTitle: async (title) => {
+    applyResult(await tryMutate("title", { title }));
+  },
+
+  setLayout: async (layout) => {
+    applyResult(await tryMutate("layout", { layout }));
+  },
+
+  setAskers: async (askers) => {
+    applyResult(await tryMutate("askers", { askers }));
+  },
+
   setSpeakerName: async (slot, name) => {
     applyResult(await mutateApi("speaker-name", { slot, name }));
   },
@@ -724,6 +1103,7 @@ export const useReview = create<ReviewSlice>((set, get) => ({
       set({
         findStatus: r.count ? `Replaced ${r.count}` : "No matches",
         searchHit: null,
+  unsureHit: null,
       });
     }
   },
@@ -753,11 +1133,20 @@ export const useReview = create<ReviewSlice>((set, get) => ({
         ...(s.saveShowTimestamp !== null
           ? { show_timestamp: s.saveShowTimestamp }
           : {}),
+        ...(s.saveColourSpeakers !== null
+          ? { colour_speakers: s.saveColourSpeakers }
+          : {}),
         verified_by: s.verifyName,
       });
+      // A choice made at the save dialog becomes the new default, the
+      // same way the timestamp toggle already does.
       if (s.saveShowTimestamp !== null)
         useApp.getState().updateSettings({
           show_timestamp: s.saveShowTimestamp,
+        });
+      if (s.saveColourSpeakers !== null)
+        useApp.getState().updateSettings({
+          colour_speakers: s.saveColourSpeakers,
         });
       get().closeDoc();
       useApp.getState().setView("transcribe");

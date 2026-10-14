@@ -1,0 +1,65 @@
+name: Build LGPL PyAV wheel (Windows)
+
+# The Windows twin of macos/build-av-wheel.sh: an LGPL, audio-only
+# FFmpeg built with MSVC, PyAV compiled against it, checked, and
+# uploaded as an artifact. Run by hand from the Actions tab; the Mac
+# wheels are built on the build Mac, since Apple Silicon and Intel can
+# both be built there.
+
+on:
+  workflow_dispatch:
+  # build-installers.yml calls this first and installs what it uploads.
+  workflow_call:
+  # A manual run is only offered for workflows on the default branch,
+  # and work happens on licence-audit; so it also runs whenever its own
+  # build files change.
+  push:
+    paths:
+      - windows/build-av-wheel.sh
+      - tools/check_av_wheel.py
+      - .github/workflows/build-av-wheel.yml
+
+jobs:
+  wheel:
+    name: av wheel, win_amd64
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same series the Windows installer bundles (build-exe.ps1).
+      - uses: actions/setup-python@v6
+        id: py
+        with:
+          python-version: "3.12"
+
+      # cl.exe, link.exe and nmake on PATH for FFmpeg's msvc toolchain.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          update: false
+          install: make diffutils tar xz unzip nasm
+
+      - name: Build and check
+        shell: msys2 {0}
+        env:
+          PY: ${{ steps.py.outputs.python-path }}
+        run: |
+          # MSYS2's own link.exe would shadow MSVC's.
+          rm -f /usr/bin/link.exe
+          PY="$(cygpath -u "$PY")" OUT=/c/avbuild windows/build-av-wheel.sh
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: av-wheel-win_amd64
+          path: |
+            C:/avbuild/wheels/*.whl
+            C:/avbuild/*.log
+          if-no-files-found: warn

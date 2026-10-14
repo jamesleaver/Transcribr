@@ -30,3 +30,14 @@ web/dist/
 *.log
 *.tmp
 .claude/launch.json
+.bare-venv/
+
+# Tool working data: downloads, caches and results stay local
+tools/*/data/
+tools/*/cache/
+tools/*/clips/
+tools/*/results/
+tools/*/raw/
+tools/*/iso/
+tools/*/scores_*.json
+tools/*/OVERNIGHT_DONE

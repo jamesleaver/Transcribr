@@ -80,8 +80,8 @@ if ! confirm "Continue?"; then
 fi
 
 # Verify the files we need are alongside the installer.
-[ -e "$SHARED_DIR/transcribr.py" ] || \
-    fail "Missing file: ../transcribr.py (expected one folder up)"
+[ -e "$SHARED_DIR/transcribr/__main__.py" ] || \
+    fail "Missing directory: ../transcribr/ (expected one folder up)"
 for f in app_template/launcher app_template/Info.plist; do
     [ -e "$INSTALLER_DIR/$f" ] || fail "Missing file: $f (expected next to install.command)"
 done
@@ -261,8 +261,9 @@ fi
 
 step "Step 5/6: Application files"
 
-cp "$SHARED_DIR/transcribr.py" "$APP_SUPPORT/transcribr.py"
-ok "Copied transcribr.py to $APP_SUPPORT"
+rm -rf "$APP_SUPPORT/transcribr"
+cp -R "$SHARED_DIR/transcribr" "$APP_SUPPORT/transcribr"
+ok "Copied the transcribr package to $APP_SUPPORT"
 
 # The built web interface. Shipped pre-built in webdist/ - end users
 # never need Node.
@@ -317,7 +318,7 @@ chmod +x "$APP/Contents/MacOS/launcher"
 # it used to hold a hard-coded 0.8.1, which is what /Applications
 # reported no matter which version was actually installed.
 APP_VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' \
-    "$SHARED_DIR/transcribr.py" | head -1)
+    "$SHARED_DIR/transcribr/version.py" | head -1)
 [ -n "$APP_VERSION" ] || APP_VERSION="0.0.0"
 sed "s/__VERSION__/$APP_VERSION/g" \
     "$INSTALLER_DIR/app_template/Info.plist" > "$APP/Contents/Info.plist"

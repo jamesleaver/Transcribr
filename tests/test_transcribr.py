@@ -16,6 +16,8 @@ is redirected to a temporary directory for the duration of the run, so
 the suite never touches the real user configuration.
 """
 
+import os
+import re
 import sys
 import tempfile
 import unittest
@@ -23,6 +25,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _harness  # noqa: F401  (redirects the config dir; must precede transcribr)
 
 try:
     import transcribr as T
@@ -30,21 +35,6 @@ except ImportError as e:  # e.g. no tkinter in this interpreter
     raise unittest.SkipTest(
         f"cannot import transcribr in this interpreter: {e}")
 
-_real_config_dir = T._config_dir
-_tmp_config = None
-
-
-def setUpModule():
-    """Redirect the config dir to a throwaway temp directory."""
-    global _tmp_config
-    _tmp_config = tempfile.TemporaryDirectory(prefix="transcribr-tests-")
-    T._config_dir = lambda: Path(_tmp_config.name)
-
-
-def tearDownModule():
-    T._config_dir = _real_config_dir
-    if _tmp_config is not None:
-        _tmp_config.cleanup()
 
 
 # =====================================================================
@@ -298,8 +288,12 @@ class TestVoiceModelRegistry(unittest.TestCase):
         merged = T.validate_settings({"diarize_model": "bogus"})
         self.assertEqual(merged["diarize_model"],
                          T.DIARIZE_DEFAULT_VOICE_MODEL)
+        merged = T.validate_settings({"diarize_model": "wespeaker"})
+        self.assertEqual(merged["diarize_model"], "wespeaker")
+        # CAM++ was withdrawn; a stored choice of it must not survive.
         merged = T.validate_settings({"diarize_model": "campplus"})
-        self.assertEqual(merged["diarize_model"], "campplus")
+        self.assertEqual(merged["diarize_model"],
+                         T.DIARIZE_DEFAULT_VOICE_MODEL)
 
 
 class TestDiarizeModelDownload(unittest.TestCase):
@@ -435,7 +429,7 @@ class TestPyAvAudio(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             wav = Path(d) / "tone.wav"
             self._make_wav(wav, seconds=1.0)
-            audio = T.decode_audio_16k(wav)
+            audio = T.audioprep.decode_audio_16k(wav)
             self.assertIsNotNone(audio)
             self.assertEqual(str(audio.dtype), "float32")
             self.assertAlmostEqual(
@@ -451,7 +445,7 @@ class TestPyAvAudio(unittest.TestCase):
             self.assertAlmostEqual(duration, 2.0, delta=0.1)
 
     def test_decode_missing_file_returns_none(self):
-        self.assertIsNone(T.decode_audio_16k("/nonexistent/audio.mp3"))
+        self.assertIsNone(T.audioprep.decode_audio_16k("/nonexistent/audio.mp3"))
 
 
 class TestRevisionPath(unittest.TestCase):
@@ -539,14 +533,14 @@ class TestTheme(unittest.TestCase):
         self.assertIn(T._resolve_theme("auto"), T._PALETTES)
 
     def test_palette_follows_active_theme(self):
-        old = T._ACTIVE_THEME
+        old = T.palettes._ACTIVE_THEME
         try:
-            T._ACTIVE_THEME = "dark"
+            T.palettes._ACTIVE_THEME = "dark"
             self.assertEqual(T._palette(), T._PALETTES["dark"])
-            T._ACTIVE_THEME = "light"
+            T.palettes._ACTIVE_THEME = "light"
             self.assertEqual(T._palette(), T._PALETTES["light"])
         finally:
-            T._ACTIVE_THEME = old
+            T.palettes._ACTIVE_THEME = old
 
     def test_palettes_have_matching_keys(self):
         light, dark = T._PALETTES["light"], T._PALETTES["dark"]
@@ -608,6 +602,242 @@ class TestAutosave(unittest.TestCase):
         T._autosave_save({"out_path": "/tmp/x.docx", "paragraphs": []})
         self.assertIsNone(T._autosave_load())
         T._autosave_clear()
+
+
+class TestPersistedFileSchema(unittest.TestCase):
+    """The envelope, the migrations, and the atomic write."""
+
+    def test_written_files_carry_the_envelope(self):
+        import json
+        T._settings_save({"model": "tiny"})
+        doc = json.loads(T._settings_file().read_text(encoding="utf-8"))
+        self.assertEqual(doc["kind"], "settings")
+        self.assertEqual(doc["schema"], T._SCHEMA["settings"])
+        self.assertEqual(doc["data"]["model"], "tiny")
+
+    def test_pre_envelope_settings_still_read(self):
+        """0.9.14 wrote the bare dict with no envelope."""
+        import json
+        T._settings_file().write_text(
+            json.dumps({"model": "small.en", "gap": 3.0}), encoding="utf-8")
+        loaded = T._settings_load()
+        self.assertEqual(loaded["model"], "small.en")
+        self.assertEqual(loaded["gap"], 3.0)
+
+    def test_pre_0_9_5_recent_strings_are_migrated(self):
+        import json
+        T._recent_file().write_text(
+            json.dumps(["/tmp/a.docx", "/tmp/b.docx"]), encoding="utf-8")
+        items = T._recent_load()
+        self.assertEqual([i["path"] for i in items],
+                         ["/tmp/a.docx", "/tmp/b.docx"])
+        self.assertIs(items[0]["reviewed"], False)
+        self.assertIs(items[0]["verified"], False)
+
+    def test_pre_envelope_recent_dicts_are_migrated(self):
+        import json
+        T._recent_file().write_text(
+            json.dumps([{"path": "/tmp/a.docx", "reviewed": True,
+                         "verified": False}]), encoding="utf-8")
+        items = T._recent_load()
+        self.assertEqual(len(items), 1)
+        self.assertIs(items[0]["reviewed"], True)
+
+    def test_a_newer_schema_is_read_rather_than_discarded(self):
+        """A downgrade must not silently wipe the user's settings."""
+        import json
+        T._settings_file().write_text(json.dumps({
+            "schema": T._SCHEMA["settings"] + 5,
+            "kind": "settings",
+            "data": {"model": "tiny"},
+        }), encoding="utf-8")
+        self.assertEqual(T._settings_load()["model"], "tiny")
+
+    def test_corrupt_envelope_falls_back_to_default(self):
+        T._recent_file().write_text("{not json", encoding="utf-8")
+        self.assertEqual(T._recent_load(), [])
+
+    def test_atomic_write_leaves_no_temp_files(self):
+        target = T._config_dir() / "atomic-probe.json"
+        T._write_json_atomic(target, {"a": 1})
+        self.assertEqual(
+            list(T._config_dir().glob("atomic-probe.json.*")), [])
+        target.unlink()
+
+    def test_failed_write_leaves_the_previous_file_intact(self):
+        """A serialisation blow-up must not truncate what was there."""
+        target = T._config_dir() / "keepme.json"
+        T._write_json_atomic(target, {"good": True})
+        before = target.read_text(encoding="utf-8")
+        with self.assertRaises(TypeError):
+            T._write_json_atomic(target, {"bad": object()})
+        self.assertEqual(target.read_text(encoding="utf-8"), before)
+        self.assertEqual(list(T._config_dir().glob("keepme.json.*")), [])
+        target.unlink()
+
+    def test_every_kind_round_trips(self):
+        for kind in T._SCHEMA:
+            path = T._config_dir() / f"probe-{kind}.json"
+            T._write_versioned(path, kind, {"v": kind})
+            self.assertEqual(T._read_versioned(path, kind), {"v": kind})
+            path.unlink()
+
+    def test_every_migration_step_is_reachable(self):
+        """A migration keyed above the current schema would never run."""
+        for kind, steps in T._MIGRATIONS.items():
+            self.assertIn(kind, T._SCHEMA)
+            for from_version in steps:
+                self.assertLess(from_version, T._SCHEMA[kind])
+
+
+class TestSpeakerDetectionDefaults(unittest.TestCase):
+    """The speaker-detection defaults changed. Saving settings writes
+    every value, defaults
+    included, so the change has to be carried to existing settings by a
+    migration - and only to values nobody chose."""
+
+    def setUp(self):
+        self.addCleanup(lambda: T._settings_file().unlink(missing_ok=True))
+
+    def _write(self, data, schema=1):
+        import json
+        doc = data if schema == 0 else {
+            "schema": schema, "kind": "settings", "data": data}
+        T._settings_file().write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_fresh_install_defaults(self):
+        d = T.validate_settings({})
+        self.assertEqual(d["diarize_model"], "titanet")
+        self.assertEqual(d["diarize_model"], T.DIARIZE_DEFAULT_VOICE_MODEL)
+        self.assertEqual(d["num_speakers"], 2)
+        self.assertEqual(d["diarize_threshold"], 0.9)
+
+    def test_default_is_offered_first_and_campplus_is_not(self):
+        ids = [m["id"] for m in T.DIARIZE_VOICE_MODELS]
+        self.assertEqual(ids[0], T.DIARIZE_DEFAULT_VOICE_MODEL)
+        self.assertNotIn("campplus", ids)
+
+    def test_old_defaults_move_to_the_new_ones(self):
+        self._write({"diarize_model": "wespeaker", "num_speakers": 0,
+                     "diarize_threshold": 0.5, "model": "small.en"})
+        s = T.current_settings()
+        self.assertEqual(s["diarize_model"], "titanet")
+        self.assertEqual(s["num_speakers"], 2)
+        self.assertEqual(s["diarize_threshold"], 0.9)
+        self.assertEqual(s["model"], "small.en")    # nothing else moves
+
+    def test_deliberate_choices_are_left_alone(self):
+        self._write({"num_speakers": 3, "diarize_threshold": 0.7})
+        s = T.current_settings()
+        self.assertEqual(s["num_speakers"], 3)
+        self.assertEqual(s["diarize_threshold"], 0.7)
+
+    def test_withdrawn_campplus_becomes_the_default(self):
+        self._write({"diarize_model": "campplus"})
+        self.assertEqual(T.current_settings()["diarize_model"], "titanet")
+
+    def test_a_0_9_14_file_is_migrated_too(self):
+        """Pre-envelope files step 0 -> 1 -> 2."""
+        self._write({"diarize_model": "wespeaker", "num_speakers": 0},
+                    schema=0)
+        s = T.current_settings()
+        self.assertEqual(s["diarize_model"], "titanet")
+        self.assertEqual(s["num_speakers"], 2)
+
+    def test_choices_made_after_the_upgrade_stick(self):
+        """Choosing WeSpeaker, or auto, once on the new schema is a
+        decision, and must not be migrated away on the next load."""
+        T._settings_save(T.validate_settings(
+            {"diarize_model": "wespeaker", "num_speakers": 0,
+             "diarize_threshold": 0.5}))
+        s = T.current_settings()
+        self.assertEqual(s["diarize_model"], "wespeaker")
+        self.assertEqual(s["num_speakers"], 0)
+        self.assertEqual(s["diarize_threshold"], 0.5)
+
+
+class TestTranscriptionDefaults(unittest.TestCase):
+    """Conditioning on the previous window off, paragraphs at a 1.0 s pause. Carried to saved
+    settings by the schema 2 -> 3 migration, for untouched values only."""
+
+    def setUp(self):
+        self.addCleanup(lambda: T._settings_file().unlink(missing_ok=True))
+
+    def _write(self, data, schema=2):
+        import json
+        doc = data if schema == 0 else {
+            "schema": schema, "kind": "settings", "data": data}
+        T._settings_file().write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_fresh_install_defaults(self):
+        d = T.validate_settings({})
+        self.assertIs(d["condition_on_previous_text"], False)
+        self.assertEqual(d["gap"], 1.0)
+
+    def test_old_defaults_move_to_the_new_ones(self):
+        self._write({"condition_on_previous_text": True, "gap": 1.5,
+                     "model": "small.en"})
+        s = T.current_settings()
+        self.assertIs(s["condition_on_previous_text"], False)
+        self.assertEqual(s["gap"], 1.0)
+        self.assertEqual(s["model"], "small.en")    # nothing else moves
+
+    def test_a_gap_somebody_chose_is_left_alone(self):
+        self._write({"gap": 2.5})
+        self.assertEqual(T.current_settings()["gap"], 2.5)
+
+    def test_a_0_9_14_file_steps_all_the_way(self):
+        """Pre-envelope files step 0 -> 1 -> 2 -> 3."""
+        self._write({"condition_on_previous_text": True, "gap": 1.5,
+                     "num_speakers": 0}, schema=0)
+        s = T.current_settings()
+        self.assertIs(s["condition_on_previous_text"], False)
+        self.assertEqual(s["gap"], 1.0)
+        self.assertEqual(s["num_speakers"], 2)
+
+    def test_turning_it_back_on_after_the_upgrade_sticks(self):
+        T._settings_save(T.validate_settings(
+            {"condition_on_previous_text": True, "gap": 1.5}))
+        s = T.current_settings()
+        self.assertIs(s["condition_on_previous_text"], True)
+        self.assertEqual(s["gap"], 1.5)
+
+
+class TestRetiredVoiceModels(unittest.TestCase):
+    """Withdrawn models' weights are reclaimed: nothing else would, as
+    the Models page does not list diarization models."""
+
+    def setUp(self):
+        from transcribr import diarize as D
+        self.D = D
+        self.dir = D._diarize_models_dir()
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.retired = self.dir / "campplus-voxceleb.onnx"
+        self.kept = self.dir / "titanet-small.onnx"
+        for f in (self.retired, self.kept):
+            f.write_bytes(b"weights")
+            self.addCleanup(f.unlink, missing_ok=True)
+
+    def test_retired_weights_are_removed_and_current_ones_kept(self):
+        self.D._remove_retired_models()
+        self.assertFalse(self.retired.exists())
+        self.assertTrue(self.kept.exists())
+
+    def test_nothing_to_remove_is_not_an_error(self):
+        self.retired.unlink()
+        self.D._remove_retired_models()
+
+    def test_every_run_reclaims_them_even_without_sherpa(self):
+        """Wired into _run_diarization, which runs every time - not
+        ensure_diarize_models, which runs only when a model is missing.
+        sherpa_onnx is blocked so this behaves the same whether or not
+        it is installed."""
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {"sherpa_onnx": None}):
+            with self.assertRaises(T.DiarizationUnavailable):
+                self.D._run_diarization(None, 2, None)
+        self.assertFalse(self.retired.exists())
+        self.assertTrue(self.kept.exists())
 
 
 # =====================================================================
@@ -697,6 +927,209 @@ class TestDocxRoundTrip(unittest.TestCase):
             sec = Document(str(out)).sections[0]
             self.assertAlmostEqual(sec.page_width.cm, 21.0, places=1)
             self.assertAlmostEqual(sec.page_height.cm, 29.7, places=1)
+
+
+class TestExportSpeakerColour(unittest.TestCase):
+    def test_slot_maps_to_the_light_palette(self):
+        self.assertEqual(T._export_speaker_colour("2"),
+                         T._PALETTES["light"]["speaker_colours"]["2"])
+
+    def test_unlabelled_has_no_colour(self):
+        for empty in (None, "", 0):
+            self.assertIsNone(T._export_speaker_colour(empty))
+
+    def test_unknown_slot_has_no_colour(self):
+        self.assertIsNone(T._export_speaker_colour("47"))
+
+    def test_export_ignores_the_active_theme(self):
+        """A document is printed on white, whatever the app is set to."""
+        old = T.palettes._ACTIVE_THEME
+        try:
+            T.palettes._ACTIVE_THEME = "dark"
+            self.assertEqual(T._export_speaker_colour("1"),
+                             T._PALETTES["light"]["speaker_colours"]["1"])
+        finally:
+            T.palettes._ACTIVE_THEME = old
+
+
+@unittest.skipUnless(
+    __import__("importlib.util", fromlist=["util"]).find_spec("docx"),
+    "python-docx not installed")
+class TestDocxStyles(unittest.TestCase):
+    """Everything the writer emits is carried by a style the document
+    defines, so the file looks the same wherever it is opened and a
+    reader can change any of it in one edit."""
+
+    PARAS = [[(0.0, 1.0, "First.")], [(1.0, 2.0, "Second.")],
+             [(2.0, 3.0, "Third.")]]
+    SLOTS = ["1", "2", None]
+    NAMES = ["Counsel", "Witness", None]
+
+    def _parts(self, **kw):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "t.docx"
+            T.write_paragraphs_to_file(
+                self.PARAS, out, output_format="docx", title="A title",
+                speakers=self.NAMES, speaker_slots=self.SLOTS, **kw)
+            with zipfile.ZipFile(out) as z:
+                return (z.read("word/document.xml").decode(),
+                        z.read("word/styles.xml").decode())
+
+    @staticmethod
+    def _ids(styles_xml):
+        return re.findall(r'w:styleId="([^"]+)"', styles_xml)
+
+    @staticmethod
+    def _applied(doc_xml):
+        return re.findall(r'<w:pStyle w:val="([^"]+)"/>', doc_xml)
+
+    # ----- the style set ------------------------------------------------
+
+    def test_normal_pins_the_font_for_every_script(self):
+        """style.font.name alone sets only the Latin range, which left
+        Word picking a theme font for anything outside it."""
+        _doc, styles = self._parts()
+        normal = re.search(
+            r'<w:style [^>]*w:styleId="Normal".*?</w:style>', styles, re.S)
+        self.assertIsNotNone(normal)
+        for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
+            self.assertIn(f'{attr}="Courier New"', normal.group(0))
+
+    def test_every_transcribr_style_is_defined(self):
+        _doc, styles = self._parts()
+        ids = self._ids(styles)
+        for want in ("TranscribrTitle", "TranscribrText", "TranscribrSpeaker",
+                     "TranscribrDisclaimer", "TranscribrFooter"):
+            self.assertIn(want, ids)
+
+    def test_title_and_disclaimer_use_styles_not_direct_formatting(self):
+        doc, _styles = self._parts()
+        applied = self._applied(doc)
+        self.assertEqual(applied[0], "TranscribrTitle")
+        self.assertIn("TranscribrDisclaimer", applied)
+
+    def test_only_the_speakers_present_get_styles(self):
+        """Nine slots exist; a two-speaker transcript should not put
+        nine pairs of styles in front of the reader."""
+        _doc, styles = self._parts()
+        ids = self._ids(styles)
+        self.assertIn("TranscribrText1", ids)
+        self.assertIn("TranscribrText2", ids)
+        for absent in ("TranscribrText3", "TranscribrSpeaker9"):
+            self.assertNotIn(absent, ids)
+
+    def test_unused_template_styles_are_pruned(self):
+        """python-docx's blank document carries ~170 styles. They bury
+        the ones a reader actually needs to find."""
+        _doc, styles = self._parts()
+        ids = self._ids(styles)
+        self.assertLess(len(ids), 30)
+        for junk in ("LightShading-Accent3", "BookTitle", "Heading9"):
+            self.assertNotIn(junk, ids)
+
+    def test_styles_the_document_still_needs_survive_pruning(self):
+        _doc, styles = self._parts()
+        ids = self._ids(styles)
+        for kept in ("Normal", "Footer", "DefaultParagraphFont"):
+            self.assertIn(kept, ids)
+
+    # ----- the colour ---------------------------------------------------
+
+    def test_colour_lives_in_the_styles_not_the_paragraphs(self):
+        """The point of the exercise: a reader changes or removes a
+        speaker's colour by editing one style, not by selecting
+        paragraphs and clearing formatting."""
+        doc, styles = self._parts(colour_speakers=True)
+        self.assertNotIn("w:shd", doc)
+        self.assertIn("w:shd", styles)
+
+    def test_each_speaker_style_carries_its_review_pane_colour(self):
+        _doc, styles = self._parts(colour_speakers=True)
+        for slot in ("1", "2"):
+            m = re.search(
+                r'<w:style [^>]*w:styleId="TranscribrText%s".*?</w:style>'
+                % slot, styles, re.S)
+            self.assertIsNotNone(m, f"no style for slot {slot}")
+            want = T._export_speaker_colour(slot).lstrip("#").upper()
+            self.assertIn(f'w:fill="{want}"', m.group(0))
+
+    def test_label_and_body_are_shaded_alike(self):
+        _doc, styles = self._parts(colour_speakers=True)
+        want = T._export_speaker_colour("1").lstrip("#").upper()
+        for style_id in ("TranscribrText1", "TranscribrSpeaker1"):
+            m = re.search(
+                r'<w:style [^>]*w:styleId="%s".*?</w:style>' % style_id,
+                styles, re.S)
+            self.assertIn(f'w:fill="{want}"', m.group(0))
+
+    def test_paragraphs_reference_their_speaker_style(self):
+        doc, _styles = self._parts(colour_speakers=True)
+        applied = self._applied(doc)
+        self.assertIn("TranscribrSpeaker1", applied)
+        self.assertIn("TranscribrText1", applied)
+        self.assertIn("TranscribrText2", applied)
+
+    def test_unlabelled_paragraph_uses_the_plain_style(self):
+        doc, _styles = self._parts(colour_speakers=True)
+        self.assertIn("TranscribrText", self._applied(doc))
+
+    def test_speaker_styles_exist_uncoloured_too(self):
+        """So a plain transcript can be colour-coded after the fact by
+        giving two styles a fill, without touching a paragraph."""
+        _doc, styles = self._parts()
+        ids = self._ids(styles)
+        self.assertIn("TranscribrText1", ids)
+        m = re.search(
+            r'<w:style [^>]*w:styleId="TranscribrText1".*?</w:style>',
+            styles, re.S)
+        self.assertNotIn("w:shd", m.group(0))
+
+    def test_colour_survives_a_round_trip(self):
+        """Shading is presentation only - re-reading must be unaffected."""
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "t.transcript.docx"
+            T.write_paragraphs_to_file(
+                self.PARAS, out, output_format="docx", title="A title",
+                speakers=self.NAMES, speaker_slots=self.SLOTS,
+                colour_speakers=True)
+            parsed = T.read_paragraphs_from_file(out)
+        self.assertEqual(parsed["title"], "A title")
+        self.assertEqual(len(parsed["paragraphs"]), 3)
+        self.assertEqual(parsed["speakers"][:2], ["Counsel", "Witness"])
+
+    def test_pre_0_9_15_style_names_still_read(self):
+        """0.9.14 wrote "SpeakerLabel"; those files must keep opening."""
+        from docx import Document
+        from docx.enum.style import WD_STYLE_TYPE
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "old.transcript.docx"
+            doc = Document()
+            doc.styles.add_style("SpeakerLabel", WD_STYLE_TYPE.PARAGRAPH)
+            doc.add_paragraph("Counsel", style="SpeakerLabel")
+            doc.add_paragraph("[00:00]\tA question.")
+            doc.save(str(out))
+            parsed = T.read_paragraphs_from_file(out)
+        self.assertEqual(parsed["speakers"], ["Counsel"])
+
+
+@unittest.skipUnless(
+    __import__("importlib.util", fromlist=["util"]).find_spec("reportlab"),
+    "reportlab not installed")
+class TestPdfSpeakerColour(unittest.TestCase):
+    def test_coloured_pdf_is_valid_and_differs_from_plain(self):
+        paras = [[(0.0, 1.0, "First.")], [(1.0, 2.0, "Second.")]]
+        slots, names = ["1", "2"], ["Counsel", "Witness"]
+        with tempfile.TemporaryDirectory() as d:
+            plain = Path(d) / "plain.pdf"
+            colour = Path(d) / "colour.pdf"
+            for out, on in ((plain, False), (colour, True)):
+                T.write_paragraphs_to_file(
+                    paras, out, output_format="pdf", speakers=names,
+                    speaker_slots=slots, colour_speakers=on)
+            self.assertTrue(colour.read_bytes().startswith(b"%PDF"))
+            self.assertGreater(colour.stat().st_size,
+                               plain.stat().st_size)
 
 
 @unittest.skipUnless(
@@ -911,3 +1344,57 @@ class TestUnknownFormatFallsBackToTxt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# =====================================================================
+# The harness itself
+# =====================================================================
+
+class TestTheSuiteLeavesTheRealConfigAlone(unittest.TestCase):
+    """A regression test for the suite, not the app.
+
+    Review autosave is a debounced timer. Tests that build a session
+    and never close it leave one armed, and it used to fire after the
+    module teardown had put the config directory back - writing fixture
+    transcripts into the user's real autosave.json, which the app would
+    then offer to restore."""
+
+    def test_the_config_dir_is_redirected(self):
+        self.assertEqual(str(T._config_dir()), _harness.CONFIG_DIR)
+
+    def test_the_redirect_is_not_undone_between_modules(self):
+        self.assertEqual(os.environ.get("TRANSCRIBR_CONFIG_DIR"),
+                         _harness.CONFIG_DIR)
+
+    def test_the_log_is_redirected_too(self):
+        """Tests exercise the error paths deliberately; their
+        tracebacks must not land in the log a user would send in."""
+        self.assertEqual(str(T._log_dir()), _harness.LOG_DIR)
+        T._log("probe from the suite")
+        self.assertTrue((Path(_harness.LOG_DIR) / "transcribr.log").exists())
+
+    def test_a_late_autosave_timer_cannot_reach_the_real_directory(self):
+        """The exact shape of the leak: a session nobody closed, whose
+        timer fires long after the test that made it has finished."""
+        real = _harness.real_config_dir() / "autosave.json"
+        before = real.stat().st_mtime if real.exists() else None
+
+        model = T.TranscriptModel(
+            [[(0.0, 1.0, "Fixture text.")]],
+            on_autosave=lambda paras, spk, names: T._autosave_save({
+                "out_path": "/tmp/leak-probe.txt",
+                "paragraphs": [[list(s) for s in p] for p in paras],
+                "speakers": list(spk), "speaker_names": dict(names),
+            }))
+        model.set_speaker(0, "1")
+        model.flush_autosave()          # what the stray timer would do
+
+        written = Path(_harness.CONFIG_DIR) / "autosave.json"
+        self.assertTrue(written.exists(), "autosave did not go to the temp dir")
+        self.assertEqual(T._autosave_load()["out_path"], "/tmp/leak-probe.txt")
+        T._autosave_clear()
+
+        after = real.stat().st_mtime if real.exists() else None
+        self.assertEqual(before, after,
+                         "the suite touched the real autosave.json")
+        model.close()

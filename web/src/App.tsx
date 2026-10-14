@@ -4,9 +4,8 @@ import DialogHost from "./components/DialogHost";
 import Sidebar from "./components/Sidebar";
 import UpdateBanner from "./components/UpdateBanner";
 import LibraryView from "./views/LibraryView";
-import ReviewView from "./views/ReviewView";
 import SettingsView from "./views/SettingsView";
-import TranscribeView from "./views/TranscribeView";
+import WorkspaceView from "./views/WorkspaceView";
 import { api } from "./api/client";
 import { confirmDialog } from "./state/dialogs";
 import { useApp } from "./state/store";
@@ -93,8 +92,7 @@ export default function App() {
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <UpdateBanner />
         <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
-        {view === "transcribe" && <TranscribeView />}
-        {view === "review" && <ReviewView />}
+        {(view === "transcribe" || view === "review") && <WorkspaceView />}
         {view === "library" && <LibraryView />}
         {view === "settings" && <SettingsView />}
         </div>

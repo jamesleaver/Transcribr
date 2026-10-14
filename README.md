@@ -1,94 +1,32 @@
 # Transcribr
 
-(c) James Leaver, 2026. Version 0.9.14.
+(c) Fisheggs Pty Ltd, 2026. Version 0.11.0.
 
-Demonstration video here: [https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s](https://www.youtube.com/watch?v=CzjPhhO6zNU&t=440s)
+**Website and downloads: <https://jamesleaver.github.io/Transcribr/>**
 
-An experimental GUI for transcribing audio and video files on macOS and
-Windows. A Whisper engine (faster-whisper by default; mlx-whisper and
-openai-whisper where installed) does the transcription, an optional
-speaker-detection pass works out who is speaking, the result is grouped
-into likely paragraphs, and a built-in review pane lets you check and
-label speakers, edit text, search and replace, and play each paragraph
-from the source audio before saving as Word (`.docx`), PDF, or plain
-text. Several files can be queued and transcribed in one unattended
-batch.
+Transcribr turns interviews, hearings and other recordings into
+transcripts you can check, label and save as Word, PDF or text, on macOS
+and Windows. Speech recognition runs on your computer (faster-whisper,
+NVIDIA's Parakeet, or mlx-whisper where installed); the transcript fills
+in as the recording is processed, is grouped into paragraphs by speaker,
+and opens in a review pane where you label speakers, correct the text
+against the audio, switch to a numbered question-and-answer layout, and
+decide what to mark `[indistinct]`.
 
-The review pane also lets you **edit or hide the timestamp** on any
-paragraph, and it does two things automatically to help with poor
-recordings: stretches of a file with **no recorded audio** (a
-microphone that switches on late, a muted channel) are marked in the
-transcript instead of being filled with invented text, and paragraphs
-that look like engine **hallucination** — runaway repeated words, or
-text the engine itself scored as very low confidence — are flagged for
-your attention. Where a passage did come out garbled, you can select
-those paragraphs and **re-transcribe just that section** of the
-recording with different settings.
+**Everything runs locally — no audio, video or transcripts are uploaded
+to the internet.** This may be particularly important for lawyers who
+need transcripts of material that it may not be appropriate to upload to
+an external website or AI service: material subject to non-publication
+or suppression orders, the implied (_Harman_) undertaking, material
+produced on subpoena, or anything under a statutory prohibition on
+publication.
 
-**Everything runs locally on your computer — no audio, video, or
-transcripts are uploaded to the internet.** This may be particularly
-important for lawyers who need to create transcriptions of material
-that it may not be appropriate to uploaded to an external website or
-AI service (for example, material that is subject to non-publication or
-suppression orders, the implied (_Harman_) undertaking, material
-produced on subpoena, or any material that is the subject of a statutory
-prohibition upon publication).
+Transcribr makes machine transcriptions, which can contain mistakes.
+Check every transcript against the recording before relying on it.
 
-The quality of the transcription will depend on the quality of the audio
-fed into it, as well as various settings that can be configured by the
-user. Good quality audio will usually produce good quality transcript.
-**Accuracy tuning** settings can be adjusted that will improve the quality
-of poor transcripts (any even nonsense ones). It can be worth playing around 
-with them to work out what might work best for paticular types of
-recordings. See the heading **Accuracy tuning** below for a further
-description of what various settings do.
+Questions: [hello@fisheggs.au](mailto:hello@fisheggs.au)
 
-If words from different speakers are being transcribed into the same
-paragraph, adjust the **paragraph gap** setting down. If the same speaker's
-words are being transcribed into multiple paragraphs, then adjust the same
-setting up. The experimental **Detect speakers automatically** option
-can also suggest a speaker label for each paragraph for you to check
-in Review (see **Detecting speakers automatically** below).
-
-The **Review pane** is designed to allow easy editing of the transcription
-created by the software. You can navigate between paragraphs of text with
-the up/down arrows on your keyboard. To edit the text in a paragraph, press
-the `enter` key (or `return` on a Mac). Press `enter` again to save the edit.
-When not in 'edit' mode, pressing a number (eg `1`, `2`, `3`, etc) will
-assign a speaker to the paragraph that is in focus. To split at paragraph at
-a particular word (which may be necessary if there is a change in the speaker),
-just `double-click` that word. To merge a paragraph with the paragraph above
-it, press the `M` key. To listen to the audio segment that relates to the
-paragraph that is in focus, press `P`.
-
-When a particular model is run for the first time, that model will be
-downloaded to your computer and stored locally. The model picker offers
-three tiers: **Quick draft** (`small.en`) may perform adequately on
-clear, crisp audio; **Standard** (`large-v3-turbo`, recommended) does
-markedly better on trickier audio; **Maximum accuracy** (`large-v3`)
-is the slow, last-resort option. Tick *Show all Whisper models* to
-choose from the full list instead.
-
-Use at your own risk.
-
-Questions: [jleaver@sgchambers.com.au](mailto:jleaver@sgchambers.com.au)
-
-## Screenshots
-
-Main pane — a file staged and a transcription under way:
-
-<img width="1312" height="912" alt="Transcribr's Transcribe pane, showing a staged recording and a transcription in progress" src="docs/screenshot-transcribe.png" />
-
-
-Review pane — speakers labelled, text corrected against the audio:
-
-<img width="1312" height="912" alt="Transcribr's Review pane, showing a speaker-labelled transcript part-way through review" src="docs/screenshot-review.png" />
-
-
-Result — the saved transcript:
-
-<img width="781" height="1105" alt="A finished Transcribr transcript: a titled, speaker-labelled document with timestamps" src="docs/screenshot-result.png" />
-
+<img width="1440" alt="The review pane: a speaker-labelled transcript with timestamps, and the tools panel" src="site/img/review.png" />
 
 ## What this repository contains
 
@@ -100,10 +38,19 @@ This is the source they are built from.
 Transcribr/
 ├── INSTALL.txt              ← Quick-start instructions
 ├── README.md                ← This file
-├── RELEASING.md             ← Building, signing and publishing a release
-├── transcribr.py            ← The application itself (backend + API)
+├── transcribr/              ← The application itself (backend + API)
+│   ├── __main__.py          ←   `python3 -m transcribr` starts here
+│   ├── paragraphs.py        ←   segments → paragraphs, and rendering
+│   ├── writers.py           ←   .docx / .pdf / .txt output
+│   ├── worker.py            ←   the transcription run itself
+│   ├── workerproc.py        ←   runs it in a child process, supervised
+│   ├── review.py            ←   one open review session
+│   ├── server.py            ←   loopback HTTP server, JSON API, SSE
+│   └── …                    ←   21 modules; __init__.py lists them all
 ├── web/                     ← Review interface source (React + TypeScript)
 ├── webdist/                 ← The built interface, committed and shipped
+├── site/                    ← The website (GitHub Pages)
+├── docs/licence/EULA.md     ← The end-user licence agreement
 ├── tests/                   ← Automated test suite
 │   ├── test_transcribr.py
 │   ├── test_web.py
@@ -120,7 +67,7 @@ Transcribr/
 │   ├── bootstrap.ps1        ← Fetched by the one-line Terminal install
 │   ├── install.ps1          ← The script installer it runs
 │   └── install.bat          ← Wrapper that launches install.ps1
-└── .github/workflows/       ← Builds the Windows installer on a runner
+└── .github/workflows/       ← Tests, the Windows installer, the website
 ```
 
 ## Requirements
@@ -147,11 +94,11 @@ Signed and notarised by Apple, so it opens with no security warnings.
 Self-contained: Python and the transcription engine are inside it, so
 nothing else is downloaded and no connection is needed to install.
 
-Two engines are left out to keep the download small, because both drag
-in PyTorch (about 1.1 GB): **mlx-whisper**, which uses the GPU on
-M-series Macs, and **openai-whisper**, the reference implementation.
-Install either in one click from the **Models** tab when you want it.
-Whisper model weights are downloaded on first use, as always.
+Two optional engines are left out to keep the download small:
+**mlx-whisper**, which runs on Apple Silicon's GPU (~350 MB), and
+**openai-whisper**, the reference implementation (~2 GB, PyTorch).
+Install either in one click from the **Models** tab. Model weights are
+downloaded on first use, as always.
 
 ### macOS — Terminal install
 
@@ -221,379 +168,153 @@ connection throughout.
 Use it for scripted setups, or where policy blocks running an unsigned
 `.exe`. Otherwise the Setup `.exe` above is simpler.
 
-## Using the application
+## How to use
 
-The window has four views, switched in the left sidebar:
-**Transcribe** (choose a file and the quick settings, run jobs),
-**Review** (check speakers, edit, verify, and save), **Recent**
-(recent transcripts), and **Settings** (everything advanced: accuracy
-tuning, extra technical files, model downloads, appearance, the
-log). The defaults are sensible for most jobs;
-pick an input file and click **Run Transcription** — the review pane
-opens automatically when it finishes.
+### 1. Choose a recording
 
-The app remembers every setting between launches. The theme (system /
-light / dark) lives on the Settings page.
+Drop an audio or video file onto the window, or click the drop zone to
+browse. Pick the **recording type** and Transcribr sets the engine, the
+number of speakers and how paragraphs break to suit it; **Change** shows
+the model, the pause that starts a new paragraph, and the heading, if you
+want to adjust them. Drop several files at once to transcribe them as an
+unattended batch — each is saved next to its recording, to review later
+from **Recent**.
 
-### Choosing files and output
+<img width="1440" alt="The Transcribe page with a recording chosen and the recording type set to Police interview" src="site/img/transcribe.png" />
 
-**Drop zone.** Drag one or more audio/video files onto the dashed
-panel (or anywhere on the window), or click it to browse. Dropping a
-single file sets it as the Input; dropping several adds them all to
-the batch queue.
+Transcribr reads anything FFmpeg can: the everyday formats (`.mp3`,
+`.wav`, `.m4a`, `.mp4`, `.mov`, `.aac`, `.flac`, `.ogg`, `.opus`,
+`.webm`) and the ones legal material tends to arrive in — interview
+exports (`.wma`, `.wmv`, `.asf`), dictaphone files (`.dss`, `.ds2`),
+phone recordings (`.amr`, `.3gp`) and disc rips (`.vob`, `.mpg`).
 
-**Input.** The audio or video file to transcribe. Anything FFmpeg can
-read works — the everyday formats (`.mp3`, `.wav`, `.m4a`, `.mp4`,
-`.mov`, `.aac`, `.flac`, `.ogg`, `.opus`, `.webm`) plus the ones legal
-source material actually arrives in: police-interview exports (`.wma`,
-`.wmv`, `.asf`), dictaphone files (`.dss`, `.ds2`), phone recordings
-(`.amr`, `.3gp`), and disc rips (`.vob`, `.mpg`). The same list applies
-to the review pane's **Locate audio…** picker.
-
-**Output.** Where the transcript goes. Auto-fills to
-`<input>.transcript.docx` next to the input file. Override it if you
-want it somewhere else. Transcripts save as Word (`.docx`) by default;
-the format choice (with `.txt` and `.pdf`) lives on the **Review**
-pane's Saving card, where it belongs to the finished document:
-
-- **`.docx`** — A4 Word document in a monospaced font with a hanging
-  indent (timestamp in the left column, body wrapping cleanly), bold
-  speaker labels, a "Page X of Y" footer, and an italic disclaimer.
-- **`.txt`** — plain text, one paragraph per block. Easiest to edit
-  anywhere.
-- **`.pdf`** — an A4 PDF with the same layout as the Word output.
-  (PDFs can't be re-opened for labelling later; use `.docx` or `.txt`
-  if you'll want to revisit the speaker labels.)
-
-**Document title.** The heading placed at the top of the transcript.
-It is **not** sent to the engine — it only labels the document. Left
-blank, the transcript is titled after the source file's name instead.
-
-**Context / vocabulary hint** *(optional; enable it from the Settings
-page)*. Free text fed to the engine
-as its `initial_prompt` to prime it with names and jargon it may not
-know. It can help accuracy on proper nouns — but **priming is opt-in
-and can backfire**: the prompt may bleed into the transcript or trigger
-hallucinations, especially on unclear audio or long silences. Leave it
-blank unless you need it, and when you do, keep it to **keywords rather
-than sentences** — a prose description is the most likely to leak in:
-
-> *Macklebum, Bloggs, Mount Druitt, AVO, ICAC, DVEC*
-
-is safer than a full narrative sentence. Worth including: speaker and
-referenced names, ambiguous place names, and acronyms. Keep it under
-about 200 words; longer prompts get truncated. If a run comes out
-garbled, try clearing this field, or turn off **Condition on previous
-text** (Accuracy tuning) so an early mistake can't propagate.
-
-**Batch queue.** Add several files to transcribe them one after
-another in a single unattended run. Each transcript is saved next to
-its source file with no interactive review; failures are recorded and
-the run carries on, with a summary at the end. Open each result from
-the **Library** afterwards to label speakers. Stage a single file to
-use the normal flow instead (which *does* pause for review).
-
-### Model and language
-
-**Model.** The main quality / speed trade-off, presented as three
-choices:
-
-| Choice | Model underneath | Download | Notes |
-|---|---|---|---|
-| **Quick draft** | `small.en` / `small` | ~500 MB | Fast first pass; fine for clear speech, expect mistakes |
-| **Standard** (recommended) | `large-v3-turbo` | ~1.6 GB | Accurate and reasonably quick — right for most work, including legal / interview / DVEC jobs |
-| **Maximum accuracy** | `large-v3` | ~3 GB | Slowest; for difficult audio where every word matters |
-
-When the language is English, the English-only variant (`.en`) is used
-automatically where one exists — it is slightly more accurate there.
-Tick **Show all Whisper models** to pick from the full historical list
-(`tiny` through `large-v3`) instead:
-
-| Model | Download | Speed (relative) | Notes |
-|---|---|---|---|
-| `tiny.en`, `tiny` | ~75 MB | very fast | Often inaccurate; useful for quick dry runs |
-| `base.en`, `base` | ~150 MB | fast | Acceptable for clear, simple speech |
-| `small.en`, `small` | ~500 MB | moderate | Good balance for casual jobs |
-| `medium.en`, `medium` | ~1.5 GB | slow | Superseded by `large-v3-turbo` for most work |
-| `large-v1`, `large-v2`, `large-v3` | ~3 GB | very slow | Best raw accuracy; runtime can be painful on a CPU |
-| `large-v3-turbo` | ~1.6 GB | fast (despite the size) | Faster than `large-v3` with similar accuracy. No `.en` variant |
-
-Models download once on first use and are cached locally
-(faster-whisper and mlx-whisper under `~/.cache/huggingface/`;
-openai-whisper under `~/.cache/whisper/`). The **Models** tab shows
-what's downloaded, how much space it uses, and lets you pre-download or
-remove models — see [Models](#models) below.
-
-**Language / Task.** Set the language explicitly if you know it
-(auto-detect costs a little time and accuracy). *Translate into
-English* converts non-English audio to English output; *Transcribe*
-keeps the source language.
-
-### Detecting speakers automatically (experimental)
-
-Tick **Detect speakers automatically** and Transcribr listens for
-different voices and suggests a speaker label for each paragraph, for
-you to check in the review pane. This feature is **experimental** and
-deliberately separate from paragraph grouping: the paragraph
-boundaries always come from the programmatic rules above, and voice
-detection only labels the finished paragraphs (by which voice speaks
-most of each one). Where attribution is doubtful (overlapping voices,
-mixed paragraphs, very short interjections) the paragraph is left
-unlabelled — press `N` in review to jump straight to anything it left
-for you. If you know how many people are speaking, set **How many
-speakers?** — it noticeably improves the grouping; leave it at 0 to
-detect the count automatically.
-
-The first use downloads two small helper models (~33 MB total) — a
-voice-activity/segmentation model and a voice-embedding model — which
-are verified and cached under the app's data folder. Like everything
-else, speaker detection runs entirely on your computer. In batch runs
-(which never pause for review) detected speakers are written into the
-saved transcripts as "Speaker 1", "Speaker 2", … — open the file from
-the Library later to rename them.
-
-### The Settings page
-
-Everything advanced lives here, off the main page: the full-model-list
-and vocabulary-hint toggles for the Transcribe page, the extra
-technical files, accuracy tuning, and the theme.
-
-**Extra technical files.** Optional sidecar files saved alongside
-every transcript: SRT / VTT subtitles and a TSV spreadsheet — these
-follow your review edits, splits and merges — plus a JSON file keeping
-the engine's raw output as the technical record.
-
-#### Accuracy tuning (rarely needed)
-
-**Engine.** Which Whisper implementation does the work. **Automatic
-(recommended)** picks the fastest engine installed on this computer
-(mlx-whisper on Apple Silicon, otherwise faster-whisper) and is the
-right choice unless you are troubleshooting. Only engines actually
-installed appear (install more from the **Models** tab):
-
-- **faster-whisper** — CTranslate2-based; substantially faster on CPU
-  with essentially identical output. Installed by default; no PyTorch,
-  and its PyAV dependency handles all audio decoding (no ffmpeg).
-- **mlx-whisper** — Apple-Silicon-only (macOS 13.5+), uses the Mac's
-  GPU via MLX. Fastest option on M-series machines. No mid-run Stop.
-  Installed by default on Apple Silicon by the script installer, but
-  **not** included in the signed `.pkg`: mlx-whisper hard-requires
-  PyTorch (and numba, llvmlite and scipy with it), which would add
-  about 1.1 GB to the download. Install it in one click from the
-  **Models** tab if you want GPU transcription.
-- **openai-whisper** — the reference implementation. Most thoroughly
-  tested, but pulls in PyTorch (~2 GB), so it's **optional**: install
-  it from the **Models** tab when you want it.
-
-**The other options** usually do not need touching — the defaults are
-tuned by Whisper's authors, and each field explains itself in the
-interface. Briefly: **Temperature** 0 = deterministic; **Beam size /
-Best of** higher = better but slower; **Compression-ratio threshold**
-catches hallucination loops; **No-speech threshold** raises/lowers how
-readily silence is skipped; **Condition on previous text** improves
-consistency but can propagate an early mistake.
-
-**Word-level timing & highlighting** controls whether the engine records
-per-word timings. Those timings sharpen paragraph breaks and playback
-spans and feed the red/amber shading of uncertain words in Review. They
-are essentially free on faster-whisper but roughly **triple** the run
-time on Apple Silicon's mlx engine (its word-alignment pass is slow), so
-the default, **Automatic**, records them on every engine *except* mlx —
-keeping Apple-Silicon transcriptions fast. Choose **Always on** to force
-them (e.g. for a short, important recording where you want the
-confidence highlighting), or **Always off** for the quickest possible
-runs. The run log tells you which mode was used.
-
-### Paragraphs and extra outputs
-
-**Paragraph grouping.** *Pause that triggers a new paragraph* (default
-1.5 s) controls how aggressively paragraphs break — lower for
-rapid-fire dialogue, higher for monologues. The other cues are graded
-by strength: a question mark, an interruption/trail-off ending ("—",
-"..."), or a short acknowledgment ("Yes", "Okay") always breaks —
-those are dialogue turn signals — while an ordinary sentence ending
-breaks only when the speaker also paused (40% of the threshold), so a
-monologue read at speed stays one paragraph instead of splintering at
-every full stop. A segment opening with an acknowledgment ("Yeah, I
-did") breaks on the same condition, a 60-second cap stops run-on
-paragraphs, and when word-level timestamps were recorded the gaps are
-measured between the actual words rather than Whisper's padded
-segment edges. Single files always open
-the review pane when transcription finishes; batches save straight to
-disk. Whether timestamps appear in the saved file (`[MM:SS]` at each
-paragraph) is chosen on the Review pane's Saving card, on by
-default.
-
-**No-audio markers.** Some recordings have long stretches with no
-sound at all — a body-worn camera whose microphone switches on part
-way through, a muted conference line, a video whose audio track starts
-late. Whisper tends to invent text over that silence ("Thank you.
-Thank you…", "Thanks for watching."). Transcribr scans the decoded
-audio for these dead stretches (five seconds or more of essentially
-digital silence, well below even a quiet room), removes the phantom
-text the model produced inside them, and inserts a marker paragraph
-in its place — for example `[No audio from 00:00 to 04:12]` — so the
-transcript states plainly where the recording has sound and where it
-does not. The markers are ordinary paragraphs: you can reword or
-delete them in Review like anything else.
-
-### Recent
-
-The last ten transcripts you produced or opened, with their locations.
-Click one (or its **Review** button) to re-open it for speaker
-labelling and editing; **Open transcript…** browses for any other
-`.docx`/`.txt` transcript. A transcript you have saved from the review
-pane is tagged **Reviewed**, or **Verified** when you named a verifier
-on it (see **Verify transcript** below), so you can tell at a glance
-which recordings still need checking. Re-transcribing a file afresh
-clears the tag.
-
-### Models
-
-Model weights are large (75 MB for `tiny` up to ~3 GB for `large-v3`)
-and each engine keeps its **own** copy in its own cache, so the same
-model can occupy disk two or three times over. Engine cards are
-collapsible and summarise how many models are installed of the total,
-plus the space used. The **Models** view lists every model grouped by
-engine and lets you:
-
-- **Download** a model ahead of time, so the first real run doesn't
-  stall on a multi-gigabyte fetch. A progress bar with size and speed
-  shows how it's going, and **Cancel** aborts it.
-- **Uninstall** a model you no longer need to reclaim the space (it
-  re-downloads automatically the next time you use it).
-- **Download a newer model** that isn't in the built-in list — for the
-  faster-whisper and mlx-whisper engines, type a model name or a full
-  Hugging Face repo (e.g. `mlx-community/whisper-large-v3-turbo`) into
-  the engine's download box. (openai-whisper only offers its fixed
-  catalogue.)
-- **Install an optional engine.** The reference **openai-whisper**
-  engine isn't installed by default (it downloads PyTorch, ~2 GB). The
-  **Add an engine** panel installs it on demand; once it's done it
-  appears in the Transcribe **Engine** dropdown. You can **Remove
-  engine** later to reclaim the space.
-
-The `large` and `turbo` aliases (identical weights to `large-v3` and
-`large-v3-turbo`) aren't listed separately — only the canonical names
-appear. Downloading, installing and removing are paused while a
-transcription is running, and a transcription won't start while one of
-those is in progress. The
-cache locations are shown at the bottom of the view.
-
-### Run / Stop and progress
-
-**Run Transcription** starts the job. The progress card shows the
-file name, a progress bar with percentage, time remaining, and speed.
-**Show details** expands the raw engine output underneath (it expands
-automatically if something goes wrong). Model loading can take 30+
-seconds on first launch — that's normal.
-
-**Stop** saves whatever has been transcribed so far as a partial
-transcript. It takes effect at the next chunk boundary (not supported
-mid-run by mlx-whisper).
-
-### The review workspace
-
-After a transcription (or when opening an existing `.docx`/`.txt`
-transcript), the Review view shows the paragraphs in three columns —
-speaker, timestamp, text — with up to nine colour-coded speakers named
-in the panel on the right. If speaker detection was on, the labels
-arrive pre-filled ("speakers suggested automatically — please verify"
-appears in the header) and your job is to check them, name the
-speakers, and fill in whatever was left unlabelled.
-
-The right rail also holds:
-
-- **Playback** — `P` plays just the selected paragraph, `⌘P` plays on
-  from it. The playing paragraph's timestamp turns **green and ticks up
-  live**, and when you play on past a paragraph the green marker follows
-  the audio into the next one. A **Half speed (0.5×)** toggle slows
-  playback for hard-to-catch passages. **Locate audio…** points at the
-  recording if it can't be found; saved `.docx` transcripts embed the
-  recording's location (both an absolute and a transcript-relative path,
-  so playback keeps working even after the whole case folder is moved)
-  so it survives re-opening. `.mp3` recordings are quietly remuxed once
-  before playback (a packet copy — no re-encode, no quality loss): an
-  mp3 written without a Xing header reports a wildly wrong duration,
-  and every seek then lands near the start of the recording. A transcript saved *without* timestamps
-  carries no per-paragraph times, so re-opening one offers no paragraph
-  playback — the rail says so rather than playing from the top of the
-  recording. Save with timestamps shown to keep playback available.
-- **Fix a section** — re-transcribe a stretch of the recording that
-  came out badly; see below.
-- **Timestamps / uncertain words** — whether timestamps appear in the
-  saved file, and confidence shading.
-- **Find & replace.**
-- **Verify transcript** — type your name to certify you have checked
-  the transcript, which switches the appended disclaimer from the
-  accuracy warning to *"This transcript has been verified by <your
-  name>."* The name is remembered in the saved `.docx`'s metadata, so
-  re-opening that document brings your name back and pre-fills this
-  field.
-
-The save format (`.docx`/`.txt`) is set on the Settings page;
-**Export PDF** in the header writes a one-off PDF copy without closing
-the review.
-
-**Editing a timestamp.** Click a paragraph's `[MM:SS]` chip to open a
-small editor. You can type a corrected time, **Hide** the stamp so it
-does not appear in the saved document (it shows as `[–:––]` in the
-pane), or **Reset** it back to the computed time. Amended and hidden
-stamps are remembered and applied to whatever you save; playback still
-uses the true position in the recording.
-
-**Flagged paragraphs.** Passages that look like engine hallucination
-are marked with an amber stripe down the left edge — either runaway
-repetition (a word or phrase looping, or a line repeated across
-paragraphs) or, when the run recorded word confidence, a paragraph the
-engine itself scored mostly very low. The **Fix a section** card shows
-how many were found and a **Jump to next** button that selects the
-flagged run ready to re-transcribe. Ordinary courtroom repetition
-("Yes. Yes.", "Thank you. Thank you.") is deliberately left alone.
-
-**Fix a section (re-transcribing part of a recording).** When a
-stretch came out as a hallucinated loop or garble, select the
-paragraph(s) — click one, then Shift-click another to extend the
-range — and use the **Fix a section** card. Leave **Condition on
-previous text** off (carrying context in is usually what caused the
-loop), optionally pick a different model for the re-run, and press
-**Re-transcribe**. Only that section of the audio is run again, only
-the selected paragraphs are replaced, and one **Undo** reverses it. A
-progress bar and a live output box (the same engine output the
-Transcribe page shows) report how it is going. This needs the source
-recording, so use **Locate audio…** first if playback isn't available.
-
-While the engine runs, the paragraphs being re-transcribed are **greyed
-out and locked** so you don't waste effort editing text that is about
-to be replaced — but the rest of the transcript stays live, so you can
-keep labelling speakers and editing other paragraphs meanwhile. Those
-edits are kept: the new text is spliced back onto the exact paragraphs
-that were re-transcribed, so nothing you did elsewhere is lost.
-
-| Action | How |
+| Recording type | What it sets |
 |---|---|
-| Select a paragraph | Click it, or Up/Down arrows |
-| Extend the selection | Shift-click another paragraph |
-| Assign a speaker | Press `1`–`9` (auto-advances to the next paragraph) |
-| Clear a speaker | Press `0` |
-| Jump to the next unlabelled paragraph | Press `N` |
-| Play that paragraph's audio | Press `P`, or the ▶ Play button |
-| Merge with the previous paragraph | Press `M` |
-| Split a paragraph | Double-click the word to split before |
-| Edit the text | Enter (or F2), then Enter to commit / Esc to cancel |
-| Amend or hide a timestamp | Click the `[MM:SS]` chip (amending plays from the new time so you can confirm it) |
-| Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Cmd on Mac), or the buttons |
-| Find / replace | Ctrl+F (Cmd+F), then *Find next* / *Replace all* |
+| **General** | The defaults |
+| **Police interview (ERISP, DVEC)** | Parakeet in English, two speakers, a new paragraph when the voice changes |
+| **Phone call** | As for an interview; a recording with a channel per speaker is labelled by channel |
+| **Hearing or court** | Whisper, speaker count left to you |
+| **Meeting or conference** | Whisper, speaker count left to you |
+| **Body-worn video** | Whisper, speaker count left to you |
+| **Dictation (one speaker)** | One speaker, a longer pause before a new paragraph |
 
-Speaker names typed into the name fields appear in the saved document
-in place of the numbers. The header shows how many paragraphs are
-labelled. If word-confidence highlighting was enabled for the run,
-uncertain words are shaded red/amber so you know where to listen.
+The model choices are **Quick draft** (Parakeet in English, `small`
+otherwise; ~500 MB), **Standard** (`large-v3-turbo`, ~1.6 GB,
+recommended) and **Maximum accuracy** (`large-v3`, ~3 GB). Each
+downloads once, the first time it is used, and can be fetched ahead of
+time or removed on the **Models** page in Settings.
 
-While you review, the work is auto-saved every few seconds; if the app
-crashes or is force-quit, the next launch offers to restore the
-session exactly where you left off. A safety copy of the un-labelled
-transcript is also written to disk before review begins.
+The optional **context / vocabulary hint** primes the engine with names
+and terms it may not know. Keep it to a few keywords —
+*Macklebum, Bloggs, Mount Druitt, AVO, ICAC* — or leave it blank: a
+prompt can bleed into the transcript or cause invented text. Parakeet
+ignores it.
+
+### 2. Review as it transcribes
+
+Press **Run transcription**. The transcript opens straight away and fills
+in as the engine works; everything above the grey tail is ready to
+correct. The keys:
+
+| | |
+|---|---|
+| `↑` `↓` | Previous / next paragraph |
+| `1`–`9`, `0` | Label the paragraph with a speaker / clear it |
+| `Enter` | Edit the paragraph (`Enter` again to finish, `Esc` to cancel) |
+| `Ctrl+Enter` while editing | Split at the cursor |
+| `Ctrl+M` while editing, or `M` | Join to the paragraph above |
+| `Ctrl+↑` `Ctrl+↓` while editing | Edit the previous / next paragraph |
+| Double-click a word | Split the paragraph there |
+| `P` / `⌘P` | Play the paragraph / play on from it |
+| `N` | Next paragraph that needs attention |
+| `U` / `⇧U` | Next / previous unsure passage |
+| `⌘Z` / `⌘⇧Z` | Undo / redo |
+| `⌘F` | Find |
+| `?` | Show all of these |
+
+(`Ctrl` for `⌘` on Windows.) Name the speakers in the **Speakers** card;
+the names replace the numbers in the saved document. Click the heading
+to change it, and a paragraph's `[MM:SS]` stamp to correct or hide it.
+Right-click a paragraph for **Re-transcribe**, edit, join and delete.
+
+The tools panel on the right opens with the layout switch and the
+speakers; the other cards fold to their titles: **Playback** (with half
+speed, and **Locate audio…** if the recording has moved),
+**Re-transcribe**, **Unsure words**, **Names & terms** (correct a
+misspelt name everywhere at once), **Find & replace**, **Saved file**
+and **Verify**.
+
+Work is saved every few seconds while you review; if the app is closed
+unexpectedly, the next launch offers to restore the session.
+
+### 3. Check the doubtful parts
+
+Words the engine was unsure of are shaded. Open **Unsure words** and
+press **Start** (or press `U`) to step through the passages it was least
+sure of; play each, then **Mark [indistinct]** or **Keep the words**.
+Nothing is replaced unless you choose it. An accepted marker remembers
+what was transcribed there: hover over it to see the words, and
+**Restore** to put them back. The offers can be switched off in the same
+card.
+
+<img width="1440" alt="An unsure passage outlined, with Mark [indistinct], Keep the words and Play beneath it" src="site/img/unsure.png" />
+
+If a whole passage has come out wrong — a repeated loop, invented text —
+right-click it (or shift-click to select several paragraphs first) and
+choose **Re-transcribe**. Only that part of the recording is run again,
+by default with a different engine from the one that made the
+transcript; the rest of the transcript stays editable meanwhile, and
+**Undo** reverses it. Paragraphs that look like a loop or invented text
+are marked with an amber stripe.
+
+Stretches of a recording with no sound at all — a microphone switched on
+late, a muted line — are marked `[No audio from 00:00 to 04:12]` rather
+than filled with invented text.
+
+### 4. Questions and answers
+
+For an interview, switch the layout at the top of the tools panel to
+**Q & A**. Questions are numbered and answers marked, the way a record of
+interview reads; `[No audio]` lines carry no number. The **Q** / **A**
+button beside each speaker says who asks — until you press one, the
+askers are suggested from the wording — and when a different person
+takes over the questions, that question names them. Save writes the
+layout you see, and a Q&A Word document reopens in Q&A mode.
+
+<img width="1440" alt="The Q&A layout: numbered questions, answers, and the second officer named where they take over" src="site/img/qa.png" />
+
+### 5. Save
+
+Under **Saved file**, choose whether to include timestamps, colour each
+speaker's paragraphs, and the Word layout:
+
+- **Plain** — a monospaced A4 document with timestamps in the margin;
+- **Court** — Times New Roman, double spaced, every line numbered from 1
+  on each page, the heading and recording at the head of each page;
+- **ERISP** — a record-of-interview heading, 1.5 spaced, numbered lines.
+
+Then press **Save**. The menu beside it saves without speaker labels, as
+a new revision of a reopened transcript, or exports a PDF copy. Word is
+the default format (`.txt` and `.pdf` are in Settings); a saved `.docx`
+or `.txt` can be reopened from **Recent** to carry on reviewing, and a
+`.docx` remembers where its recording is.
+
+Once you have checked the transcript against the recording, type your
+name under **Verify**. The saved document then says *"This transcript has
+been verified by …"*; until then it carries a warning that it may not
+have been checked by a person.
+
+### Settings
+
+**Settings** holds the default save format and Word layout, the
+language (auto-detect, or set it — and *translate into English* if you
+want that), speaker detection, extra files (SRT / VTT subtitles, a TSV
+spreadsheet, the engine's raw JSON), the theme, update checks, the
+**Models** page, and **Accuracy tuning**, which rarely needs touching:
+the engine (**Automatic** picks faster-whisper), beam size, the
+thresholds that catch loops and silence, and whether each window is fed
+the text before it (off by default — it tends to cause repetition
+loops). **Acknowledgements** lists the third-party software and models.
 
 ## Running the tests
 
@@ -663,7 +384,7 @@ package carries its own Python while the Terminal install builds one.
 With the **package**, Python, the app script and the web interface all
 live inside `Transcribr.app` itself, and the per-user environment is
 created on first launch purely to hold any engines you add later. With
-the **Terminal install**, `transcribr.py`, `webdist/` and the full
+the **Terminal install**, `transcribr/`, `webdist/` and the full
 environment sit in `~/Library/Application Support/Transcribr/` instead,
 and the app bundle is only a launcher.
 
@@ -756,31 +477,28 @@ If the app does not launch:
 
    macOS:
    ```bash
-   source "$HOME/Library/Application Support/Transcribr/venv/bin/activate"
-   python "$HOME/Library/Application Support/Transcribr/transcribr.py"
+   cd "$HOME/Library/Application Support/Transcribr"
+   source venv/bin/activate
+   python -m transcribr
    ```
 
    Windows (PowerShell):
    ```powershell
-   & "$env:LOCALAPPDATA\Transcribr\venv\Scripts\python.exe" `
-     "$env:LOCALAPPDATA\Transcribr\transcribr.py"
+   cd "$env:LOCALAPPDATA\Transcribr"
+   & ".\venv\Scripts\python.exe" -m transcribr
    ```
 
 4. **If the new (web) interface's window won't open**, run it without
    a window and use your browser instead — from the same venv python:
 
    ```bash
-   python transcribr.py --serve
+   python -m transcribr --serve
    ```
 
    then open the printed `http://127.0.0.1:…` URL. That URL only works
    on your own machine.
 
 ## Development
-
-Cutting and signing a release — Apple Developer setup, what goes in the
-package and why, and the per-release checklist — is documented
-separately in **[RELEASING.md](RELEASING.md)**.
 
 The web interface's source lives in `web/` (React + TypeScript,
 built with Vite). Node.js (≥ 20) is needed **only for development** —
@@ -794,7 +512,7 @@ npm install
 npm run build     # type-checks, then writes ../webdist/
 ```
 
-For live-reload development: `python3 transcribr.py --serve` in one
+For live-reload development: `python3 -m transcribr --serve` in one
 terminal (port 8737, token `dev`) and `npm run dev` in another, then
 open the Vite URL. If the repository lives in Dropbox, mark
 `web/node_modules` as ignored so it doesn't sync:
@@ -813,3 +531,22 @@ Whisper models from the **Models** tab.
 The reference **openai-whisper** engine (and its ~2 GB PyTorch
 dependency) is also not installed by default — add it from the
 **Models** tab if you want it.
+
+## Licence
+
+Transcribr is made by **Fisheggs Pty Ltd**. Using it — including for
+work — is covered by the **Transcribr End User Licence Agreement**
+(`docs/licence/EULA.md`), which the installers show. It is free of
+charge.
+
+The source code is available under the **PolyForm Strict License
+1.0.0** (`LICENSE`): you may read it and use it for noncommercial
+purposes, but not change or redistribute it. Versions up to and
+including 0.10.0 were released under the GNU AGPL 3.0
+(`LICENSE-AGPL-3.0`), and copies of those remain under it.
+
+Third-party software and models keep their own licences; each build
+writes `THIRD-PARTY-NOTICES.txt` from what it actually contains, and the
+app shows them under Settings → Acknowledgements.
+
+Questions: hello@fisheggs.au.

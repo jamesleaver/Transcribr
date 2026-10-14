@@ -11,14 +11,20 @@ Config-directory access is redirected to a temp directory, mirroring
 test_transcribr.py.
 """
 
+import os
 import sys
+import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _harness  # noqa: F401  (redirects the config dir; must precede transcribr)
 
 try:
     import transcribr as T
@@ -26,20 +32,6 @@ except ImportError as e:
     raise unittest.SkipTest(
         f"cannot import transcribr in this interpreter: {e}")
 
-_real_config_dir = T._config_dir
-_tmp_config = None
-
-
-def setUpModule():
-    global _tmp_config
-    _tmp_config = tempfile.TemporaryDirectory(prefix="transcribr-web-tests-")
-    T._config_dir = lambda: Path(_tmp_config.name)
-
-
-def tearDownModule():
-    T._config_dir = _real_config_dir
-    if _tmp_config is not None:
-        _tmp_config.cleanup()
 
 
 class _FakeTimer:
@@ -431,6 +423,43 @@ class TestUpdateChecker(unittest.TestCase):
                 T._safe_extract_zip(z, out)
             self.assertTrue((out / "macos" / "install.command").exists())
 
+    def test_a_release_without_a_checksum_is_refused(self):
+        """What the updater downloads is handed to the OS and run, so an
+        unverifiable download must not be. Every release publishes a
+        digest; its absence means something is wrong rather than
+        something is old, and "if sha and ..." turned the only integrity
+        check off in exactly that case."""
+        u = T.UpdateChecker(self._Broker())
+        u.asset = ("Transcribr-9.9.9-arm64.pkg",
+                   "https://github.com/x/y/releases/download/v9/a.pkg",
+                   1234, None)
+        u._install()
+        self.assertEqual(u.state, "error")
+        self.assertIn("checksum", u.error)
+
+    def test_a_download_from_somewhere_other_than_github_is_refused(self):
+        u = T.UpdateChecker(self._Broker())
+        u.asset = ("Transcribr-9.9.9-arm64.pkg",
+                   "https://evil.example/Transcribr-9.9.9-arm64.pkg",
+                   1234, "a" * 64)
+        u._install()
+        self.assertEqual(u.state, "error")
+        self.assertIn("not a GitHub one", u.error)
+
+    def test_which_download_addresses_count_as_github(self):
+        for url in ("https://github.com/jamesleaver/Transcribr/releases/"
+                    "download/v1/a.pkg",
+                    "https://objects.githubusercontent.com/x/y",
+                    "https://release-assets.githubusercontent.com/x"):
+            self.assertTrue(T._is_github_url(url), url)
+        for url in ("http://github.com/a.pkg",            # not https
+                    "https://github.com.evil.example/a",  # suffix trick
+                    "https://evil.example/github.com/a",  # path, not host
+                    "https://notgithub.com/a",
+                    "https://user:pass@evil.example/x#github.com",
+                    ""):
+            self.assertFalse(T._is_github_url(url), url)
+
     def test_check_updates_defaults_on(self):
         self.assertTrue(T.default_settings()["check_updates"])
         self.assertIn("check_updates", T.validate_settings({}))
@@ -439,6 +468,400 @@ class TestUpdateChecker(unittest.TestCase):
 # =====================================================================
 # TranscriptModel - playback spans, confidence, attention
 # =====================================================================
+
+class TestVocabularyPriming(unittest.TestCase):
+    """Confirmed terms, and the deliberate decision not to use them by
+    default."""
+
+    def setUp(self):
+        # ignore_cleanup_errors: a review session's autosave is a
+        # background timer, and tests do not close their sessions - so
+        # one can fire into this directory while it is being removed.
+        # Windows then refuses to delete the directory, which is not
+        # worth failing a run over.
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        self._orig = os.environ.get("TRANSCRIBR_CONFIG_DIR")
+        os.environ["TRANSCRIBR_CONFIG_DIR"] = self.tmp.name
+        self.addCleanup(lambda: os.environ.__setitem__(
+            "TRANSCRIBR_CONFIG_DIR", self._orig) if self._orig
+            else os.environ.pop("TRANSCRIBR_CONFIG_DIR", None))
+
+    def test_priming_is_off_by_default(self):
+        # Naming a person makes the engine likelier to hear them where
+        # they were not said. For a record relied on as evidence that is
+        # the wrong default, however tempting the accuracy gain.
+        self.assertFalse(T.default_settings()["prime_with_terms"])
+
+    def test_terms_are_ignored_unless_priming_is_on(self):
+        settings = dict(T.default_settings())
+        self.assertEqual(
+            T.compose_initial_prompt(settings, ["Cavill", "Doyle"]), "")
+
+    def test_typed_hint_is_used_on_its_own(self):
+        settings = dict(T.default_settings(), prompt="traffic incident")
+        self.assertEqual(
+            T.compose_initial_prompt(settings, ["Cavill"]), "traffic incident")
+
+    def test_priming_combines_the_typed_hint_and_confirmed_terms(self):
+        settings = dict(T.default_settings(), prompt="traffic incident",
+                        prime_with_terms=True)
+        got = T.compose_initial_prompt(settings, ["Cavill", "Doyle"])
+        self.assertIn("traffic incident", got)
+        self.assertIn("Cavill", got)
+        self.assertIn("Doyle", got)
+
+    def test_a_correction_records_the_term_against_its_folder(self):
+        here = str(Path(self.tmp.name) / "brief-one" / "interview.docx")
+        self.assertEqual(T._terms_load(here), [])
+        T._terms_add(here, "Cavill")
+        T._terms_add(here, "Constable Doyle")
+        self.assertEqual(T._terms_load(here), ["Constable Doyle", "Cavill"])
+
+    def test_terms_do_not_leak_between_folders(self):
+        # The point of scoping: a name confirmed for one set of
+        # recordings must not be suggested to the engine while it
+        # transcribes an unrelated one, which may belong to someone else
+        # entirely.
+        one = str(Path(self.tmp.name) / "brief-one" / "a.docx")
+        two = str(Path(self.tmp.name) / "brief-two" / "b.docx")
+        T._terms_add(one, "Cavill")
+        self.assertEqual(T._terms_load(one), ["Cavill"])
+        self.assertEqual(T._terms_load(two), [])
+
+    def test_terms_are_shared_across_one_folder(self):
+        # And the point of keeping them at all: the second recording in
+        # a set benefits from the names settled while reviewing the first.
+        first = str(Path(self.tmp.name) / "brief" / "day-one.docx")
+        second = str(Path(self.tmp.name) / "brief" / "day-two.mp4")
+        T._terms_add(first, "Cavill")
+        self.assertEqual(T._terms_load(second), ["Cavill"])
+
+    def test_recording_a_term_again_moves_it_up_without_duplicating(self):
+        here = str(Path(self.tmp.name) / "brief" / "a.docx")
+        T._terms_add(here, "Cavill")
+        T._terms_add(here, "Doyle")
+        T._terms_add(here, "cavill")
+        self.assertEqual(len(T._terms_load(here)), 2)
+        self.assertEqual(T._terms_load(here)[0], "cavill")
+
+    def test_priming_uses_only_this_folders_terms(self):
+        one = str(Path(self.tmp.name) / "brief-one" / "a.mp4")
+        two = str(Path(self.tmp.name) / "brief-two" / "b.mp4")
+        T._terms_add(one, "Cavill")
+        settings = dict(T.default_settings(), prime_with_terms=True)
+        self.assertIn("Cavill",
+                      T.compose_initial_prompt(settings, source_path=one))
+        self.assertEqual("",
+                         T.compose_initial_prompt(settings, source_path=two))
+
+    def test_the_vocabulary_field_is_shown(self):
+        # It is the most direct accuracy control in the app; hidden
+        # behind a setting, most people never found it.
+        self.assertTrue(T.default_settings()["show_prompt"])
+
+
+class TestTranscriptSearch(unittest.TestCase):
+    """Finding a half-remembered phrase across saved transcripts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _make(self, name, rows, title=None):
+        paras = [[(float(t), float(t) + 4.0, txt)] for t, txt in rows]
+        out = self.dir / name
+        T.write_paragraphs_to_file(paras, out, show_timestamp=True,
+                                   title=title, output_format="txt",
+                                   speakers=None)
+        return str(out)
+
+    def test_finds_a_phrase_and_where_to_hear_it(self):
+        a = self._make("interview.transcript.txt", [
+            (0, "A white van came through after the light changed."),
+            (30, "It clipped a cyclist near the crossing.")])
+        b = self._make("statement.transcript.txt", [
+            (0, "I did not see any van that afternoon."),
+            (60, "The white van was parked outside when I arrived.")])
+        r = T.search_transcripts("white van", paths=[a, b])
+        self.assertEqual(len(r["results"]), 2)
+        # The timestamp is the point: it is what makes a hit playable.
+        starts = {f["name"]: f["hits"][0]["start"] for f in r["results"]}
+        self.assertEqual(starts["interview.transcript.txt"], 0.0)
+        self.assertEqual(starts["statement.transcript.txt"], 60.0)
+
+    def test_search_is_case_insensitive(self):
+        a = self._make("a.transcript.txt", [(0, "The Defendant said nothing.")])
+        self.assertEqual(len(T.search_transcripts("defendant", paths=[a])["results"]), 1)
+
+    def test_files_without_the_phrase_are_left_out(self):
+        a = self._make("a.transcript.txt", [(0, "Nothing relevant here.")])
+        self.assertEqual(T.search_transcripts("white van", paths=[a])["results"], [])
+
+    def test_an_empty_query_searches_nothing(self):
+        a = self._make("a.transcript.txt", [(0, "Something.")])
+        r = T.search_transcripts("   ", paths=[a])
+        self.assertEqual(r["results"], [])
+        self.assertEqual(r["searched"], 0)
+
+    def test_unreadable_files_are_counted_not_fatal(self):
+        good = self._make("good.transcript.txt", [(0, "A white van.")])
+        bad = self.dir / "bad.transcript.txt"
+        bad.write_bytes(b"\x00\x01 not a transcript")
+        r = T.search_transcripts("white van", paths=[good, str(bad)])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertEqual(r["unreadable"], 1)
+
+    def test_hits_per_file_are_capped(self):
+        rows = [(i * 10, "The white van again.") for i in range(40)]
+        a = self._make("many.transcript.txt", rows)
+        hits = T.search_transcripts("white van", paths=[a])["results"][0]["hits"]
+        self.assertLessEqual(len(hits), T.SEARCH_HITS_PER_FILE)
+
+    def test_candidates_include_folder_mates_of_recents(self):
+        # A matter folder's other recordings should be searchable without
+        # having been opened first.
+        self._make("opened.transcript.txt", [(0, "one")])
+        self._make("never-opened.transcript.txt", [(0, "two")])
+        found = T._search_candidates(
+            extra_paths=[str(self.dir / "opened.transcript.txt")])
+        names = {Path(f).name for f in found}
+        self.assertIn("never-opened.transcript.txt", names)
+
+
+class TestTerms(unittest.TestCase):
+    """Candidate names, and correcting one everywhere at once."""
+
+    WITNESS = [
+        [(0.0, 3.0, "Just a moment, you just assured me that I could speak.")],
+        [(3.0, 6.0, "The witness is Mr Cavill, of Brunswick Street.")],
+        [(6.0, 9.0, "Cavil said he saw the van near Johnston Street.")],
+        [(9.0, 12.0, "Constable Doyle attended. Doyle made the arrest.")],
+        [(12.0, 15.0, "Carvill was standing outside the bookshop.")],
+    ]
+
+    def _group(self, terms, containing):
+        for g in terms:
+            if any(containing in v["term"] for v in g["variants"]):
+                return g
+        self.fail(f"no group containing {containing!r}")
+
+    def test_near_spellings_are_grouped(self):
+        # The whole point: one surname spelled three ways is one row to
+        # fix, not three to hunt down.
+        g = self._group(T.extract_terms(self.WITNESS), "Cavil")
+        spellings = {v["term"] for v in g["variants"]}
+        self.assertEqual(spellings, {"Cavill", "Cavil", "Carvill"})
+        self.assertEqual(g["count"], 3)
+
+    def test_a_name_behind_a_title_is_found(self):
+        # "Constable Doyle" also yields "Doyle", which is what matches a
+        # stray spelling elsewhere in the transcript.
+        terms = T.extract_terms(self.WITNESS)
+        self.assertTrue(any(g["term"] == "Doyle" for g in terms))
+
+    def test_ordinary_words_are_not_names(self):
+        terms = {g["term"] for g in T.extract_terms(self.WITNESS)}
+        for word in ("The", "Just", "You", "And"):
+            self.assertNotIn(word, terms)
+
+    def test_multi_word_terms_stay_together(self):
+        terms = {g["term"] for g in T.extract_terms(self.WITNESS)}
+        self.assertIn("Brunswick Street", terms)
+
+    def test_replace_term_fixes_every_spelling_at_once(self):
+        m = T.TranscriptModel([list(p) for p in self.WITNESS])
+        n = m.replace_term(["Cavill", "Cavil", "Carvill"], "Cavill")
+        self.assertEqual(n, 2)          # Cavil and Carvill; Cavill was right
+        joined = " ".join(m.body(i) for i in range(len(m.paragraphs)))
+        self.assertNotIn("Carvill", joined)
+        self.assertIn("Mr Cavill", joined)
+
+    def test_replace_term_respects_word_boundaries(self):
+        # replace_all() is a substring replace and would corrupt these;
+        # a name correction must not touch words that merely contain it.
+        m = T.TranscriptModel([[(0.0, 1.0, "Cavil was cavalier about Cavilling.")]])
+        m.replace_term(["Cavil"], "Cavill")
+        self.assertEqual(m.body(0), "Cavill was cavalier about Cavilling.")
+
+    def test_replace_term_is_one_undo_step(self):
+        m = T.TranscriptModel([list(p) for p in self.WITNESS])
+        before = [m.body(i) for i in range(len(m.paragraphs))]
+        m.replace_term(["Cavil", "Carvill"], "Cavill")
+        m.undo()
+        self.assertEqual([m.body(i) for i in range(len(m.paragraphs))], before)
+
+    def test_replace_term_does_nothing_when_nothing_matches(self):
+        m = T.TranscriptModel([list(p) for p in self.WITNESS])
+        rev = m.rev
+        self.assertEqual(m.replace_term(["Nonesuch"], "Other"), 0)
+        self.assertEqual(m.rev, rev)    # no undo step recorded
+
+
+class TestFlaggedSpans(unittest.TestCase):
+    """The second pass re-runs what detect_hallucinations() flagged."""
+
+    def _model(self, bodies):
+        paras = [[(float(i * 5), float(i * 5 + 4), b)]
+                 for i, b in enumerate(bodies)]
+        return T.TranscriptModel(paras)
+
+    def test_adjacent_flags_become_one_span(self):
+        # A repetition loop runs across several paragraphs; re-running it
+        # as one stretch gives the engine more context than three
+        # separate slices, and costs one model load instead of three.
+        m = self._model([
+            "Something ordinary was said here.",
+            "How dare get your hands off me?",
+            "How dare get your hands off me?",
+            "How dare get your hands off me?",
+            "Something else entirely.",
+        ])
+        spans = T.flagged_spans(m)
+        self.assertEqual(len(spans), 1)
+        lo, hi = spans[0]
+        self.assertLessEqual(lo, 1)
+        self.assertGreaterEqual(hi, 3)
+
+    def test_clean_transcript_yields_no_work(self):
+        m = self._model([
+            "Just a moment, you just assured me that I could speak.",
+            "Sit down inside the car. You're under arrest.",
+            "Look, I'm under what?",
+        ])
+        self.assertEqual(T.flagged_spans(m), [])
+
+    def test_distant_flags_stay_separate(self):
+        bodies = ["Ordinary sentence number %d here." % i for i in range(14)]
+        bodies[1] = bodies[2] = "How dare get your hands off me?"
+        bodies[11] = bodies[12] = "Get some cuffs get some cuffs get some cuffs."
+        spans = T.flagged_spans(self._model(bodies))
+        self.assertEqual(len(spans), 2)
+
+    def test_span_count_is_capped(self):
+        # A transcript that is mostly hallucination is a bad recording,
+        # not something a second pass should grind through.
+        bodies = []
+        for i in range(40):
+            bodies += ["Clean line %d." % i, "How dare get your hands off me?",
+                       "How dare get your hands off me?"]
+        self.assertLessEqual(len(T.flagged_spans(self._model(bodies))), 12)
+
+    def test_the_acceptance_test_rejects_a_still_bad_result(self):
+        # This is what makes the pass safe: a replacement is only kept
+        # when the same detector no longer objects, so the pass can
+        # never introduce a flagged paragraph.
+        still_looping = [(0.0, 2.0, "How dare get your hands off me?"),
+                         (2.0, 4.0, "How dare get your hands off me?"),
+                         (4.0, 6.0, "How dare get your hands off me?")]
+        paras = T.paragraphify(still_looping, 1.0)
+        self.assertTrue(T.detect_hallucinations(paras))
+
+        clean = [(0.0, 2.0, "How dare you. Get your hands off me!"),
+                 (2.0, 4.0, "Ta-ta, and farewell.")]
+        self.assertFalse(T.detect_hallucinations(T.paragraphify(clean, 1.0)))
+
+    def _looping_transcript(self):
+        """A short repetition loop inside an otherwise clean recording -
+        the flagged stretch is a small fraction of the whole, as it is
+        on a real file."""
+        paras, t = [], 0.0
+        for i in range(20):
+            paras.append([(t, t + 2.0, "Ordinary sentence number %d." % i)])
+            t += 2.0
+        loop_start = t
+        for _ in range(4):
+            paras.append([(t, t + 2.0, "How dare get your hands off me?")])
+            t += 2.0
+        for i in range(20):
+            paras.append([(t, t + 2.0, "Later sentence number %d." % i)])
+            t += 2.0
+        return paras, loop_start
+
+    def test_second_pass_turns_conditioning_off(self):
+        # Conditioning is what feeds a repetition back into the model, so
+        # the retry must drop it even for someone who has turned it on
+        # for the first pass (it is off by default).
+        seen = {}
+        settings = dict(T.default_settings(), condition_on_previous_text=True)
+
+        def fake_slice(audio, start, end, settings, q, cancel):
+            seen.update(settings)
+            return [(start, start + 2.0, "How dare you. Get your hands off me!")]
+
+        looping, _start = self._looping_transcript()
+        from unittest import mock
+        with mock.patch.object(T.audioprep, "retranscribe_slice", fake_slice):
+            paras, _w, attempted, runs = T.auto_retranscribe(
+                looping, [], "/nonexistent.wav", settings)
+        self.assertEqual(attempted, 1)
+        self.assertEqual(len(runs), 1)
+        self.assertFalse(seen["condition_on_previous_text"])
+        self.assertTrue(settings["condition_on_previous_text"],
+                        "the caller's own settings are not changed")
+        self.assertFalse(T.detect_hallucinations(paras))
+
+    def test_second_pass_passes_a_real_cancel_event(self):
+        # The engine runners call cancel_event.is_set() unconditionally,
+        # so passing None makes every section fail with AttributeError -
+        # silently, because the failure is caught per section.
+        seen = {}
+
+        def fake_slice(audio, start, end, settings, q, cancel):
+            seen["cancel"] = cancel
+            cancel.is_set()                     # what the runners do
+            return [(start, start + 2.0, "How dare you. Get your hands off me!")]
+
+        looping, _start = self._looping_transcript()
+        from unittest import mock
+        with mock.patch.object(T.audioprep, "retranscribe_slice", fake_slice):
+            _p, _w, _a, runs = T.auto_retranscribe(
+                looping, [], "/nonexistent.wav", T.default_settings())
+        self.assertEqual(len(runs), 1)
+        self.assertIsNotNone(seen["cancel"])
+
+    def test_second_pass_keeps_the_original_when_no_better(self):
+        # If the retry comes back just as bad, the original text stays.
+        def still_bad(audio, start, end, settings, q, cancel):
+            return [(start + i, start + i + 1, "How dare get your hands off me?")
+                    for i in range(4)]
+
+        looping, _start = self._looping_transcript()
+        before = [list(p) for p in looping]
+        from unittest import mock
+        with mock.patch.object(T.audioprep, "retranscribe_slice", still_bad):
+            paras, _w, attempted, runs = T.auto_retranscribe(
+                looping, [], "/nonexistent.wav", T.default_settings())
+        self.assertEqual(attempted, 1)
+        self.assertEqual(runs, [])
+        self.assertEqual(paras, before)
+
+    def test_second_pass_drops_stale_confidences(self):
+        # Word confidences describe the words that were there before; a
+        # replaced span must not shade its new text with the old scores.
+        def fake_slice(audio, start, end, settings, q, cancel):
+            return [(start, start + 2.0, "How dare you. Get your hands off me!")]
+
+        looping, loop_start = self._looping_transcript()
+        words = [(1.0, 1.5, "Ordinary", 0.9),
+                 (loop_start + 1, loop_start + 1.5, "dare", 0.2),
+                 (loop_start + 3, loop_start + 3.5, "hands", 0.2),
+                 (110.0, 110.5, "later", 0.8)]
+        from unittest import mock
+        with mock.patch.object(T.audioprep, "retranscribe_slice", fake_slice):
+            _p, kept, _a, runs = T.auto_retranscribe(
+                looping, words, "/nonexistent.wav", T.default_settings())
+        self.assertEqual(len(runs), 1)
+        self.assertIn((1.0, 1.5, "Ordinary", 0.9), kept)     # before the span
+        self.assertIn((110.0, 110.5, "later", 0.8), kept)    # after it
+        self.assertNotIn((loop_start + 1, loop_start + 1.5, "dare", 0.2), kept)
+        self.assertNotIn((loop_start + 3, loop_start + 3.5, "hands", 0.2), kept)
+
+    def test_auto_retranscribe_defaults_on(self):
+        self.assertTrue(T.default_settings()["auto_retranscribe"])
+        self.assertIn("auto_retranscribe", T.validate_settings({}))
+
 
 class TestModelDerived(unittest.TestCase):
     def test_playback_span_real_ends_padded(self):
@@ -670,14 +1093,14 @@ class TestRunController(unittest.TestCase):
     _ENGINES = [("whisper", "OpenAI Whisper (reference)")]
 
     def setUp(self):
-        self._saved_engines = T.AVAILABLE_ENGINES
-        T.AVAILABLE_ENGINES = list(self._ENGINES)
+        self._saved_engines = T.engines._AVAILABLE_ENGINES
+        T.engines._AVAILABLE_ENGINES = list(self._ENGINES)
         self.settings = T.default_settings()
-        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-run-")
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True, prefix="transcribr-run-")
         self.addCleanup(self.tmp.cleanup)
 
     def tearDown(self):
-        T.AVAILABLE_ENGINES = self._saved_engines
+        T.engines._AVAILABLE_ENGINES = self._saved_engines
 
     def _media(self, name):
         p = Path(self.tmp.name) / name
@@ -773,7 +1196,7 @@ class TestRunController(unittest.TestCase):
         self.assertEqual(len(done), 1)
 
     def test_no_engine_maps_to_apifail(self):
-        T.AVAILABLE_ENGINES = []
+        T.engines._AVAILABLE_ENGINES = []
         c, _ = self._controller(lambda p, q, e: None)
         with self.assertRaises(T.ApiFail) as cm:
             c.start_single(self._media("a.mp3"), "", self.settings)
@@ -903,7 +1326,7 @@ class TestDownloadFeedback(unittest.TestCase):
         import queue
         q = queue.Queue()
         w = T._ProgressWriter(q, audio_duration=120.0,
-                              transcribe_start=T.time.time() - 10.0)
+                              transcribe_start=time.time() - 10.0)
         w.write("[00:00.000 --> 00:30.000]  Hello world\n")
         kinds, etas = [], []
         for kind, data in self._drain_queue(q):
@@ -993,15 +1416,15 @@ class TestModelStore(unittest.TestCase):
     real download is needed."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-models-")
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True, prefix="transcribr-models-")
         self.addCleanup(self.tmp.cleanup)
-        self._saved_whisper_dir = T._whisper_cache_dir
-        self._saved_hf_sizes = T._hf_repo_sizes
-        T._whisper_cache_dir = lambda: Path(self.tmp.name)
+        self._saved_whisper_dir = T.models._whisper_cache_dir
+        self._saved_hf_sizes = T.models._hf_repo_sizes
+        T.models._whisper_cache_dir = lambda: Path(self.tmp.name)
         self.addCleanup(
-            lambda: setattr(T, "_whisper_cache_dir", self._saved_whisper_dir))
+            lambda: setattr(T.models, "_whisper_cache_dir", self._saved_whisper_dir))
         self.addCleanup(
-            lambda: setattr(T, "_hf_repo_sizes", self._saved_hf_sizes))
+            lambda: setattr(T.models, "_hf_repo_sizes", self._saved_hf_sizes))
 
     def _pt(self, name, size):
         (Path(self.tmp.name) / name).write_bytes(b"\0" * size)
@@ -1009,7 +1432,7 @@ class TestModelStore(unittest.TestCase):
     def test_openai_models_no_alias_duplicates(self):
         self._pt("large-v3.pt", 2000)
         self._pt("small.en.pt", 500)
-        T._hf_repo_sizes = lambda: {}
+        T.models._hf_repo_sizes = lambda: {}
         store = T.ModelStore(engines=[("whisper", "OpenAI Whisper")])
         eng = store.payload()["engines"][0]
         by = {m["model"]: m for m in eng["models"]}
@@ -1038,7 +1461,7 @@ class TestModelStore(unittest.TestCase):
                          "large-v3-turbo")
 
     def test_hf_engine_standard_and_custom(self):
-        T._hf_repo_sizes = lambda: {
+        T.models._hf_repo_sizes = lambda: {
             "Systran/faster-whisper-large-v3": (1500, ["h1"]),
             "deepdml/faster-whisper-large-v3-turbo-ct2": (900, ["h2"]),
             "mlx-community/whisper-tiny-mlx": (300, ["h3"]),
@@ -1060,7 +1483,7 @@ class TestModelStore(unittest.TestCase):
 
     def test_grand_total_across_engines(self):
         self._pt("tiny.pt", 1000)
-        T._hf_repo_sizes = lambda: {
+        T.models._hf_repo_sizes = lambda: {
             "mlx-community/whisper-tiny-mlx": (300, ["h"]),
         }
         store = T.ModelStore(engines=[("whisper", "W"), ("mlx", "M")])
@@ -1081,7 +1504,7 @@ class TestModelStore(unittest.TestCase):
         self.assertEqual(merged["size"], 3000)
 
     def test_payload_lists_installable_and_removable(self):
-        T._hf_repo_sizes = lambda: {}
+        T.models._hf_repo_sizes = lambda: {}
         # mlx-whisper is only offered on Apple Silicon; pin it off so this
         # asserts the same thing on every machine.
         mlx = T._INSTALLABLE_ENGINES["mlx"]
@@ -1134,7 +1557,7 @@ class TestModelStore(unittest.TestCase):
         from unittest import mock
         # Non-Intel-mac (this test host): openai-whisper plus a numpy cap
         # to keep numba importable.
-        with mock.patch.object(T.sys, "platform", "linux"):
+        with mock.patch.object(sys, "platform", "linux"):
             args = T._engine_install_args("whisper")
         self.assertIn("openai-whisper>=20250625", args)
         self.assertIn("--prefer-binary", args)
@@ -1143,7 +1566,7 @@ class TestModelStore(unittest.TestCase):
 
     def test_engine_install_args_intel_mac_pins_chain(self):
         from unittest import mock
-        with mock.patch.object(T.sys, "platform", "darwin"), \
+        with mock.patch.object(sys, "platform", "darwin"), \
              mock.patch("platform.machine", return_value="x86_64"):
             args = T._engine_install_args("whisper")
         self.assertIn("torch==2.2.2", args)
@@ -1152,7 +1575,7 @@ class TestModelStore(unittest.TestCase):
 
     def test_uninstall_openai_deletes_file(self):
         self._pt("small.en.pt", 777)
-        T._hf_repo_sizes = lambda: {}
+        T.models._hf_repo_sizes = lambda: {}
         freed = T._uninstall_model("whisper", "small.en")
         self.assertEqual(freed, 777)
         self.assertFalse((Path(self.tmp.name) / "small.en.pt").exists())
@@ -1167,11 +1590,11 @@ class TestModelController(unittest.TestCase):
     prefetch/uninstall/store so no real weights are touched."""
 
     def setUp(self):
-        self._saved_engines = T.AVAILABLE_ENGINES
-        T.AVAILABLE_ENGINES = [("faster", "faster-whisper"),
+        self._saved_engines = T.engines._AVAILABLE_ENGINES
+        T.engines._AVAILABLE_ENGINES = [("faster", "faster-whisper"),
                                ("whisper", "OpenAI Whisper")]
         self.addCleanup(
-            lambda: setattr(T, "AVAILABLE_ENGINES", self._saved_engines))
+            lambda: setattr(T.engines, "_AVAILABLE_ENGINES", self._saved_engines))
         self.broker = T.EventBroker()
         self.events_q, _ = self.broker.subscribe()
         self.store = {"engines": [], "total": 0,
@@ -1261,7 +1684,7 @@ class TestModelController(unittest.TestCase):
 
     def test_engine_install_lifecycle_refreshes_engines(self):
         import threading
-        T.AVAILABLE_ENGINES = [("faster", "faster-whisper")]
+        T.engines._AVAILABLE_ENGINES = [("faster", "faster-whisper")]
         release = threading.Event()
         ops = []
 
@@ -1270,11 +1693,11 @@ class TestModelController(unittest.TestCase):
             on_line("Collecting openai-whisper")
             release.wait(5)
 
-        orig_detect = T._detect_engines
-        T._detect_engines = lambda: [
+        orig_detect = T.engines._detect_engines
+        T.engines._detect_engines = lambda: [
             ("faster", "faster-whisper"),
             ("whisper", "OpenAI Whisper (reference)")]
-        self.addCleanup(lambda: setattr(T, "_detect_engines", orig_detect))
+        self.addCleanup(lambda: setattr(T.engines, "_detect_engines", orig_detect))
 
         mc = T.ModelController(self.broker, engine_op_fn=fake_op,
                                store_fn=lambda: dict(self.store))
@@ -1285,12 +1708,12 @@ class TestModelController(unittest.TestCase):
         self.assertEqual(cm.exception.code, "model_busy")
         release.set()
         mc.worker.join(5)
-        self.assertIn("whisper", [k for k, _ in T.AVAILABLE_ENGINES])
+        self.assertIn("whisper", [k for k, _ in T.engines._AVAILABLE_ENGINES])
         self.assertEqual(ops, [("install", "whisper")])
         self.assertIn("engines_changed", self._events())
 
     def test_engine_install_guards(self):
-        T.AVAILABLE_ENGINES = [("faster", "faster-whisper"),
+        T.engines._AVAILABLE_ENGINES = [("faster", "faster-whisper"),
                                ("whisper", "OpenAI Whisper (reference)")]
         mc = T.ModelController(self.broker,
                                engine_op_fn=lambda *a, **k: None,
@@ -1332,7 +1755,7 @@ class TestModelController(unittest.TestCase):
 
 class TestReviewSession(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-rev-")
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True, prefix="transcribr-rev-")
         self.addCleanup(self.tmp.cleanup)
         self.broker = T.EventBroker()
         self.events_q, _ = self.broker.subscribe()
@@ -1393,15 +1816,15 @@ class TestReviewSession(unittest.TestCase):
     def test_disclaimer_switches_when_verified(self):
         session, out = self._fresh_session(fmt="txt")
         session.save(session.model.rev, "no_labels",
-                     verified_by="  J. Leaver  ")
+                     verified_by="  A. Reviewer  ")
         text = Path(out).read_text()
-        self.assertIn("verified by J. Leaver", text)
+        self.assertIn("verified by A. Reviewer", text)
         self.assertNotIn("may not have been checked", text)
 
     def test_disclaimer_points_at_the_repository(self):
         # Both forms name where the transcript came from, and neither
         # carries a copyright line any more.
-        for verified in (None, "J. Leaver"):
+        for verified in (None, "A. Reviewer"):
             text = T._disclaimer_text(verified)
             self.assertIn("https://github.com/jamesleaver/Transcribr", text)
             self.assertNotIn("(c)", text)
@@ -1427,7 +1850,7 @@ class TestReviewSession(unittest.TestCase):
             self.skipTest("needs reportlab")
         session, out = self._fresh_session(fmt="txt")
         path = session.export(session.model.rev, "pdf",
-                              verified_by="J. Leaver")
+                              verified_by="A. Reviewer")
         self.assertTrue(path.endswith(".pdf"))
         self.assertTrue(Path(path).exists())
         self.assertFalse(session.closed)     # review stays open
@@ -1483,9 +1906,9 @@ class TestReviewSession(unittest.TestCase):
             self.skipTest("needs reportlab")
         session, _ = self._fresh_session(fmt="txt")
         path = session.export(session.model.rev, "pdf",
-                              verified_by="J. Leaver")
+                              verified_by="A. Reviewer")
         text = self._pdf_text(path)
-        self.assertIn("verified by J. Leaver", text)
+        self.assertIn("verified by A. Reviewer", text)
         self.assertNotIn("may not have been checked", text)
         # Without a name the warning stays.
         session2, _ = self._fresh_session(fmt="txt", name="unverified")
@@ -1499,12 +1922,16 @@ class TestReviewSession(unittest.TestCase):
     def test_verified_by_sticks_to_session(self):
         # Once set, the name applies to later writes that don't
         # mention it; an explicit empty string clears it again.
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            self.skipTest("needs reportlab")
         session, _ = self._fresh_session(fmt="txt")
         session.export(session.model.rev, "pdf",
-                       verified_by="J. Leaver")
-        self.assertEqual(session.verified_by, "J. Leaver")
+                       verified_by="A. Reviewer")
+        self.assertEqual(session.verified_by, "A. Reviewer")
         p2 = session.export(session.model.rev, "txt")
-        self.assertIn("verified by J. Leaver", Path(p2).read_text())
+        self.assertIn("verified by A. Reviewer", Path(p2).read_text())
         p3 = session.export(session.model.rev, "txt",
                             verified_by="")
         self.assertIsNone(session.verified_by)
@@ -1520,12 +1947,12 @@ class TestReviewSession(unittest.TestCase):
             self.skipTest("needs python-docx")
         session, out = self._fresh_session(fmt="docx")
         session.save(session.model.rev, "no_labels",
-                     verified_by="J. Leaver")
+                     verified_by="A. Reviewer")
         info = T.open_transcript_info(out)
-        self.assertEqual(info["verified_by"], "J. Leaver")
+        self.assertEqual(info["verified_by"], "A. Reviewer")
         reopened = T.ReviewSession(info, self.broker)
         self.assertEqual(reopened.payload()["verified_by"],
-                         "J. Leaver")
+                         "A. Reviewer")
         # An unverified docx seeds nothing.
         session2, out2 = self._fresh_session(fmt="docx",
                                              name="plain")
@@ -1551,10 +1978,10 @@ class TestReviewSession(unittest.TestCase):
         self.assertGreater(len(str(audio)), 255)
         T.write_paragraphs_to_file(
             _doc(), out, show_timestamp=True, title="T",
-            output_format="docx", verified_by="J. Leaver",
+            output_format="docx", verified_by="A. Reviewer",
             audio_path=str(audio))
         info = T.open_transcript_info(str(out))
-        self.assertEqual(info["verified_by"], "J. Leaver")
+        self.assertEqual(info["verified_by"], "A. Reviewer")
         # The relative entry still finds the audio (the filename
         # guess cannot - the stems differ).
         self.assertEqual(info["audio_path"], str(audio))
@@ -1909,13 +2336,13 @@ class TestReviewSession(unittest.TestCase):
         m = session.model
         before_last = m.body(len(m.paragraphs) - 1)
         spans = []
-        orig_slice = T.retranscribe_slice
+        orig_slice = T.audioprep.retranscribe_slice
 
         def fake_slice(audio, start, end, settings, q, cancel):
             spans.append((round(start, 2), end))
             return [(start + 0.1, start + 0.9, "Cleaned up.")]
 
-        T.retranscribe_slice = fake_slice
+        T.audioprep.retranscribe_slice = fake_slice
         backend = type("B", (), {"broker": self.broker,
                                  "retrans": None})()
         try:
@@ -1928,7 +2355,7 @@ class TestReviewSession(unittest.TestCase):
                     raise AssertionError("stuck")
                 _t.sleep(0.02)
         finally:
-            T.retranscribe_slice = orig_slice
+            T.audioprep.retranscribe_slice = orig_slice
         self.assertEqual(job.state, "done")
         # One span covering the whole selection (para 0 start -> para 2
         # start); the paragraph after it is untouched.
@@ -1945,7 +2372,7 @@ class TestReviewSession(unittest.TestCase):
             events.append((kind, data)), orig_publish(kind, data))
         backend = type("B", (), {"broker": self.broker,
                                  "retrans": None})()
-        orig = T.retranscribe_slice
+        orig = T.audioprep.retranscribe_slice
         calls = {}
 
         def fake_slice(audio_path, start, end, settings, q, cancel):
@@ -1960,7 +2387,7 @@ class TestReviewSession(unittest.TestCase):
             _time.sleep(0.05)
             return [(start + 0.1, start + 1.5, "Fixed text.")]
 
-        T.retranscribe_slice = fake_slice
+        T.audioprep.retranscribe_slice = fake_slice
         expected_span = (session.model.paragraphs[1][0][0],
                          session.model.paragraphs[2][0][0])
         try:
@@ -1975,7 +2402,7 @@ class TestReviewSession(unittest.TestCase):
                 _time.sleep(0.02)
             _time.sleep(0.4)   # let the drain thread flush
         finally:
-            T.retranscribe_slice = orig
+            T.audioprep.retranscribe_slice = orig
             self.broker.publish = orig_publish
         self.assertEqual(job.state, "done")
         self.assertFalse(calls["condition"])
@@ -2028,10 +2455,11 @@ class TestReviewSession(unittest.TestCase):
         data = T._autosave_load()
         self.assertEqual(
             set(data.keys()),
-            {"out_path", "show_timestamp", "title", "output_format",
-             "loaded", "diarized", "verified_by", "audio_path",
-             "paragraphs", "speakers", "speaker_names", "ts_marks",
-             "saved_at"})   # v0.6.0 schema + 0.9.x additions
+            {"out_path", "show_timestamp", "colour_speakers", "title",
+             "output_format", "loaded", "diarized", "verified_by",
+             "audio_path", "paragraphs", "speakers", "speaker_names",
+             "ts_marks", "saved_at", "text_origin", "speaker_origin",
+             "suggestions"})  # v0.6.0 schema + 0.9.x additions
         self.assertEqual(data["speakers"][0], "3")
         self.assertEqual(data["speaker_names"], {"3": "Q C"})
         restored = T.autosave_restore_info(data)
@@ -2090,7 +2518,7 @@ class TestHttpApi(unittest.TestCase):
         self.backend.review = None
         T._autosave_clear()
         T._recent_save([])
-        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-http-")
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True, prefix="transcribr-http-")
         self.addCleanup(self.tmp.cleanup)
 
     # -- tiny urllib client ----------------------------------------------
@@ -2122,6 +2550,26 @@ class TestHttpApi(unittest.TestCase):
 
     # -- tests -------------------------------------------------------------
 
+    def test_notices_open_in_a_source_checkout(self):
+        """A build ships THIRD-PARTY-NOTICES.txt beside the package; a
+        source checkout has none, so it is written on first ask - into
+        the config directory, never into the checkout."""
+        from unittest import mock
+        from transcribr import notices
+        opened = []
+        with mock.patch.object(notices, "bundled_notices_path",
+                               return_value=Path(self.tmp.name) / "absent.txt"), \
+                mock.patch("transcribr.server._open_path", opened.append):
+            status, body = self._req("POST", "/api/notices/open", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(opened), 1)
+        written = Path(opened[0])
+        self.assertEqual(written.parent, T._config_dir())
+        text = written.read_text(encoding="utf-8")
+        self.assertIn("Python packages", text)
+        self.assertIn("FFmpeg", text)
+        written.unlink()
+
     def test_api_requires_token(self):
         status, _ = self._req("GET", "/api/meta", token=False)
         self.assertEqual(status, 401)
@@ -2138,11 +2586,11 @@ class TestHttpApi(unittest.TestCase):
     def test_models_endpoint_shape_and_guards(self):
         # Point the model cache at empty temp dirs so nothing real is
         # ever read or deleted by this test.
-        saved_dir, saved_sizes = T._whisper_cache_dir, T._hf_repo_sizes
-        T._whisper_cache_dir = lambda: Path(self.tmp.name)
-        T._hf_repo_sizes = lambda: {}
-        self.addCleanup(lambda: setattr(T, "_whisper_cache_dir", saved_dir))
-        self.addCleanup(lambda: setattr(T, "_hf_repo_sizes", saved_sizes))
+        saved_dir, saved_sizes = T.models._whisper_cache_dir, T.models._hf_repo_sizes
+        T.models._whisper_cache_dir = lambda: Path(self.tmp.name)
+        T.models._hf_repo_sizes = lambda: {}
+        self.addCleanup(lambda: setattr(T.models, "_whisper_cache_dir", saved_dir))
+        self.addCleanup(lambda: setattr(T.models, "_hf_repo_sizes", saved_sizes))
         # Pin the installed-engine list to empty so every "isn't
         # installed" guard below holds on ANY machine. Without this, a
         # dev box that has faster-whisper installed would accept the
@@ -2150,9 +2598,9 @@ class TestHttpApi(unittest.TestCase):
         # HF cache, and one with openai-whisper installed would let the
         # engine-uninstall request pip-remove it from the real venv
         # (both jobs also 409 unrelated tests while in flight).
-        saved_engines = T.AVAILABLE_ENGINES
-        T.AVAILABLE_ENGINES = []
-        self.addCleanup(lambda: setattr(T, "AVAILABLE_ENGINES",
+        saved_engines = T.engines._AVAILABLE_ENGINES
+        T.engines._AVAILABLE_ENGINES = []
+        self.addCleanup(lambda: setattr(T.engines, "_AVAILABLE_ENGINES",
                                         saved_engines))
 
         status, payload = self._req("GET", "/api/models")
@@ -2233,9 +2681,9 @@ class TestHttpApi(unittest.TestCase):
 
     def test_url_open_scheme_guard(self):
         opened = []
-        saved = T._open_url
-        T._open_url = opened.append
-        self.addCleanup(lambda: setattr(T, "_open_url", saved))
+        saved = T.server._open_url
+        T.server._open_url = opened.append
+        self.addCleanup(lambda: setattr(T.server, "_open_url", saved))
         status, _ = self._req("POST", "/api/url/open",
                               {"url": "https://example.com"})
         self.assertEqual(status, 200)
@@ -2344,6 +2792,32 @@ class TestHttpApi(unittest.TestCase):
                       [str(Path(r["path"]).resolve())
                        for r in recents["items"]])
 
+    def test_title_edit_reaches_the_saved_file(self):
+        path = self._write_transcript()
+        _, res = self._req("POST", "/api/transcripts/open", {"path": path})
+        rev = res["review"]["rev"]
+        self.assertEqual(res["review"]["title"], "HTTP test")
+        status, full = self._req("POST", "/api/review/title",
+                                 {"rev": rev, "title": "  Interview   of A "})
+        self.assertEqual(status, 200)
+        self.assertEqual(full["title"], "Interview of A")
+        status, out = self._req("POST", "/api/review/save",
+                                {"rev": full["rev"], "mode": "labels"})
+        self.assertEqual(status, 200)
+        text = Path(out["out_path"]).read_text()
+        self.assertIn("Interview of A", text)
+        self.assertNotIn("HTTP test", text)
+
+    def test_title_can_be_removed(self):
+        path = self._write_transcript()
+        _, res = self._req("POST", "/api/transcripts/open", {"path": path})
+        _, full = self._req("POST", "/api/review/title",
+                            {"rev": res["review"]["rev"], "title": " "})
+        self.assertIsNone(full["title"])
+        _, out = self._req("POST", "/api/review/save",
+                           {"rev": full["rev"], "mode": "labels"})
+        self.assertNotIn("HTTP test", Path(out["out_path"]).read_text())
+
     def test_stale_rev_conflicts(self):
         path = self._write_transcript()
         _, res = self._req("POST", "/api/transcripts/open", {"path": path})
@@ -2421,6 +2895,11 @@ class TestHttpApi(unittest.TestCase):
         golden["diarized"] = False       # intentional 0.9.x additions
         golden["verified_by"] = None
         golden["ts_marks"] = [None, None, None]
+        golden["colour_speakers"] = False
+        golden["text_origin"] = ["engine", "engine", "engine"]
+        golden["speaker_origin"] = ["user", None, None]
+        golden["suggestions"] = {}
+        self.maxDiff = None
         self.assertEqual(produced, golden)
 
         # A pre-0.9.0 autosave (neither new key) must still restore.
@@ -2440,7 +2919,7 @@ class TestHttpApi(unittest.TestCase):
 
 class TestAudioPrep(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-audio-")
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True, prefix="transcribr-audio-")
         self.addCleanup(self.tmp.cleanup)
         self.broker = T.EventBroker()
 
@@ -2529,24 +3008,27 @@ class TestAudioPrep(unittest.TestCase):
         # decoded (the same path transcription uses), playback falls
         # back to a 16 kHz WAV instead of giving up.
         import shutil as _shutil
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("needs numpy")
         src = Path(self.tmp.name) / "interview.wma"
         src.write_bytes(b"\x00" * 64)
         orig_which = _shutil.which
-        orig_extract = T._extract_audio_m4a_pyav
-        orig_decode = T.decode_audio_16k
+        orig_extract = T.audioprep._extract_audio_m4a_pyav
+        orig_decode = T.audioprep.decode_audio_16k
         _shutil.which = lambda name: None
-        T._extract_audio_m4a_pyav = lambda s, t: (_ for _ in ()).throw(
+        T.audioprep._extract_audio_m4a_pyav = lambda s, t: (_ for _ in ()).throw(
             ValueError("codec not supported"))
-        T.decode_audio_16k = lambda p: np.zeros(
+        T.audioprep.decode_audio_16k = lambda p: np.zeros(
             T.AUDIO_SAMPLE_RATE, dtype=np.float32) + 0.01
         try:
             prep = T.AudioPrep(str(src), self.broker)
             self._wait(prep)
         finally:
             _shutil.which = orig_which
-            T._extract_audio_m4a_pyav = orig_extract
-            T.decode_audio_16k = orig_decode
+            T.audioprep._extract_audio_m4a_pyav = orig_extract
+            T.audioprep.decode_audio_16k = orig_decode
         self.assertEqual(prep.state, "ready")
         self.assertTrue(prep.serve_path.endswith(".wav"))
         import wave
@@ -2585,7 +3067,7 @@ class TestAudioPrep(unittest.TestCase):
         self._wait(b)
         self.assertNotEqual(a.status()["url"], b.status()["url"])
 
-    @unittest.skipUnless(T.shutil.which("ffmpeg"), "needs ffmpeg")
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
     def test_extracts_non_passthrough_and_caches(self):
         import subprocess as sp
         wav = self._tiny_wav()
@@ -2613,7 +3095,7 @@ class TestAudioPrep(unittest.TestCase):
 
 class TestOutputSafety(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="transcribr-safety-")
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True, prefix="transcribr-safety-")
         self.addCleanup(self.tmp.cleanup)
         self.src = Path(self.tmp.name) / "recording.mp3"
         self.src.write_bytes(b"\x00" * 64)
@@ -2646,13 +3128,13 @@ class TestBuildWorkerParams(unittest.TestCase):
                 ("faster", "faster-whisper (CTranslate2)")]
 
     def setUp(self):
-        self._saved = T.AVAILABLE_ENGINES
-        T.AVAILABLE_ENGINES = list(self._ENGINES)
+        self._saved = T.engines._AVAILABLE_ENGINES
+        T.engines._AVAILABLE_ENGINES = list(self._ENGINES)
         self.settings = T.default_settings()
         self.settings["engine"] = "faster-whisper (CTranslate2)"
 
     def tearDown(self):
-        T.AVAILABLE_ENGINES = self._saved
+        T.engines._AVAILABLE_ENGINES = self._saved
 
     def _params(self, **overrides):
         self.settings.update(overrides)
@@ -2669,9 +3151,16 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(
             self._params(engine="Something Else")["engine"], "faster")
 
-    def test_automatic_engine_prefers_mlx_when_installed(self):
-        T.AVAILABLE_ENGINES = list(self._ENGINES) + [
+    def test_automatic_engine_prefers_faster_whisper(self):
+        """Even with mlx installed on Apple Silicon: it is faster, but
+        faster-whisper is the more accurate."""
+        T.engines._AVAILABLE_ENGINES = list(self._ENGINES) + [
             ("mlx", "mlx-whisper (Apple Silicon)")]
+        self.assertEqual(
+            self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "faster")
+
+    def test_automatic_engine_still_uses_mlx_when_it_is_all_there_is(self):
+        T.engines._AVAILABLE_ENGINES = [("mlx", "mlx-whisper (Apple Silicon)")]
         self.assertEqual(
             self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "mlx")
 
@@ -2679,21 +3168,22 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertEqual(
             self._params(engine=T.ENGINE_AUTO_NAME)["engine"], "faster")
 
-    def test_word_timestamps_auto_is_engine_aware(self):
-        # "auto" enables word timings everywhere except mlx, where the
-        # alignment pass is disproportionately slow.
+    def test_word_timestamps_auto_is_on_for_every_engine(self):
+        # "auto" once skipped mlx on the belief that alignment tripled
+        # the run; the cost is far smaller, so it is now on
+        # everywhere - paragraphs and review need the timings.
         self.assertTrue(self._params(word_timestamps="auto")["engine"]
                         == "faster")
         self.assertTrue(self._params(word_timestamps="auto")["word_timestamps"])
-        T.AVAILABLE_ENGINES = list(self._ENGINES) + [
+        T.engines._AVAILABLE_ENGINES = list(self._ENGINES) + [
             ("mlx", "mlx-whisper (Apple Silicon)")]
         p = self._params(engine="mlx-whisper (Apple Silicon)",
                          word_timestamps="auto")
         self.assertEqual(p["engine"], "mlx")
-        self.assertFalse(p["word_timestamps"])   # skipped on mlx
+        self.assertTrue(p["word_timestamps"])
 
     def test_word_timestamps_on_off_override(self):
-        T.AVAILABLE_ENGINES = list(self._ENGINES) + [
+        T.engines._AVAILABLE_ENGINES = list(self._ENGINES) + [
             ("mlx", "mlx-whisper (Apple Silicon)")]
         # "on" forces them even on mlx; "off" disables them everywhere.
         p_on = self._params(engine="mlx-whisper (Apple Silicon)",
@@ -2717,9 +3207,9 @@ class TestBuildWorkerParams(unittest.TestCase):
             "auto")
 
     def test_diarize_model_and_threshold_flow_through(self):
-        p = self._params(diarize=True, diarize_model="campplus",
+        p = self._params(diarize=True, diarize_model="wespeaker",
                          diarize_threshold=0.35)
-        self.assertEqual(p["diarize_model"], "campplus")
+        self.assertEqual(p["diarize_model"], "wespeaker")
         self.assertAlmostEqual(p["diarize_threshold"], 0.35)
 
     def test_title_falls_back_to_filename(self):
@@ -2775,10 +3265,44 @@ class TestBuildWorkerParams(unittest.TestCase):
         self.assertFalse(p["review_before_save"])
 
     def test_no_engine_raises(self):
-        T.AVAILABLE_ENGINES = []
+        T.engines._AVAILABLE_ENGINES = []
         with self.assertRaises(T._EngineNotAvailable):
             self._params()
 
+
+
+class RerunModelTests(unittest.TestCase):
+    """A re-transcription defaults to the other engine family."""
+
+    def setUp(self):
+        from transcribr.review import rerun_model
+        self.rerun = rerun_model
+
+    def test_parakeet_transcript_reruns_on_whisper(self):
+        self.assertEqual(
+            self.rerun("parakeet-tdt-0.6b-v2", {"language": "English"}),
+            "large-v3-turbo")
+
+    def test_whisper_transcript_reruns_on_parakeet_in_english(self):
+        self.assertEqual(
+            self.rerun("large-v3-turbo", {"language": "English"}),
+            "parakeet-tdt-0.6b-v2")
+
+    def test_other_languages_switch_whisper_model(self):
+        self.assertEqual(
+            self.rerun("large-v3-turbo", {"language": "French"}),
+            "large-v3")
+        self.assertEqual(
+            self.rerun("turbo", {"language": "French"}), "large-v3")
+        self.assertEqual(
+            self.rerun("large-v3", {"language": "French"}),
+            "large-v3-turbo")
+
+    def test_unknown_run_falls_back_to_the_setting(self):
+        self.assertEqual(
+            self.rerun(None, {"language": "English",
+                              "model": "parakeet-tdt-0.6b-v2"}),
+            "large-v3-turbo")
 
 if __name__ == "__main__":
     unittest.main()

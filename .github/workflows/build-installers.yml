@@ -5,7 +5,7 @@ name: Build installers
 # is pushed - in which case the .exe is attached to that release.
 #
 # The macOS .pkg is NOT built here: notarising it needs the Developer ID
-# certificates, and those stay on James's Mac rather than in repository
+# certificates, and those stay on the build Mac rather than in repository
 # secrets. See RELEASING.md.
 
 on:
@@ -18,9 +18,19 @@ permissions:
   contents: write        # needed only to attach assets to a release
 
 jobs:
+  # Nothing gets packaged on a red suite.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  # The LGPL, audio-only PyAV the installer bundles instead of the
+  # stock wheel's GPL FFmpeg.
+  avwheel:
+    uses: ./.github/workflows/build-av-wheel.yml
+
   windows:
     name: Windows installer
     runs-on: windows-latest
+    needs: [tests, avwheel]
 
     steps:
       - uses: actions/checkout@v7
@@ -29,7 +39,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $v = (Select-String -Path transcribr.py -Pattern '^__version__ = "(.*)"' |
+          $v = (Select-String -Path transcribr/version.py -Pattern '^__version__ = "(.*)"' |
                 Select-Object -First 1).Matches[0].Groups[1].Value
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "Transcribr $v"
@@ -48,8 +58,19 @@ jobs:
           npm ci
           npm run build
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: av-wheel-win_amd64
+          path: avwheels
+
       - name: Stage the application
         shell: pwsh
+        env:
+          # The artifact keeps build-av-wheel's own wheels\ folder.
+          AV_WHEELS: ${{ github.workspace }}\avwheels\wheels
+          # The script asks GitHub which CPython build to fetch; without
+          # a token a busy runner can be over the per-IP rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
         run: pwsh -File windows\build-exe.ps1
 
       - name: Compile the installer

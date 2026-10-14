@@ -21,10 +21,15 @@ const ICONS = {
   settings: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm8.5 3a8 8 0 0 0-.2-1.7l2-1.5-2-3.5-2.3 1a8 8 0 0 0-2.9-1.7L14.7 2h-5.4l-.4 2.6a8 8 0 0 0-2.9 1.7l-2.3-1-2 3.5 2 1.5A8 8 0 0 0 3.5 12c0 .6.1 1.1.2 1.7l-2 1.5 2 3.5 2.3-1a8 8 0 0 0 2.9 1.7l.4 2.6h5.4l.4-2.6a8 8 0 0 0 2.9-1.7l2.3 1 2-3.5-2-1.5c.1-.6.2-1.1.2-1.7z",
 };
 
-function NavButton({ view, label, icon, disabled }: {
+function NavButton({ view, label, icon, disabled, alsoActiveFor }: {
   view: View; label: string; icon: JSX.Element; disabled?: boolean;
+  /** Other views this entry stands for. "Transcribe" and "Review" were
+   *  two surfaces until 0.9.16 and are now one, so one entry covers
+   *  both view names. */
+  alsoActiveFor?: View[];
 }) {
-  const active = useApp((s) => s.view) === view;
+  const current = useApp((s) => s.view);
+  const active = current === view || !!alsoActiveFor?.includes(current);
   return (
     <button
       disabled={disabled}
@@ -299,15 +304,20 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex flex-col gap-1">
-        <NavButton view="transcribe" label="Transcribe" icon={<Icon d={ICONS.transcribe} />} />
-        <NavButton view="review" label="Review" icon={<Icon d={ICONS.review} />}
-          disabled={!hasReview} />
+        {/* "Transcribe" and "Review" were two surfaces until 0.9.16 and
+            are now one, so there is one entry for it. */}
+        <NavButton view={hasReview ? "review" : "transcribe"}
+          alsoActiveFor={["transcribe", "review"]}
+          label={hasReview ? "Transcript" : "Transcribe"}
+          icon={<Icon d={hasReview ? ICONS.review : ICONS.transcribe} />} />
         <NavButton view="library" label="Recent" icon={<Icon d={ICONS.library} />} />
         <NavButton view="settings" label="Settings" icon={<Icon d={ICONS.settings} />} />
       </nav>
 
       <div className="mt-auto flex flex-col items-center gap-2">
-{view === "review" && (
+{/* The shortcuts are the transcript surface's, which is reached
+          under either view name now. */}
+{hasReview && (view === "review" || view === "transcribe") && (
         <button
           onClick={() =>
             void alertDialog(

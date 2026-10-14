@@ -1,10 +1,66 @@
 import { useEffect, useRef, useState } from "react";
 import { useReview } from "../../state/reviewStore";
+import { api } from "../../api/client";
 import { useApp } from "../../state/store";
-import { CheckField, inputCls } from "../fields";
+import { CheckField, SelectField, inputCls } from "../fields";
+import { TEMPLATE_OPTIONS } from "../../views/SettingsView";
 
-// Right rail: speakers panel, find & replace, confidence toggle.
-// (The playback card joins in Phase 4.)
+// The review pane's tools rail. Every card but the layout switch folds
+// to its title, and remembers whether it was open.
+
+function readOpen(id: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(`transcribr.rail.${id}`);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeOpen(id: string, open: boolean): void {
+  try {
+    localStorage.setItem(`transcribr.rail.${id}`, open ? "1" : "0");
+  } catch {
+    /* a convenience only */
+  }
+}
+
+/** A card that folds to its title. `force` holds it open (a run in
+ *  progress) without changing what is remembered. */
+function RailCard({
+  id,
+  title,
+  defaultOpen = false,
+  force = false,
+  cardRef,
+  children,
+}: {
+  id: string;
+  title: string;
+  defaultOpen?: boolean;
+  force?: boolean;
+  cardRef?: React.Ref<HTMLElement>;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(() => readOpen(id, defaultOpen));
+  const shown = open || force;
+  return (
+    <section ref={cardRef} className="rounded-xl border border-edge bg-surface">
+      <button
+        className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted hover:text-fg"
+        aria-expanded={shown}
+        onClick={() => {
+          setOpen(!shown);
+          writeOpen(id, !shown);
+        }}
+      >
+        {title}
+        <span aria-hidden className="text-[10px]">{shown ? "▾" : "▸"}</span>
+      </button>
+      {shown && <div className="px-4 pb-4">{children}</div>}
+    </section>
+  );
+}
 
 function SpeakerRow({ slot }: { slot: string }) {
   const serverName = useReview((s) => s.doc?.speaker_names[slot] ?? "");
@@ -37,7 +93,75 @@ function SpeakerRow({ slot }: { slot: string }) {
           }, 300);
         }}
       />
+      <AskToggle slot={slot} />
     </div>
+  );
+}
+
+/** In Q&A mode: whether this speaker's paragraphs are questions or
+ *  answers. */
+function AskToggle({ slot }: { slot: string }) {
+  const qa = useReview((s) => s.doc?.qa ?? null);
+  if (!qa) return null;
+  const asks = qa.askers.includes(slot);
+  return (
+    <button
+      className="w-8 shrink-0 rounded-md border border-edge py-1 text-xs font-bold hover:bg-surface-2"
+      style={asks ? { background: "var(--accent)", color: "var(--accent-fg)", borderColor: "var(--accent)" } : undefined}
+      title={asks
+        ? "Asks the questions (Q) — click to make this speaker an answerer"
+        : "Answers (A) — click to make this speaker a questioner"}
+      onClick={() => {
+        const next = asks
+          ? qa.askers.filter((a) => a !== slot)
+          : [...qa.askers, slot];
+        void useReview.getState().setAskers(next);
+      }}
+    >
+      {asks ? "Q" : "A"}
+    </button>
+  );
+}
+
+/** Normal transcript, or numbered questions and answers like an ERISP.
+ *  What is shown here is what Save writes. */
+function LayoutCard() {
+  const layout = useReview((s) => s.doc?.layout ?? "plain");
+  const qa = useReview((s) => s.doc?.qa ?? null);
+  const seg = (on: boolean) =>
+    `flex-1 rounded-md px-3 py-1.5 text-xs font-medium ${
+      on ? "bg-surface shadow-sm" : "text-muted hover:text-fg"
+    }`;
+  return (
+    <section className="rounded-xl border border-edge bg-surface p-4">
+      <div className="flex rounded-lg bg-surface-2 p-0.5">
+        <button className={seg(layout === "plain")}
+          onClick={() => void useReview.getState().setLayout("plain")}>
+          Transcript
+        </button>
+        <button className={seg(layout === "qa")}
+          onClick={() => void useReview.getState().setLayout("qa")}>
+          Q &amp; A
+        </button>
+      </div>
+      {qa && (
+        <div className="mt-3 text-[11px] leading-relaxed text-muted">
+          <p>{qa.note}</p>
+          <p className="mt-1.5">
+            Set who asks with the Q / A buttons beside each speaker.
+            {!qa.auto && (
+              <>
+                {" "}
+                <button className="font-medium text-accent hover:underline"
+                  onClick={() => void useReview.getState().setAskers(null)}>
+                  Use the suggestion
+                </button>
+              </>
+            )}
+          </p>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -45,10 +169,7 @@ function SpeakersPanel() {
   const visible = useReview((s) => s.doc?.visible_speakers ?? 4);
   const slots = Array.from({ length: visible }, (_, i) => String(i + 1));
   return (
-    <section className="rounded-xl border border-edge bg-surface p-4">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-        Speakers
-      </h2>
+    <RailCard id="speakers" title="Speakers" defaultOpen>
       <div className="flex flex-col gap-2">
         {slots.map((slot) => (
           <SpeakerRow key={slot} slot={slot} />
@@ -65,7 +186,66 @@ function SpeakersPanel() {
       <p className="mt-3 text-[11px] leading-relaxed text-muted">
         Select a paragraph and press 1–9 to label it, 0 to clear.
       </p>
-    </section>
+    </RailCard>
+  );
+}
+
+/** Passages the engine was unsure of, offered as [indistinct] one at a
+ *  time. Nothing changes unless the reviewer accepts. */
+function UnsureCard() {
+  const count = useReview((s) =>
+    (s.doc?.paragraphs ?? []).reduce((n, p) => n + (p.unsure?.length ?? 0), 0));
+  const hasConf = useReview((s) => s.doc?.has_word_conf ?? false);
+  const reviewing = useReview((s) => s.unsureHit !== null);
+  const offer = useApp((s) => s.settings?.offer_indistinct ?? true);
+  if (!hasConf) return null;
+  const btn =
+    "rounded-lg border border-edge px-2.5 py-1.5 text-xs font-medium hover:bg-surface-2 disabled:opacity-40";
+  return (
+    <RailCard id="unsure" title="Unsure words">
+      <CheckField
+        label="Offer [indistinct] for unclear words"
+        checked={offer}
+        onChange={async (v) => {
+          useReview.setState({ unsureHit: null });
+          useApp.getState().updateSettings({ offer_indistinct: v });
+          // Saved now rather than after the usual pause, so the
+          // transcript refetched next already reflects it.
+          await api.put("/api/settings", useApp.getState().settings).catch(() => {});
+          await useReview.getState().refetch();
+        }}
+      />
+      {offer && (
+      <>
+      <p className="mb-3 mt-2 text-[11px] leading-relaxed text-muted">
+        {count === 0
+          ? "Nothing left that the engine was unsure of."
+          : `${count} passage${count === 1 ? "" : "s"} the engine was unsure of. ` +
+            "Mark each [indistinct], or keep the words."}
+      </p>
+      <div className="flex gap-2">
+        <button className={btn} disabled={count === 0}
+          onClick={() => useReview.getState().nextUnsure(-1)}>
+          ‹ Previous
+        </button>
+        <button className={`${btn} border-accent text-accent`} disabled={count === 0}
+          onClick={() => useReview.getState().nextUnsure(1)}>
+          {reviewing ? "Next ›" : "Start"}
+        </button>
+        {reviewing && (
+          <button className={btn}
+            onClick={() => useReview.setState({ unsureHit: null })}>
+            Stop
+          </button>
+        )}
+      </div>
+      </>
+      )}
+      <p className="mt-2 text-[11px] leading-relaxed text-muted">
+        Hover over an [indistinct] to see what was transcribed there, and
+        to put it back.
+      </p>
+    </RailCard>
   );
 }
 
@@ -78,10 +258,7 @@ function FindReplace() {
     "rounded-lg border border-edge px-2.5 py-1.5 text-xs font-medium hover:bg-surface-2";
 
   return (
-    <section className="rounded-xl border border-edge bg-surface p-4">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-        Find &amp; replace
-      </h2>
+    <RailCard id="find" title="Find & replace">
       <input
         id="review-find"
         className={`${inputCls} mb-2 w-full py-1.5`}
@@ -117,7 +294,128 @@ function FindReplace() {
           onChange={(v) => useReview.getState().setMatchCase(v)}
         />
       </div>
-    </section>
+    </RailCard>
+  );
+}
+
+function NamesCard() {
+  const terms = useReview((s) => s.terms);
+  const loading = useReview((s) => s.termsLoading);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [note, setNote] = useState("");
+
+  const show = () => {
+    setOpen(true);
+    if (terms === null) void useReview.getState().loadTerms();
+  };
+
+  const apply = async (variants: string[]) => {
+    const to = draft.trim();
+    setEditing(null);
+    if (!to) return;
+    const n = await useReview.getState().applyTerm(variants, to);
+    setNote(
+      n === 0
+        ? "Nothing to change."
+        : `Corrected ${n} ${n === 1 ? "occurrence" : "occurrences"}.`,
+    );
+  };
+
+  return (
+    <RailCard id="names" title="Names & terms">
+
+      {!open ? (
+        <>
+          <button
+            className="w-full rounded-lg border border-edge px-3 py-2 text-sm font-medium hover:bg-surface-2"
+            onClick={show}
+          >
+            Check names and terms
+          </button>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted">
+            Correct a misspelt name everywhere at once.
+          </p>
+        </>
+      ) : loading ? (
+        <p className="text-[11px] text-muted">Reading the transcript…</p>
+      ) : !terms || terms.length === 0 ? (
+        <p className="text-[11px] text-muted">
+          No names or unusual terms found.
+        </p>
+      ) : (
+        <>
+          <ul className="flex max-h-80 flex-col gap-1.5 overflow-y-auto">
+            {terms.map((g) => {
+              const variants = g.variants.map((v) => v.term);
+              const spellings = g.variants.length > 1;
+              return (
+                <li key={g.term} className="text-sm">
+                  {editing === g.term ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        autoFocus
+                        className={`${inputCls} w-full py-1`}
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void apply(variants);
+                          if (e.key === "Escape") setEditing(null);
+                        }}
+                      />
+                      <button
+                        className="shrink-0 rounded-lg border border-edge px-2 py-1 text-xs hover:bg-surface-2"
+                        onClick={() => void apply(variants)}
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  ) : null}
+                  {editing === g.term && spellings ? (
+                    <div className="px-1.5 pt-1 text-[11px] text-muted">
+                      Rewrites {variants.join(", ")} — check these are the
+                      same name before applying.
+                    </div>
+                  ) : (
+                    <button
+                      className="flex w-full items-baseline gap-2 rounded-lg px-1.5 py-1 text-left hover:bg-surface-2"
+                      onClick={() => {
+                        setEditing(g.term);
+                        setDraft(g.term);
+                        setNote("");
+                      }}
+                    >
+                      <span className="truncate font-medium">{g.term}</span>
+                      <span className="ml-auto shrink-0 text-[11px] text-muted">
+                        {g.count}
+                      </span>
+                    </button>
+                  )}
+                  {spellings && editing !== g.term && (
+                    <div className="px-1.5 pb-0.5 text-[11px] text-muted">
+                      also {g.variants
+                        .filter((v) => v.term !== g.term)
+                        .map((v) => v.term)
+                        .join(", ")}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              className="rounded-lg border border-edge px-2.5 py-1.5 text-xs font-medium hover:bg-surface-2"
+              onClick={() => void useReview.getState().loadTerms()}
+            >
+              Refresh
+            </button>
+            <span className="text-[11px] text-muted">{note}</span>
+          </div>
+        </>
+      )}
+    </RailCard>
   );
 }
 
@@ -143,10 +441,7 @@ function PlaybackCard() {
           : null;
 
   return (
-    <section className="rounded-xl border border-edge bg-surface p-4">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-        Playback
-      </h2>
+    <RailCard id="playback" title="Playback">
       {label === null ? (
         <>
           <p className="text-[11px] leading-relaxed text-muted">
@@ -198,23 +493,16 @@ function PlaybackCard() {
             />
             Half speed (0.5×)
           </label>
-          <p className="mt-2 text-[11px] text-muted">
-            P plays just the selected paragraph (press again to stop);
-            ⌘P plays on from it.
-          </p>
         </>
       )}
-    </section>
+    </RailCard>
   );
 }
 
 function VerifyCard() {
   const verifyName = useReview((s) => s.verifyName);
   return (
-    <section className="rounded-xl border border-edge bg-surface p-4">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-        Verify transcript
-      </h2>
+    <RailCard id="verify" title="Verify">
       <input
         className={`${inputCls} w-full py-1.5`}
         placeholder="Your name"
@@ -224,32 +512,52 @@ function VerifyCard() {
       <p className="mt-2 text-[11px] leading-relaxed text-muted">
         {verifyName.trim()
           ? `Saved documents will state: "This transcript has been verified by ${verifyName.trim()}."`
-          : "Enter your name to certify you have checked this transcript. " +
-            "Until then, saved documents carry a warning that accuracy " +
-            "may not have been checked by a human."}
+          : "Add your name once you have checked the transcript. Until " +
+            "then it is saved with a not-checked warning."}
       </p>
-    </section>
+    </RailCard>
   );
 }
 
 function TimestampsCard() {
   const doc = useReview((s) => s.doc);
   const saveShowTimestamp = useReview((s) => s.saveShowTimestamp);
+  const saveColourSpeakers = useReview((s) => s.saveColourSpeakers);
   const hasConf = useReview((s) => s.doc?.has_word_conf ?? false);
   const showConf = useReview((s) => s.showConfidence);
+  const settingsFormat = useApp((s) => s.settings?.output_format);
+  const template = useApp((s) => s.settings?.doc_template ?? "plain");
   if (!doc) return null;
   const timestamps = saveShowTimestamp ?? doc.show_timestamp;
+  const colour = saveColourSpeakers ?? doc.colour_speakers;
+  // Saving follows the Settings page's format when it has one.
+  const format = settingsFormat ?? doc.output_format;
+  const canColour = format === "docx" || format === "pdf";
 
   return (
-    <section className="rounded-xl border border-edge bg-surface p-4">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-        Timestamps / uncertain words
-      </h2>
+    <RailCard id="saved" title="Saved file">
       <div className="flex flex-col gap-2.5">
+        <SelectField
+          label="Word layout"
+          value={template}
+          options={TEMPLATE_OPTIONS}
+          onChange={(v) =>
+            void useApp.getState().updateSettings({ doc_template: v as typeof template })}
+          note={format === "docx" ? undefined : "Applies to Word files; this one saves as " + format + "."}
+        />
         <CheckField
           label="Include timestamps in the saved file"
           checked={timestamps}
           onChange={(v) => useReview.getState().setSaveShowTimestamp(v)}
+        />
+        <CheckField
+          label="Colour each speaker's paragraphs"
+          checked={colour && canColour}
+          disabled={!canColour}
+          note={
+            canColour ? undefined : "Word and PDF only."
+          }
+          onChange={(v) => useReview.getState().setSaveColourSpeakers(v)}
         />
         {hasConf && (
           <CheckField
@@ -259,7 +567,7 @@ function TimestampsCard() {
           />
         )}
       </div>
-    </section>
+    </RailCard>
   );
 }
 
@@ -270,15 +578,23 @@ function FixSectionCard() {
   const audioReady = useReview((s) => s.doc?.audio.state === "ready");
   const meta = useApp((s) => s.meta);
   const settings = useApp((s) => s.settings);
-  const [model, setModel] = useState("");
-  const [condition, setCondition] = useState(false);
+  const model = useReview((s) => s.retransModel);
+  const condition = useReview((s) => s.retransCondition);
+  const { setRetransModel: setModel, setRetransCondition: setCondition } =
+    useReview.getState();
   const [showLog, setShowLog] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   const hasActivity = retrans.running || retrans.log.length > 0;
-  // Reveal the output box automatically once a run starts.
+  const cardRef = useRef<HTMLElement>(null);
+  // Reveal the output box automatically once a run starts, and bring
+  // the card into view - the run may have been started from the
+  // paragraph menu, with this card scrolled away.
   useEffect(() => {
-    if (retrans.running) setShowLog(true);
+    if (retrans.running) {
+      setShowLog(true);
+      cardRef.current?.scrollIntoView({ block: "nearest" });
+    }
   }, [retrans.running]);
   // Keep the newest engine output in view.
   useEffect(() => {
@@ -292,18 +608,30 @@ function FixSectionCard() {
   const suspectCount = paragraphs.filter((p) => p.suspect).length;
   const english = settings?.language === "English";
   const tiers = meta?.model_tiers ?? [];
+  // Default to the other engine family from the one that made the
+  // transcript (the server's suggestion) until a choice is made here.
+  const suggested = useReview((s) => s.doc?.retrans_default ?? "");
+  const runModel = useReview((s) => s.doc?.run_model ?? null);
+  const tierModels = tiers.map((t) => (english ? t.model_en : t.model));
+  const choices = [
+    ...tierModels,
+    ...[suggested, runModel].filter(
+      (m): m is string => !!m && !tierModels.includes(m),
+    ),
+  ];
+  const labelFor = (m: string) => {
+    const t = tiers.find((t) => (english ? t.model_en : t.model) === m);
+    return t ? `${t.label} (${m})` : m;
+  };
   const btn =
     "rounded-lg border border-edge px-2.5 py-1.5 text-xs font-medium hover:bg-surface-2 disabled:opacity-40";
 
   return (
-    <section className="rounded-xl border border-edge bg-surface p-4">
-      <h2 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">
-        Fix a section
-      </h2>
+    <RailCard id="retranscribe" title="Re-transcribe" force={retrans.running}
+      cardRef={cardRef}>
       <p className="mb-3 text-[11px] leading-relaxed text-muted">
-        Re-run part of the recording through the engine — for repeated or
-        invented text. Shift-click extends the selection; the selected
-        paragraphs are replaced, and undo reverses it.
+        For repeated or invented text. Right-click a paragraph, or
+        shift-click to take in several. Undo reverses it.
       </p>
 
       {suspectCount > 0 && (
@@ -326,19 +654,17 @@ function FixSectionCard() {
       </label>
       <select
         className={`${inputCls} mb-2 w-full py-1.5 text-xs`}
-        value={model}
+        value={model ?? suggested}
         disabled={retrans.running}
         onChange={(e) => setModel(e.target.value)}
       >
         <option value="">Same as your current setting</option>
-        {tiers.map((t) => {
-          const m = english ? t.model_en : t.model;
-          return (
-            <option key={t.id} value={m}>
-              {t.label} ({m})
-            </option>
-          );
-        })}
+        {choices.map((m) => (
+          <option key={m} value={m}>
+            {labelFor(m)}
+            {m === runModel ? " — made this transcript" : ""}
+          </option>
+        ))}
       </select>
       <CheckField
         label="Condition on previous text"
@@ -412,18 +738,21 @@ function FixSectionCard() {
           card.
         </p>
       )}
-    </section>
+    </RailCard>
   );
 }
 
 export default function ReviewRail() {
   return (
     <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
+      <LayoutCard />
       <SpeakersPanel />
       <PlaybackCard />
       <FixSectionCard />
-      <TimestampsCard />
+      <UnsureCard />
+      <NamesCard />
       <FindReplace />
+      <TimestampsCard />
       <VerifyCard />
     </aside>
   );

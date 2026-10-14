@@ -92,14 +92,23 @@ def main() -> int:
             return 1
 
     python = VENV / "bin" / "python3"
-    script = BUNDLE_RESOURCES / "transcribr.py"
-    if not script.exists():
-        _alert("Transcribr's application file is missing from the app "
+    if not (BUNDLE_RESOURCES / "transcribr" / "__main__.py").exists():
+        _alert("Transcribr's application files are missing from the app "
                "bundle. Reinstall Transcribr.")
         return 1
 
+    # The app is a package now, so it is run with -m. Finder launches
+    # us with the working directory at "/", and -m only puts the
+    # working directory on sys.path, so Resources has to be named
+    # explicitly for the import to find the package.
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (f"{BUNDLE_RESOURCES}{os.pathsep}{existing}"
+                         if existing else str(BUNDLE_RESOURCES))
+
     # Hand over the process entirely - the app owns the run from here.
-    os.execv(str(python), [str(python), str(script), *sys.argv[1:]])
+    os.execve(str(python),
+              [str(python), "-m", "transcribr", *sys.argv[1:]], env)
     return 1        # execv only returns on failure
 
 

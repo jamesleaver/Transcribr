@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { alertDialog } from "../state/dialogs";
 import { useRun } from "../state/runStore";
 import { useApp } from "../state/store";
-import { inputCls } from "./fields";
+import { api } from "../api/client";
+import { CheckField, inputCls } from "./fields";
 
 // The Source column: drop zone, staged file(s), prompt field.
 // Drops anywhere on the window are accepted (parity with the Tk app,
@@ -70,6 +71,106 @@ function DropZone() {
         or click to browse — several files become a batch
       </div>
     </button>
+  );
+}
+
+function KnownTermsCard() {
+  const settings = useApp((s) => s.settings);
+  const staged = useRun((s) => s.staged);
+  const [terms, setTerms] = useState<string[]>([]);
+  const [folder, setFolder] = useState("");
+  const [open, setOpen] = useState(false);
+
+  // Terms belong to the folder the recording sits in, so the list only
+  // means anything once a file is staged.
+  const forPath = staged[0]?.path ?? "";
+
+  useEffect(() => {
+    if (!forPath) {
+      setTerms([]);
+      setFolder("");
+      return;
+    }
+    let live = true;
+    void (async () => {
+      try {
+        const res = await api.get<{ terms: string[]; folder: string }>(
+          `/api/terms?for=${encodeURIComponent(forPath)}`,
+        );
+        if (live) {
+          setTerms(res.terms);
+          setFolder(res.folder);
+        }
+      } catch {
+        if (live) setTerms([]);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [forPath]);
+
+  if (!settings || !forPath || terms.length === 0) return null;
+
+  const forget = async (term: string) => {
+    const kept = terms.filter((t) => t !== term);
+    setTerms(kept);
+    try {
+      const res = await api.put<{ terms: string[] }>("/api/terms", {
+        for: forPath,
+        terms: kept,
+      });
+      setTerms(res.terms);
+    } catch {
+      /* the list is a convenience; a failed edit is not worth a dialog */
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-edge bg-surface p-4">
+      <CheckField
+        label={`Help the engine with ${terms.length} name${
+          terms.length === 1 ? "" : "s"
+        } from this folder`}
+        checked={settings.prime_with_terms}
+        onChange={(v) =>
+          void useApp.getState().updateSettings({ prime_with_terms: v })
+        }
+        note={
+          `Names you corrected while reviewing other recordings in ${
+            folder ? `“${folder}”` : "this folder"
+          }. Telling the engine about them makes it likelier to spell them ` +
+          "correctly — and slightly likelier to hear them where they were " +
+          "not said, so this is off unless you turn it on. Names never " +
+          "travel between folders."
+        }
+      />
+      <button
+        className="mt-2 text-xs text-muted underline"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "Hide the names" : `Show the ${terms.length} names`}
+      </button>
+      {open && (
+        <ul className="mt-2 flex flex-wrap gap-1.5">
+          {terms.map((t) => (
+            <li
+              key={t}
+              className="flex items-center gap-1 rounded-lg border border-edge px-2 py-0.5 text-xs"
+            >
+              {t}
+              <button
+                className="text-muted hover:text-fg"
+                title={`Forget “${t}”`}
+                onClick={() => void forget(t)}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -157,28 +258,12 @@ function BatchList() {
 }
 
 function PromptCard() {
-  const title = useApp((s) => s.settings?.title ?? "");
   const prompt = useApp((s) => s.settings?.prompt ?? "");
   // The priming field is tucked away unless enabled from Settings
   // (it is powerful but easy to misuse).
   const showPrompt = useApp((s) => s.settings?.show_prompt ?? false);
   return (
     <>
-      <div className="flex flex-col gap-4 rounded-xl border border-edge bg-surface p-4">
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-medium text-muted">
-            Document title — heading at the top of the transcript. Not sent to
-            the engine. Left blank, the file name is used.
-          </span>
-          <textarea
-            className={`${inputCls} min-h-[38px] w-full resize-y`}
-            rows={1}
-            value={title}
-            onChange={(e) => useApp.getState().updateSettings({ title: e.target.value })}
-          />
-        </label>
-      </div>
-
       {showPrompt && (
         <div className="rounded-xl border border-edge bg-surface p-4">
           <label className="block">
@@ -190,18 +275,18 @@ function PromptCard() {
               className={`${inputCls} min-h-[38px] w-full resize-y`}
               rows={1}
               value={prompt}
-              placeholder="e.g. Macklebum, Bloggs, Mount Druitt, AVO, ICAC, DVEC"
+              placeholder="e.g. surnames, place names, acronyms and jargon the engine may not know"
               onChange={(e) => useApp.getState().updateSettings({ prompt: e.target.value })}
             />
             <span className="mt-1.5 block text-xs text-amber-600 dark:text-amber-500">
-              ⚠ Priming can backfire. A prompt may bleed into the transcript or
-              trigger hallucinations, especially on unclear audio or long
-              silences. Leave it blank unless you need help with specific
-              terms, and keep it to keywords rather than sentences.
+              ⚠ Can bleed into the transcript or cause invented text. Keep it
+              to a few keywords, or leave it blank. Parakeet ignores it.
             </span>
           </label>
         </div>
       )}
+
+      <KnownTermsCard />
     </>
   );
 }

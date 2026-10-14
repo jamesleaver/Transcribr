@@ -55,8 +55,9 @@ case "$ARCH" in
     *) fail "Unknown arch '$ARCH' (use arm64 or x86_64)" ;;
 esac
 
-VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' transcribr.py | head -1)"
-[ -n "$VERSION" ] || fail "Couldn't read __version__ from transcribr.py"
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' transcribr/version.py \
+    | head -1)"
+[ -n "$VERSION" ] || fail "Couldn't read __version__ from transcribr/version.py"
 [ -f webdist/index.html ] || fail "webdist/index.html is missing - run 'npm ci && npm run build' in web/ first."
 
 say "Building ${BOLD}Transcribr $VERSION${RESET} for $ARCH"
@@ -158,16 +159,46 @@ PY="$RES/python/bin/python3"
 
 say "Installing application libraries and the faster-whisper engine..."
 "$PY" -m pip install --upgrade pip --quiet || fail "Could not bootstrap pip."
+# PyAV first, from the LGPL audio-only wheel macos/build-av-wheel.sh
+# builds, so faster-whisper finds it satisfied and never pulls the stock
+# wheel - whose FFmpeg carries the GPL x264/x265 encoders.
+# pip picks the wheel for this interpreter's arch.
+AV_VERSION="${AV_VERSION:-19.0.0}"
+AV_WHEELS="${AV_WHEELS:-$HOME/Library/Developer/Transcribr-build/wheels}"
+if "$PY" -m pip install --quiet --no-index --find-links "$AV_WHEELS" \
+        "av==$AV_VERSION"; then
+    say "PyAV: the LGPL build from $AV_WHEELS"
+elif [ "${ALLOW_GPL_FFMPEG:-0}" = 1 ]; then
+    say "WARNING: no LGPL PyAV wheel for $ARCH; using the stock (GPL) one."
+else
+    fail "No LGPL PyAV $AV_VERSION wheel for $ARCH in $AV_WHEELS. Build one with ARCH=$ARCH macos/build-av-wheel.sh, or set ALLOW_GPL_FFMPEG=1 for a test build."
+fi
 "$PY" -m pip install --quiet \
     faster-whisper sherpa-onnx python-docx reportlab pywebview bottle \
     || fail "Dependency install failed."
 "$PY" -c "import faster_whisper, bottle, webview, docx, reportlab; print('imports ok')" \
     || fail "The bundled runtime cannot import its own dependencies."
+if [ "${ALLOW_GPL_FFMPEG:-0}" != 1 ]; then
+    "$PY" -c "import av, sys; sys.exit(bool({'libx264', 'libx265'} & set(av.codecs_available)))" \
+        || fail "The bundled FFmpeg has GPL encoders; something replaced the LGPL wheel."
+fi
+# mlx-whisper is deliberately NOT bundled, even though it now fits
+# without PyTorch (~350 MB via --no-deps, see MLX_RUNTIME_DEPS in
+# transcribr/models.py). It would roughly double the download, and
+# faster-whisper is the more accurate engine for the recordings this
+# app is for. It installs in one click from the Models tab, without
+# PyTorch, for anyone who wants its speed.
+"$PY" -c "import importlib.util as u, sys; sys.exit(u.find_spec('torch') is not None)" \
+    || fail "PyTorch is in the bundle; nothing here should pull it in."
+# Notices for exactly what was installed, read from each package's own
+# metadata.
+"$PY" -m transcribr.notices "$RES/THIRD-PARTY-NOTICES.txt" \
+    || fail "Could not write THIRD-PARTY-NOTICES.txt."
 
 # ---- application files ------------------------------------------------------
 
 say "Assembling the app bundle..."
-cp transcribr.py "$RES/"
+cp -R transcribr "$RES/"
 cp -R webdist "$RES/"
 cp macos/app_template/bootstrap.py "$RES/"
 [ -f macos/app_template/icon.icns ] && cp macos/app_template/icon.icns "$RES/"
@@ -297,11 +328,29 @@ pkgbuild --root "$BUILD/root" \
          --install-location "/" \
          "$COMPONENT" || fail "pkgbuild failed."
 
-PRODUCT_ARGS=(--package-path "$BUILD" --version "$VERSION")
+# The installer shows the EULA (made from docs/licence/EULA.md, so
+# it cannot drift from it) and is titled - without a distribution file
+# productbuild shows neither, and `installer` printed "Package name is"
+# with nothing after it.
+RESOURCES="$BUILD/resources"
+mkdir -p "$RESOURCES"
+"$PY" "$REPO_ROOT/tools/eula_text.py" "$RESOURCES/EULA.txt" \
+    || fail "Could not write the EULA for the installer."
+DIST_XML="$BUILD/distribution.xml"
+productbuild --synthesize --package "$COMPONENT" "$DIST_XML" \
+    || fail "productbuild could not describe the package."
+sed -i '' 's#<installer-gui-script \(.*\)>#<installer-gui-script \1>\
+    <title>Transcribr</title>\
+    <license file="EULA.txt"/>#' "$DIST_XML"
+grep -q '<license file="EULA.txt"/>' "$DIST_XML" \
+    || fail "Could not add the EULA to the installer."
+
+PRODUCT_ARGS=(--distribution "$DIST_XML" --resources "$RESOURCES"
+              --package-path "$BUILD" --version "$VERSION")
 if [ "$ADHOC" -eq 0 ]; then
     PRODUCT_ARGS+=(--sign "$SIGN_PKG" --timestamp)
 fi
-productbuild "${PRODUCT_ARGS[@]}" --package "$COMPONENT" "$PKG" \
+productbuild "${PRODUCT_ARGS[@]}" "$PKG" \
     || fail "productbuild failed."
 say "Wrote $PKG ($(du -h "$PKG" | cut -f1))"
 
