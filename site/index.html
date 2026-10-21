@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcribr — transcripts made on your own computer</title>
+<meta name="description" content="Transcribr turns interviews, hearings and other recordings into reviewed, speaker-labelled transcripts. Everything runs on your own computer; nothing is uploaded.">
+<link rel="icon" href="img/icon.png">
+<link rel="stylesheet" href="style.css">
+<script src="downloads.js" defer></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-inner">
+    <a class="brand" href="#">
+      <img src="img/icon.png" alt="" width="28" height="28">
+      <span>Transcribr</span>
+    </a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#how">How to use</a>
+      <a href="#privacy">Privacy</a>
+      <a class="nav-cta" href="#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap">
+    <h1>Transcripts of interviews and hearings,<br>made on your own computer.</h1>
+    <p class="lede">Transcribr turns a recording into a transcript you can check,
+      label and save as a Word document — with the speakers, the timestamps and
+      the parts it was unsure of all in view. Nothing is uploaded.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" id="hero-download" href="#download">Download for free</a>
+      <span class="hint" id="hero-version">macOS and Windows</span>
+    </div>
+    <figure class="hero-shot">
+      <img src="img/review.png" width="1440" height="900"
+           alt="The Transcribr review pane: a transcript with speaker labels, timestamps and the tools panel">
+    </figure>
+  </div>
+</section>
+
+<section id="features" class="band">
+  <div class="wrap">
+    <h2>Made for transcripts that matter</h2>
+    <div class="grid">
+      <article>
+        <h3>Private by design</h3>
+        <p>Speech recognition runs on your computer. Recordings and transcripts
+          never leave it — there is no account and no cloud.</p>
+      </article>
+      <article>
+        <h3>Watch it fill in</h3>
+        <p>The transcript appears as the recording is processed. Start labelling
+          speakers and correcting text before it has finished.</p>
+      </article>
+      <article>
+        <h3>Questions and answers</h3>
+        <p>Switch to a Q&amp;A layout numbered like a record of interview. Choose who
+          asks and who answers; a change of questioner is named.</p>
+      </article>
+      <article>
+        <h3>Honest about doubt</h3>
+        <p>Words the engine was unsure of are shaded, and offered — never forced —
+          as <em>[indistinct]</em>. Hover a marker to see what was heard, and put it back.</p>
+      </article>
+      <article>
+        <h3>Fix a passage</h3>
+        <p>Right-click a paragraph to transcribe it again with a different engine.
+          Split, join and edit without leaving the keyboard.</p>
+      </article>
+      <article>
+        <h3>Documents that file</h3>
+        <p>Save as Word, PDF or text. Choose a plain, court (numbered lines) or
+          record-of-interview layout, and certify the transcript as checked.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How to use it</h2>
+
+    <div class="step">
+      <div class="step-text">
+        <span class="step-n">1</span>
+        <h3>Install</h3>
+        <p>Download the installer for your computer from <a href="#download">below</a>
+          and open it. On a Mac it is signed and notarised by Apple, so it installs
+          like any other app. On Windows, SmartScreen may warn that the installer
+          is new: choose <strong>More info → Run anyway</strong>.</p>
+        <p>The first transcription downloads the speech model it uses (between
+          0.5 and 3 GB, once). After that, Transcribr works offline.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-text">
+        <span class="step-n">2</span>
+        <h3>Choose a recording</h3>
+        <p>Drop an audio or video file onto the window, or click to browse.
+          Pick the <strong>recording type</strong> — police interview, phone call,
+          hearing, meeting, body-worn video or dictation — and Transcribr sets the
+          engine, the number of speakers and how it breaks paragraphs to suit.
+          <strong>Change</strong> shows the detail if you want to adjust it.</p>
+        <p>Drop several files at once to transcribe them as a batch.</p>
+      </div>
+      <figure><img src="img/transcribe.png" width="1440" height="900" loading="lazy"
+        alt="The Transcribe page: a recording chosen and the recording type set to Police interview"></figure>
+    </div>
+
+    <div class="step">
+      <div class="step-text">
+        <span class="step-n">3</span>
+        <h3>Review as it transcribes</h3>
+        <p>Press <strong>Run transcription</strong>. The transcript fills in as the
+          engine works; anything above the grey tail is ready to correct.</p>
+        <p>Select a paragraph and press <kbd>1</kbd>–<kbd>9</kbd> to give it a
+          speaker; name the speakers in the tools panel. Press <kbd>P</kbd> to play
+          the paragraph, <kbd>Enter</kbd> to edit it, and double-click a word to
+          split the paragraph there. <kbd>?</kbd> lists every shortcut.</p>
+      </div>
+      <figure><img src="img/review.png" width="1440" height="900" loading="lazy"
+        alt="Reviewing: speakers labelled and named, a paragraph selected"></figure>
+    </div>
+
+    <div class="step">
+      <div class="step-text">
+        <span class="step-n">4</span>
+        <h3>Check the doubtful parts</h3>
+        <p>Open <strong>Unsure words</strong> and step through the passages the
+          engine was least sure of. Listen, then mark each one
+          <em>[indistinct]</em> or keep the words. A marker remembers what was
+          heard: hover it to see, and <strong>Restore</strong> to put it back.</p>
+        <p>If a whole passage is wrong, right-click it and choose
+          <strong>Re-transcribe</strong>.</p>
+      </div>
+      <figure><img src="img/unsure.png" width="1440" height="900" loading="lazy"
+        alt="An unsure passage outlined, with the options to mark it indistinct or keep the words"></figure>
+    </div>
+
+    <div class="step">
+      <div class="step-text">
+        <span class="step-n">5</span>
+        <h3>Questions and answers</h3>
+        <p>For an interview, switch the layout to <strong>Q &amp; A</strong>. Questions
+          are numbered and answers marked, the way a record of interview reads.
+          Use the <strong>Q</strong> / <strong>A</strong> buttons beside each speaker
+          to say who asks; when someone else takes over the questions, the transcript
+          names them.</p>
+      </div>
+      <figure><img src="img/qa.png" width="1440" height="900" loading="lazy"
+        alt="The Q&amp;A layout: numbered questions, answers, and a second officer named where they take over"></figure>
+    </div>
+
+    <div class="step">
+      <div class="step-text">
+        <span class="step-n">6</span>
+        <h3>Save</h3>
+        <p>Choose the Word layout under <strong>Saved file</strong> — plain, court
+          (every line numbered, double spaced) or record of interview — and press
+          <strong>Save</strong>. The menu beside it saves without speaker labels,
+          as a new revision, or exports a PDF.</p>
+        <p>Once you have checked the transcript against the recording, enter your
+          name under <strong>Verify</strong>: the saved document then says who
+          checked it. Until then it carries a warning that it may not have been
+          checked by a person.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="download" class="band">
+  <div class="wrap">
+    <h2>Download</h2>
+    <p class="lede small" id="release-line">The latest release, free of charge.</p>
+    <div class="downloads">
+      <a class="dl" id="dl-arm64" href="https://github.com/jamesleaver/Transcribr/releases/latest">
+        <span class="dl-os">macOS</span>
+        <span class="dl-what">Apple Silicon (M1 and later)</span>
+        <span class="dl-meta" data-meta></span>
+      </a>
+      <a class="dl" id="dl-x86_64" href="https://github.com/jamesleaver/Transcribr/releases/latest">
+        <span class="dl-os">macOS</span>
+        <span class="dl-what">Intel</span>
+        <span class="dl-meta" data-meta></span>
+      </a>
+      <a class="dl" id="dl-win" href="https://github.com/jamesleaver/Transcribr/releases/latest">
+        <span class="dl-os">Windows</span>
+        <span class="dl-what">Windows 10 and 11, 64-bit</span>
+        <span class="dl-meta" data-meta></span>
+      </a>
+    </div>
+    <p class="note">Not sure which Mac you have? Apple menu → <strong>About This Mac</strong>:
+      “Chip: Apple M…” is Apple Silicon, “Processor: Intel” is Intel.
+      Requires macOS 11 or later; about 3 GB of free space for the speech models.
+      By installing you accept the <a href="eula.html">end-user licence agreement</a>.
+      Earlier versions are on the <a href="https://github.com/jamesleaver/Transcribr/releases">releases page</a>.</p>
+  </div>
+</section>
+
+<section id="privacy">
+  <div class="wrap narrow">
+    <h2>Privacy</h2>
+    <p>Transcribr does its work on your computer. Your recordings and
+      transcripts are never sent to us or to anyone else, and there is no account
+      to create.</p>
+    <p>It connects to the internet for two things only, neither of which carries
+      your recordings or transcripts: downloading a speech model the first time it
+      is used, and checking for updates — which you can turn off in Settings.</p>
+    <p class="note">Transcribr makes machine transcriptions, which can contain
+      mistakes. Check every transcript against the recording before relying on it.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div>
+      <strong>Transcribr</strong> is made by Fisheggs Pty Ltd · ABN 37 702 320 956<br>
+      <a href="mailto:hello@fisheggs.au">hello@fisheggs.au</a>
+    </div>
+    <div class="foot-links">
+      <a href="eula.html">Licence agreement</a>
+      <a href="https://github.com/jamesleaver/Transcribr/releases">All releases</a>
+    </div>
+  </div>
+  <div class="wrap copy">© 2026 Fisheggs Pty Ltd</div>
+</footer>
+
+</body>
+</html>
